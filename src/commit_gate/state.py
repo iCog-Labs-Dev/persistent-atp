@@ -1,9 +1,12 @@
-"""The read contract the gate needs against committed state.
+"""The graph contracts the gate works through.
 
-Four questions: what is this node, what is this edge, what leaves a node, what
-enters it. A graph backend satisfies these four and the validators do not care
-which backend it is. `MemoryView` is the in-process implementation used by
-tests and by replay.
+`ReadView` is four questions about committed state: what is this node, what is
+this edge, what leaves a node, what enters it. Validators take one and do not
+care which backend answers. `WriteView` is the matching contract for changing
+state, and `GraphView` is both — what a projector needs, since applying an op
+means reading the current state before writing the new one.
+
+`MemoryView` is the in-process implementation, used by tests and by replay.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-__all__ = ["NodeRecord", "EdgeRecord", "ReadView", "MemoryView"]
+__all__ = ["NodeRecord", "EdgeRecord", "ReadView", "WriteView", "GraphView", "MemoryView"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,18 +59,82 @@ class ReadView(Protocol):
         ...
 
 
+@runtime_checkable
+class WriteView(Protocol):
+    """The four mutations a projector performs, and its projection mark.
+
+    The mutations mirror the four ops in `ops.py`; only the gate's projector
+    calls them.
+
+    The mark — how far this graph has been brought level with the journal — is
+    kept here rather than with the journal so it cannot outlive the state it
+    describes. An in-memory graph is empty after a restart; a mark that survived
+    in the journal's database would claim that empty graph was level with
+    revision N, and every event up to N would be skipped forever.
+    """
+
+    def add_node(
+        self, node_id: str, label: str, fields: Mapping[str, Any] | None = None
+    ) -> None:
+        """Record a node under `node_id`, replacing any fields given."""
+        ...
+
+    def set_field(self, node_id: str, name: str, value: Any) -> None:
+        """Give `name` exactly one value on an existing node."""
+        ...
+
+    def add_edge(
+        self,
+        rel_type: str,
+        src_id: str,
+        dst_id: str,
+        edge_id: str,
+        fields: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record an edge under `edge_id`."""
+        ...
+
+    def remove_edge(self, edge_id: str) -> None:
+        """Retract the edge under `edge_id`. A no-op if it is not there."""
+        ...
+
+    def projected_revision(self, proof_id: str) -> int:
+        """The last journal revision this graph was brought up to date with."""
+        ...
+
+    def record_projected(self, proof_id: str, revision: int) -> None:
+        """Note that this graph now reflects the journal up to `revision`.
+
+        Called only after the writes for that revision have succeeded, so the
+        mark is never ahead of the state. Must not move backwards.
+        """
+        ...
+
+
+@runtime_checkable
+class GraphView(ReadView, WriteView, Protocol):
+    """A backend that can be both read and written — what a projector takes.
+
+    Applying an op needs both halves: a field is changed by reading what is
+    committed and then replacing it.
+    """
+
+
 @dataclass(slots=True)
 class MemoryView:
-    """A `ReadView` held in dictionaries.
-
-    Mutators are for building fixtures and for replaying a journal in process;
-    the gate itself only ever reads through the `ReadView` methods.
-    """
+    """A `GraphView` held in dictionaries: fixtures, replay, and tests."""
 
     nodes: dict[str, NodeRecord] = field(default_factory=dict)
     edges: dict[str, EdgeRecord] = field(default_factory=dict)
     _out: dict[tuple[str, str], list[str]] = field(default_factory=lambda: defaultdict(list))
     _in: dict[tuple[str, str], list[str]] = field(default_factory=lambda: defaultdict(list))
+    _projected: dict[str, int] = field(default_factory=dict)
+
+    def projected_revision(self, proof_id: str) -> int:
+        return self._projected.get(proof_id, 0)
+
+    def record_projected(self, proof_id: str, revision: int) -> None:
+        self._projected[proof_id] = max(revision, self._projected.get(proof_id, 0))
 
     def add_node(self, node_id: str, label: str, fields: Mapping[str, Any] | None = None) -> None:
         self.nodes[node_id] = NodeRecord(node_id, label, dict(fields or {}))
