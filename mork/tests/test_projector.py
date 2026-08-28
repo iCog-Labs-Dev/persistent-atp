@@ -2,22 +2,16 @@
 test_projector.py — Tests for the MORK projector (journal -> <proof_id>.metta)
 """
 
-import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from projector import project_event_journal, project_journal_to_file
-from projector.writer import DEFAULT_OUTPUT_DIR
+from mork.projector import project_event_journal, project_journal_to_file
+from mork.projector.writer import DEFAULT_OUTPUT_DIR
 
 JOURNAL_PATH = (
     Path(__file__).resolve().parent.parent / "event_journals" / "event_journal.json"
-
-
 )
 
 
@@ -183,7 +177,7 @@ class TestProjectJournalToFile(unittest.TestCase):
 
     def test_default_output_dir_is_mork_proofs(self):
         self.assertEqual(DEFAULT_OUTPUT_DIR.name, "proofs")
-        with patch("projector.writer.DEFAULT_OUTPUT_DIR", self.out_dir):
+        with patch("mork.projector.writer.DEFAULT_OUTPUT_DIR", self.out_dir):
             out_path = project_journal_to_file(JOURNAL_PATH)
         self.assertEqual(out_path.parent, self.out_dir)
 

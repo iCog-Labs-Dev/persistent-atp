@@ -227,5 +227,47 @@ class TestConcurrentWriters(unittest.TestCase):
         self.assertEqual(caught.exception.reason, Reason.JOURNAL_BUSY)
 
 
+class TestJournalReplayReads(unittest.TestCase):
+    """What a projection needs to replay events it has not been told about."""
+
+    def setUp(self):
+        self.store = JournalStore()
+
+    def test_read_events_after_returns_only_later_events(self):
+        self.store.append(payload(base_revision=0))
+        self.store.append(payload(base_revision=1))
+        self.store.append(payload(base_revision=2))
+
+        self.assertEqual(
+            [revision for revision, _ in self.store.read_events_after("p1", 1)], [2, 3]
+        )
+        self.assertEqual(self.store.read_events_after("p1", 3), [])
+
+    def test_read_events_after_zero_returns_everything(self):
+        self.store.append(payload(base_revision=0))
+        self.store.append(payload(base_revision=1))
+        self.assertEqual(
+            [revision for revision, _ in self.store.read_events_after("p1", 0)], [1, 2]
+        )
+
+    def test_read_events_after_carries_the_payload(self):
+        self.store.append(payload(base_revision=0, actor="worker-7"))
+        (_, event), = self.store.read_events_after("p1", 0)
+        self.assertEqual(event["actor"], "worker-7")
+
+    def test_read_events_after_is_scoped_to_one_proof(self):
+        self.store.append(payload(proof_id="p1", base_revision=0))
+        self.store.append(payload(proof_id="p2", base_revision=0))
+        self.assertEqual(len(self.store.read_events_after("p1", 0)), 1)
+
+    def test_proof_ids_lists_every_journalled_proof(self):
+        self.store.append(payload(proof_id="p2", base_revision=0))
+        self.store.append(payload(proof_id="p1", base_revision=0))
+        self.assertEqual(list(self.store.proof_ids()), ["p1", "p2"])
+
+    def test_proof_ids_on_an_empty_journal(self):
+        self.assertEqual(list(self.store.proof_ids()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
