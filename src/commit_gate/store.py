@@ -233,6 +233,29 @@ class JournalStore:
         ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def proof_ids(self) -> Sequence[str]:
+        """Every proof the journal holds events for, in order."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT proof_id FROM journal ORDER BY proof_id"
+        ).fetchall()
+        return [row["proof_id"] for row in rows]
+
+    def read_events_after(
+        self, proof_id: str, revision: int
+    ) -> Sequence[tuple[int, dict[str, Any]]]:
+        """Each `(revision, payload)` past `revision`, in order.
+
+        What a projection replays to catch up.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT revision, payload FROM journal
+            WHERE proof_id = ? AND revision > ? ORDER BY revision ASC
+            """,
+            (proof_id, revision),
+        ).fetchall()
+        return [(row["revision"], json.loads(row["payload"])) for row in rows]
+
     def read_chain(self, proof_id: str) -> Sequence[tuple[int, str, str]]:
         """Every `(revision, event_hash, prev_hash)` for a proof, in order."""
         rows = self._conn.execute(

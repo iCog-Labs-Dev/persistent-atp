@@ -2,11 +2,17 @@
 
 Validates proposed operations against committed state, enforcing all invariant
 rules (schema types, status transitions, subgoal conservation, immutability).
-Accepted proposals are cryptographically chained and appended to a journal.
+Accepted proposals are cryptographically chained and appended to a journal, then
+projected into the graph the next proposal is validated against.
+
+The MORK graph backend lives in ``mork.backend``; import ``MorkView`` and
+``MorkSpace`` from there. See ``mork.backend.ffi`` for how the library is loaded.
 """
 
+from .apply import apply_ops
 from .canon import GENESIS_HASH, chain_hash, content_hash
-from .gate import CommitGate, CommitResult
+from .gate import CommitGate, CommitResult, ProjectionError
+
 from .ops import (
     UNSET,
     AddEdge,
@@ -20,7 +26,14 @@ from .ops import (
 )
 from .proposal import Proposal
 from .reasons import Reason, Rejection
-from .state import EdgeRecord, MemoryView, NodeRecord, ReadView
+from .state import (
+    EdgeRecord,
+    GraphView,
+    MemoryView,
+    NodeRecord,
+    ReadView,
+    WriteView,
+)
 from .store import ConcurrencyError, HashChainError, JournalStore
 from .transitions import IMMUTABLE_FIELDS, STATUS_TRANSITIONS
 from .validate import validate_proposal
@@ -46,7 +59,8 @@ __all__ = [
     # Gate Orchestration
     "CommitGate",
     "CommitResult",
-    
+    "ProjectionError",
+
     # Proposal & Ops
     "Proposal",
     "Op",
@@ -58,17 +72,21 @@ __all__ = [
     "UNSET",
     "op_from_dict",
     "ops_from_dicts",
-    
+
     # Validation & Rejections
     "validate_proposal",
     "Rejection",
     "Reason",
-    
-    # State Read Contract
+
+    # State Contracts
     "ReadView",
+    "WriteView",
+    "GraphView",
     "NodeRecord",
     "EdgeRecord",
     "MemoryView",
+    "apply_ops",
+
 
     # Journal
     "JournalStore",

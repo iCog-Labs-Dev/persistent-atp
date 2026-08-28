@@ -1,6 +1,7 @@
-"""Apply ops to a memory view for replay and local verification.
+"""Apply ops to a graph view for projection and local verification.
 
-Ops are idempotent. Applying an already-applied op leaves the view unchanged.
+Ops are idempotent. Applying an already-applied op leaves the view unchanged,
+so a projection interrupted partway through is repaired by replaying it.
 """
 
 from __future__ import annotations
@@ -8,12 +9,12 @@ from __future__ import annotations
 from typing import Sequence
 
 from .ops import AddEdge, Op, RemoveEdge, SetField, UpsertNode
-from .state import MemoryView
+from .state import GraphView
 
 __all__ = ["apply_ops"]
 
 
-def apply_ops(view: MemoryView, ops: Sequence[Op]) -> None:
+def apply_ops(view: GraphView, ops: Sequence[Op]) -> None:
     """Mutate `view` by applying each op in order.
 
     Raises `ValueError` if a SetField targets a node that does not exist in the
