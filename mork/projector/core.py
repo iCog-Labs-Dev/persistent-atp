@@ -16,6 +16,19 @@ The projector transforms these into normalized atoms with fixed arity:
 !(add-atom &mork (edge "proof_id" "edge_id" "REL" "src_local" "dst_local"))
 !(add-atom &mork (efield "proof_id" "edge_id" "field_name" value))
 
+Reverse-edge index:
+  For every forward edge, a reverse atom is emitted:
+    !(add-atom &mork (rev-edge "proof_id" "dst" "REL" "src" "edge_id"))
+  Reverse edges are first-class generated indexes: they allow O(1) lookups
+  of incoming edges per node without scanning the full edge table.
+
+Layer scoping:
+  Every projected node carries a layer atom:
+    !(add-atom &mork (layer "proof_id" "entity_id" "committed"))
+  Committed atoms may serve as established premises; speculative atoms
+  (Hyperon hypotheses, uncriticized proposals) can affect scheduling but
+  never establish facts.
+
 """
 
 from __future__ import annotations
@@ -167,6 +180,11 @@ class Projector:
             f'!(add-atom &mork (node "{proof_id}" "{local_id}" {sanitize_value(label)}))'
         ]
 
+        # Layer scoping: all event-journal nodes are committed atoms.
+        atoms.append(
+            f'!(add-atom &mork (layer "{proof_id}" "{local_id}" "committed"))'
+        )
+
         # Inject the inferred state reference as a regular field atom
         state_id = self.node_state_map.get(node_id)
         if state_id is not None:
@@ -184,7 +202,15 @@ class Projector:
         return atoms
 
     def _edge_to_atoms(self, edge: Dict[str, Any]) -> List[str]:
-        """Convert an edge to its edge atom plus one efield atom per field."""
+        """Convert an edge to its forward + reverse atoms plus efields.
+
+        Every forward edge atom generates a corresponding reverse-edge atom
+        : the reverse index allows O(1) lookups of incoming
+        edges per node.
+
+        A layer atom is emitted for each edge so edge provenance is
+        independently queryable (§4.2).
+        """
         rel = edge.get("rel", "RELATED")
         src = edge.get("src", "")
         dst = edge.get("dst", "")
@@ -197,8 +223,15 @@ class Projector:
         local_dst = extract_local_id(dst)
 
         atoms = [
+            # Forward edge
             f'!(add-atom &mork (edge "{proof_id}" "{local_edge_id}" '
-            f'{sanitize_value(rel)} "{local_src}" "{local_dst}"))'
+            f'{sanitize_value(rel)} "{local_src}" "{local_dst}"))',
+            # Reverse edge 
+            f'!(add-atom &mork (rev-edge "{proof_id}" "{local_dst}" '
+            f'{sanitize_value(rel)} "{local_src}" "{local_edge_id}"))',
+            # Edge layer
+            f'!(add-atom &mork (layer "{proof_id}" '
+            f'"edge:{local_edge_id}" "committed"))',
         ]
 
         for field_name, value in fields.items():
@@ -255,7 +288,9 @@ def generate_metta_file(commands: List[str], include_queries: bool = True) -> st
     lines.append(';;   (node <proof> <id> <label>)')
     lines.append(';;   (field <proof> <id> <name> <value>)')
     lines.append(';;   (edge <proof> <eid> <rel> <src> <dst>)')
+    lines.append(';;   (rev-edge <proof> <dst> <rel> <src> <eid>)  ;; generated index')
     lines.append(';;   (efield <proof> <eid> <name> <value>)')
+    lines.append(';;   (layer <proof> <entity> <kind>)  ;; committed|speculative')
     lines.append("")
 
     # Add mork space initialization
