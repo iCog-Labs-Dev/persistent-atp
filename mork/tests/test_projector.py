@@ -135,7 +135,7 @@ class TestProjectorCore(unittest.TestCase):
         )
         commands = project_event_journal(journal)
         blob = "\n".join(commands)
-        self.assertEqual(len(commands), 2)  # node atom + 1 field atom
+        self.assertEqual(len(commands), 3)  # node atom + layer atom + 1 field atom
         self.assertIn('(node "test" "s1" "State")', blob)
 
     def test_all_node_atoms_have_uniform_arity(self):
@@ -158,6 +158,85 @@ class TestProjectorCore(unittest.TestCase):
         # The extra field lives in its own atom instead of widening the node
         self.assertIn('(field "test" "s2" "note" "extra")', "\n".join(commands))
 
+    def test_reverse_edge_emitted_for_every_forward_edge(self):
+        """§4.3 / A.7: forward and reverse edge atoms are intentionally
+        duplicated as generated indexes."""
+        journal = make_journal(
+            (1, [
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+            ]),
+        )
+        commands = project_event_journal(journal)
+        blob = "\n".join(commands)
+        self.assertIn(
+            '(edge "test" "e1" "PROPOSES" "s1" "m1")', blob
+        )
+        self.assertIn(
+            '(rev-edge "test" "m1" "PROPOSES" "s1" "e1")', blob
+        )
+
+    def test_reverse_edge_removed_when_forward_retracted(self):
+        """A remove_edge must suppress both forward and reverse atoms."""
+        journal = make_journal(
+            (1, [
+                {"op": "add_edge", "rel": "DEPENDS_ON", "src": "test/c2",
+                 "dst": "test/c1", "edge_id": "test/e1"},
+            ]),
+            (2, [{"op": "remove_edge", "edge_id": "test/e1"}]),
+        )
+        commands = project_event_journal(journal)
+        blob = "\n".join(commands)
+        self.assertNotIn('(edge "test" "e1"', blob)
+        self.assertNotIn('(rev-edge "test" "c1" "DEPENDS_ON" "c2" "e1")', blob)
+
+    def test_layer_atom_emitted_for_every_node(self):
+        """§4.2 / §8.2: every projected node carries a layer atom."""
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Claim", "id": "test/c1",
+                 "fields": {"statement": "S", "status": "conjectural"}},
+            ]),
+        )
+        commands = project_event_journal(journal)
+        blob = "\n".join(commands)
+        self.assertIn(
+            '(layer "test" "c1" "committed")', blob
+        )
+
+    def test_layer_atom_emitted_for_every_edge(self):
+        """§4.2 / §8.2: edges also carry independent layer atoms."""
+        journal = make_journal(
+            (1, [
+                {"op": "add_edge", "rel": "SUPPORTED_BY", "src": "test/s1",
+                 "dst": "test/c1", "edge_id": "test/e1"},
+            ]),
+        )
+        commands = project_event_journal(journal)
+        blob = "\n".join(commands)
+        self.assertIn(
+            '(layer "test" "edge:e1" "committed")', blob
+        )
+
+    def test_move_inferred_state_id_preserved_with_reverse_edge(self):
+        """state_id inference still works when reverse edges are present."""
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Move", "id": "test/m1",
+                 "fields": {"summary": "s", "status": "open"}},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+            ]),
+        )
+        commands = project_event_journal(journal)
+        blob = "\n".join(commands)
+        self.assertIn(
+            '(field "test" "m1" "state_id" "s1")', blob
+        )
+        self.assertIn(
+            '(rev-edge "test" "m1" "PROPOSES" "s1" "e1")', blob
+        )
+
 
 class TestProjectJournalToFile(unittest.TestCase):
     """End-to-end: real journal -> .metta file named after the proof."""
@@ -174,12 +253,20 @@ class TestProjectJournalToFile(unittest.TestCase):
         content = out_path.read_text(encoding="utf-8")
 
         add_atoms = [l for l in content.splitlines() if l.startswith("!(add-atom")]
-        # 4 nodes + 13 field atoms (incl. inferred state_id) + 4 edges
-        self.assertEqual(len(add_atoms), 21)
+        # 4 nodes + 4 layer atoms (nodes) + 13 field atoms (incl. inferred state_id)
+        # + 4 edges + 4 reverse edges + 4 edge layer atoms + 4 efield atoms = 33
+        self.assertEqual(len(add_atoms), 33)
 
         self.assertIn("!(mm2-exec &mork 1)", content)
         self.assertIn('(node "even-sum-proof" "s1" "State")', content)
         self.assertIn('(edge "even-sum-proof" "e2" "PROPOSES" "s1" "m1")', content)
+        # Reverse edge emitted for every forward edge (§4.3 / A.7)
+        self.assertIn(
+            '(rev-edge "even-sum-proof" "m1" "PROPOSES" "s1" "e2")', content
+        )
+        # Layer scoping (§4.2 / §8.2)
+        self.assertIn('(layer "even-sum-proof" "s1" "committed")', content)
+        self.assertIn('(layer "even-sum-proof" "edge:e2" "committed")', content)
 
     def test_default_output_dir_is_mork_proofs(self):
         self.assertEqual(DEFAULT_OUTPUT_DIR.name, "proofs")
