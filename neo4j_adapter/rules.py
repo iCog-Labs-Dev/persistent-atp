@@ -77,7 +77,7 @@ class RulesMixin:
         return self._read_value(
             "move_is_complete",
             "MATCH (m:Move {proof_id: $pid, id: $mid})-[:REQUIRES]->(sg:State {proof_id: $pid}) "
-            "WHERE sg.status <> $closed AND sg.status <> $reopened "
+            "WHERE sg.status <> $closed "
             "RETURN count(sg) AS open_subgoals",
             {
                 "pid": proof_id, "mid": move_id,
