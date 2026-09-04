@@ -4,7 +4,7 @@
 ;;   EligibleFrontier = (Open ∪ Reopened) − (Leased ∪ Refuted ∪ Dominated ∪
 ;;   Exhausted) 
 ;; Section 3  — AND/OR closure
-.
+
 ;; 2.1 Field existence check (returns True when the base atom is present)
 (=(has-field? $p $id $name $value)
   (if (== (collapse (match &mork (field $p $id $name $value) True)) ())
