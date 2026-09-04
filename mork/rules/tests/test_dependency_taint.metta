@@ -1,7 +1,7 @@
 ;; test_dependency_taint.metta — Tests for Sections 4-5: reachability and taint
 
-!(import! &self ../rules/frontier)
-!(import! &self ../rules/dependency-taint)
+!(import! &self ../frontier)
+!(import! &self ../dependency-taint)
 
 !(mm2-exec &mork 1)
 

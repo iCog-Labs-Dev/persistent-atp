@@ -1,6 +1,6 @@
 ;; test_frontier.metta — Tests for Sections 2-3: eligible frontier and closure
 
-!(import! &self ../rules/frontier)
+!(import! &self ../frontier)
 
 !(mm2-exec &mork 1)
 

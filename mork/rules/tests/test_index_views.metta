@@ -1,6 +1,6 @@
 ;; test_index_views.metta — Tests for Section 1: reverse index views
 
-!(import! &self ../rules/index_views)
+!(import! &self ../index_views)
 !(mm2-exec &mork 1)
 !(import! &self ./test_graph.metta)
 

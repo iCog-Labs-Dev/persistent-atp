@@ -1,6 +1,6 @@
 ;; test_projections.metta — Tests for Sections 6-7: routes and transposition
 
-!(import! &self ../rules/projections)
+!(import! &self ../projections)
 
 !(mm2-exec &mork 1)
 

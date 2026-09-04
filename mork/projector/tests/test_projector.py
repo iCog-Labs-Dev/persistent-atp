@@ -9,13 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from projector import project_event_journal, project_journal_to_file
 from projector.writer import DEFAULT_OUTPUT_DIR
 
 JOURNAL_PATH = (
-    Path(__file__).resolve().parent.parent / "event_journals" / "event_journal.json"
+    Path(__file__).resolve().parents[2] / "event_journals" / "event_journal.json"
 
 
 )
