@@ -272,114 +272,21 @@ def project_from_file(filepath: str) -> List[str]:
     return project_event_journal(journal_data)
 
 
-def generate_metta_file(commands: List[str], include_queries: bool = True) -> str:
-    """
-    Generate a .metta file content from MORK commands.
-
-    Args:
-        commands: List of MORK atom commands
-        include_queries: Whether to include standard query templates
-
-    Returns:
-        A string containing the .metta file content
-    """
-    lines = [";; Auto-generated MORK atoms from event journal", ""]
-    lines.append(";; Schema:")
-    lines.append(';;   (node <proof> <id> <label>)')
-    lines.append(';;   (field <proof> <id> <name> <value>)')
-    lines.append(';;   (edge <proof> <eid> <rel> <src> <dst>)')
-    lines.append(';;   (rev-edge <proof> <dst> <rel> <src> <eid>)  ;; generated index')
-    lines.append(';;   (efield <proof> <eid> <name> <value>)')
-    lines.append(';;   (layer <proof> <entity> <kind>)  ;; committed|speculative')
-    lines.append("")
-
-    # Add mork space initialization
-    lines.append(";; Initialize MORK space")
-    lines.append("!(mm2-exec &mork 1)")
-    lines.append("")
-
-    for cmd in commands:
-        lines.append(cmd)
-
-    lines.append("")
-
-    # Add standard query templates
-    if include_queries:
-        lines.append("")
-        lines.append(";; ============================================")
-        lines.append(";; QUERY SECTION: Match patterns for querying proof data")
-        lines.append(";; ============================================")
-        lines.append("")
-        lines.extend(generate_query_templates())
-
-    return "\n".join(lines)
-
-
-def generate_query_templates() -> List[str]:
-    """
-    Generate standard MORK match query templates for proof data.
-
-    These queries provide easy access to common proof information:
-    - Open states
-    - Claims and their status
-    - Moves and their kind
-    - Attempts and their workers
-    - Edge relationships
-    - Complete proof graph summary
-
-    Returns:
-        A list of MORK query command strings
-    """
-    queries = [
-        # Query 1: Find all open states
-        ';; Query 1: Find all open states',
-        '!(match &mork',
-        '  (, (node $proof $sid "State")',
-        '     (field $proof $sid "status" "open"))',
-        '  (open-state $proof $sid))',
-        '',
-        # Query 2: Find all claims and their status
-        ';; Query 2: Find all claims and their status',
-        '!(match &mork',
-        '  (, (node $proof $cid "Claim")',
-        '     (field $proof $cid "statement" $stmt)',
-        '     (field $proof $cid "status" $status))',
-        '  (claim-info $proof $cid $stmt $status))',
-        '',
-        # Query 3: Find all moves and their kind
-        ';; Query 3: Find all moves and their kind',
-        '!(match &mork',
-        '  (, (node $proof $mid "Move")',
-        '     (field $proof $mid "state_id" $state)',
-        '     (field $proof $mid "status" $status)',
-        '     (field $proof $mid "kind" $kind)',
-        '     (field $proof $mid "summary" $summary))',
-        '  (move-info $proof $mid $state $status $kind $summary))',
-        '',
-        # Query 4: Find all attempts and their workers
-        ';; Query 4: Find all attempts and their workers',
-        '!(match &mork',
-        '  (, (node $proof $aid "Attempt")',
-        '     (field $proof $aid "state_id" $state)',
-        '     (field $proof $aid "worker" $worker)',
-        '     (field $proof $aid "move_summary" $summary))',
-        '  (attempt-info $proof $aid $state $worker $summary))',
-        '',
-        # Query 5: Find all edges
-        ';; Query 5: Find all edges',
-        '!(match &mork',
-        '  (edge $proof $eid $rel $src $dst)',
-        '  (edge-info $eid $rel $src $dst))',
-        '',
-        # Query 6: Find supported attempts (completed work)
-        ';; Query 6: Find supported attempts (completed work)',
-        '!(match &mork',
-        '  (, (node $proof $aid "Attempt")',
-        '     (field $proof $aid "status" "supported")',
-        '     (field $proof $aid "worker" $worker)',
-        '     (field $proof $aid "move_summary" $summary))',
-        '  (supported-attempt $proof $aid $worker $summary))',
-        '',
-       
+def generate_metta_file(commands: List[str]) -> str:
+    """Generate a .metta file content from MORK atom commands."""
+    lines = [
+        ";; Auto-generated MORK atoms from event journal",
+        ";;",
+        ";; Schema:",
+        ';;   (node <proof> <id> <label>)',
+        ';;   (field <proof> <id> <name> <value>)',
+        ';;   (edge <proof> <eid> <rel> <src> <dst>)',
+        ';;   (rev-edge <proof> <dst> <rel> <src> <eid>)',
+        ';;   (efield <proof> <eid> <name> <value>)',
+        ';;   (layer <proof> <entity> <kind>)',
+        "",
+        "!(mm2-exec &mork 1)",
+        "",
     ]
-    return queries
+    lines.extend(commands)
+    return "\n".join(lines)
