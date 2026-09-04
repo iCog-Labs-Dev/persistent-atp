@@ -133,7 +133,7 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
     "LeanReplay": frozenset( {"actor", "replayed_at", "status", "rejection_reason", "sorry_detected"} ),
     "Obstruction": frozenset({"kind", "description", "actor"}),
     "Proof": frozenset({"actor"}),
-    "Alignment": frozenset({"actor", "verdict"}),
+    "Alignment": frozenset({"actor"}),
     "Attempt": frozenset({"actor", "worker_class"}),
     "Environment": frozenset({"toolchain", "lake_manifest_hash", "mathlib_commit"}),
     "FormalCheckpoint": frozenset({"epoch_ms", "actor"}),

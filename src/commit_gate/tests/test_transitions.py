@@ -1,6 +1,6 @@
 import unittest
 
-from commit_gate.transitions import STATUS_TRANSITIONS
+from commit_gate.transitions import IMMUTABLE_FIELDS, STATUS_TRANSITIONS
 from commit_gate.validate import ENUM_FIELDS
 
 class TestTransitions(unittest.TestCase):
@@ -36,6 +36,16 @@ class TestTransitions(unittest.TestCase):
         ]
         for t in terminals:
             self.assertEqual(table[t], frozenset())
+    def test_alignment_verdict_is_not_immutable(self):
+        """ verdict must be settable at review time, so a reviewer
+        can record their conclusion instead of it being baked in at
+        creation, before any review happens."""
+        self.assertNotIn("verdict", IMMUTABLE_FIELDS["Alignment"])
+ 
+    def test_alignment_actor_is_still_immutable(self):
+        """Only verdict was the bug; actor -- who created the record --
+        stays frozen, consistent with the other eight labels."""
+        self.assertIn("actor", IMMUTABLE_FIELDS["Alignment"])
 
 if __name__ == "__main__":
     unittest.main()

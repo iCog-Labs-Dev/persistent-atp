@@ -336,7 +336,6 @@ class Findings(unittest.TestCase):
         proposal = propose(state("p17/fs2"), state("p22/fs3"))
         findings = validate_proposal(proposal)
         self.assertEqual([f.op_index for f in findings], [1])
-
-
+ 
 if __name__ == "__main__":
     unittest.main()

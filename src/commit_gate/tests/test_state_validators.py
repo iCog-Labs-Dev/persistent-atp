@@ -309,6 +309,89 @@ class TestSoundnessGates(unittest.TestCase):
  
         proposal = propose(self._promote_claim())
         self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.validate(proposal))
+
+
+    # Test for --- Alignment.verdict must be settable at review time -------
+ 
+    def test_reviewer_can_record_verdict_when_lifecycle_is_review_needed(self):
+        """The bug: verdict was immutable, so it could only ever be set at
+        Alignment creation -- before any review happened. A reviewer must be
+        able to set it at the point they actually reach a conclusion."""
+        self.view.add_node(
+            "p1/align1", "Alignment",
+            {"actor": "reviewer-1", "lifecycle": "review-needed", "verdict": None},
+        )
+        proposal = propose(
+            SetField("Alignment", "p1/align1", "verdict", "aligned", prior=None)
+        )
+        self.assertEqual(self.validate(proposal), [])
+ 
+    def test_verdict_recorded_at_review_step_satisfies_the_alignment_gate(self):
+        """End to end: draft -> review-needed -> reviewed, with the verdict
+        set at the review step (not baked in at creation), must be enough
+        to satisfy check_alignment_gate for a real promotion."""
+        self.view.add_node(
+            "p1/align1", "Alignment",
+            {"actor": "reviewer-1", "lifecycle": "review-needed", "verdict": None},
+        )
+        self.view.add_edge("ALIGNS_CLAIM", "p1/align1", "p1/claim1", "p1/e1")
+        self.view.add_node("p1/cert1", "Certificate", {"actor": "producer"})
+        self.view.add_node(
+            "p1/replay1", "LeanReplay",
+            {"actor": "checker", "status": "verified", "sorry_detected": False},
+        )
+        self.view.add_edge("PROVED_BY", "p1/claim1", "p1/cert1", "p1/e2")
+        self.view.add_edge("REPLAYED_BY", "p1/cert1", "p1/replay1", "p1/e3")
+ 
+        review = propose(
+            SetField("Alignment", "p1/align1", "lifecycle", "reviewed", prior="review-needed"),
+            SetField("Alignment", "p1/align1", "verdict", "aligned", prior=None),
+        )
+        self.assertEqual(self.validate(review), [])
+        self.view.set_field("p1/align1", "lifecycle", "reviewed")
+        self.view.set_field("p1/align1", "verdict", "aligned")
+ 
+        promotion = propose(self._promote_claim())
+        self.assertEqual(self.validate(promotion), [])
+ 
+    def test_alignment_actor_remains_immutable_after_the_verdict_fix(self):
+        self.view.add_node(
+            "p1/align1", "Alignment",
+            {"actor": "reviewer-1", "lifecycle": "review-needed", "verdict": None},
+        )
+        proposal = propose(
+            SetField("Alignment", "p1/align1", "actor", "someone-else", prior="reviewer-1")
+        )
+        self.assertIn(Reason.IMMUTABLE_FIELD_OVERWRITE, self.validate(proposal))
+    
+    def test_verdict_setfield_without_a_lease_is_rejected(self):
+        """op_class classifies any field ending in 'verdict' as status-class
+        (ops.py), which check_concurrency_tokens requires a lease and
+        fencing token for. This must hold specifically for Alignment.verdict,
+        not just for the generic case."""
+        from dataclasses import replace
+        self.view.add_node(
+            "p1/align1", "Alignment",
+            {"actor": "reviewer-1", "lifecycle": "review-needed", "verdict": None},
+        )
+        proposal = replace(
+            propose(SetField("Alignment", "p1/align1", "verdict", "aligned", prior=None)),
+            lease_id=None, fencing_token=None,
+        )
+        self.assertIn(Reason.MISSING_CONCURRENCY_TOKEN, self.validate(proposal))
+ 
+    def test_verdict_outside_the_enum_is_still_rejected(self):
+        """ENUM_FIELDS[("Alignment", "verdict")] must still enforce
+        AlignmentVerdict now that the field is actually reachable via
+        SetField."""
+        self.view.add_node(
+            "p1/align1", "Alignment",
+            {"actor": "reviewer-1", "lifecycle": "review-needed", "verdict": None},
+        )
+        proposal = propose(
+            SetField("Alignment", "p1/align1", "verdict", "not-a-real-verdict", prior=None)
+        )
+        self.assertIn(Reason.UNKNOWN_STATUS_VALUE, self.validate(proposal))
  
 
 
