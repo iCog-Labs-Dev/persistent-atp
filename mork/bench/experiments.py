@@ -78,10 +78,10 @@ def e1_cross_proof(report: Report, quick: bool) -> None:
     background_nodes = 0
     background_proofs = 0
 
-    for target_nodes in rounds:
+    for wanted_background in rounds:
         # Each round continues the proof numbering rather than restarting it, so
         # the space really does grow by what the round claims to add.
-        added = (target_nodes - background_nodes) // _BG_NODES_EACH
+        added = (wanted_background - background_nodes) // _BG_NODES_EACH
         if added > 0:
             load(
                 space,

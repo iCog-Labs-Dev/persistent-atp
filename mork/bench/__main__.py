@@ -69,7 +69,9 @@ def main(argv: list[str] | None = None) -> int:
         "--quick", action="store_true", help="smaller sizes, for a fast check"
     )
     parser.add_argument(
-        "--json", metavar="PATH", help="write rows as JSON; '-' means stdout"
+        "--json",
+        metavar="PATH",
+        help="write rows as JSON; '-' means stdout, and the table moves to stderr",
     )
     parser.add_argument(
         "--in-process",
@@ -91,12 +93,17 @@ def main(argv: list[str] | None = None) -> int:
     names = args.experiment or sorted(EXPERIMENTS)
     collected = Report()
 
-    print(f"MORK backend benchmark{' (quick)' if args.quick else ''}")
-    print("one process per experiment; the space cannot be emptied\n")
+    # With `--json -` stdout must hold the JSON document and nothing else, or a
+    # caller redirecting it gets a file that will not parse. The progress lines
+    # and the table are for a human either way, so they move to stderr.
+    log = sys.stderr if args.json == "-" else sys.stdout
+
+    print(f"MORK backend benchmark{' (quick)' if args.quick else ''}", file=log)
+    print("one process per experiment; the space cannot be emptied\n", file=log)
 
     for name in names:
         title, _ = EXPERIMENTS[name]
-        print(f"{name}  {title} ... ", end="", flush=True)
+        print(f"{name}  {title} ... ", end="", flush=True, file=log)
         try:
             produced = _run_child(name, args.quick)
         except ChildFailed as exc:
@@ -104,17 +111,17 @@ def main(argv: list[str] | None = None) -> int:
             return exc.code if exc.code == _EX_UNAVAILABLE else _EX_SOFTWARE
         for row in produced:
             collected.add(Row(**row))
-        print(f"{len(produced)} rows")
+        print(f"{len(produced)} rows", file=log)
 
-    print()
-    print(collected.render())
+    print(file=log)
+    print(collected.render(), file=log)
 
     if args.json == "-":
-        print(f"\n{collected.to_json()}")
+        print(collected.to_json())
     elif args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             handle.write(collected.to_json())
-        print(f"\nwrote {len(collected.rows)} rows to {args.json}")
+        print(f"\nwrote {len(collected.rows)} rows to {args.json}", file=log)
 
     return 0
 

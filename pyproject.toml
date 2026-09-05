@@ -27,4 +27,5 @@ include = ["commit_gate*", "mork*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
+# `mork/bench` is deliberately absent: it spawns subprocesses and times them.
 testpaths = ["src/commit_gate/tests", "src/shared/tests", "mork/tests"]

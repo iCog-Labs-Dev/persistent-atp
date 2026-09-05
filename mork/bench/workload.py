@@ -40,6 +40,7 @@ __all__ = [
 _LABEL = "FormalState"
 _KINDS = ("or", "and", "goal")
 _WORKER = "llm-research"
+_BATCH = 2000  # atoms per `add`, so bulk load costs one crossing per 2,000
 
 
 def seeded(seed: int = 20260902) -> random.Random:
@@ -146,22 +147,18 @@ def proposals(
     return built
 
 
-def load(space: MorkSpace, sexprs: Iterable[str], batch: int = 2000) -> int:
-    """Add many atoms in batches; return how many were added.
+def load(space: MorkSpace, sexprs: Iterable[str]) -> None:
+    """Add every atom in `sexprs` to the space, one FFI crossing per batch.
 
-    `MorkSpace.add` joins its arguments with newlines into one payload, so a
-    batch is one crossing. Batched rather than unbounded because the whole
-    payload is built as a single string first.
+    `MorkSpace.add` joins its arguments with newlines into a single payload, so a
+    batch costs one crossing. Batched rather than unbounded because that payload
+    is built as one string in memory first.
     """
-    total = 0
     pending: list[str] = []
     for sexpr in sexprs:
         pending.append(sexpr)
-        if len(pending) >= batch:
+        if len(pending) >= _BATCH:
             space.add(*pending)
-            total += len(pending)
             pending.clear()
     if pending:
         space.add(*pending)
-        total += len(pending)
-    return total

@@ -1,6 +1,6 @@
 # MORK backend benchmark
 
-What the live MORK space costs, measured rather than guessed.
+What the live MORK space costs.
 
 The question that prompted this: MORK keeps **one space per process**, behind a
 Rust `OnceLock`, holding every proof at once, with no command to empty it. If a
