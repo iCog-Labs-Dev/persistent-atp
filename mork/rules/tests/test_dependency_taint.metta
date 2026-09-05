@@ -24,78 +24,78 @@
 ;; =========================================================================
 
 ;; Additional claims
-!(add-atom &mork (node "section1" "c3" "Claim"))
-!(add-atom &mork (layer "section1" "c3" "committed"))
-!(add-atom &mork (node "section1" "c4" "Claim"))
-!(add-atom &mork (layer "section1" "c4" "committed"))
-!(add-atom &mork (node "section1" "c5" "Claim"))
-!(add-atom &mork (layer "section1" "c5" "committed"))
-!(add-atom &mork (node "section1" "c6" "Claim"))
-!(add-atom &mork (layer "section1" "c6" "committed"))
-!(add-atom &mork (node "section1" "c7" "Claim"))
-!(add-atom &mork (layer "section1" "c7" "committed"))
+!(add-atom &mork (node "test-proof" "c3" "Claim"))
+!(add-atom &mork (layer "test-proof" "c3" "committed"))
+!(add-atom &mork (node "test-proof" "c4" "Claim"))
+!(add-atom &mork (layer "test-proof" "c4" "committed"))
+!(add-atom &mork (node "test-proof" "c5" "Claim"))
+!(add-atom &mork (layer "test-proof" "c5" "committed"))
+!(add-atom &mork (node "test-proof" "c6" "Claim"))
+!(add-atom &mork (layer "test-proof" "c6" "committed"))
+!(add-atom &mork (node "test-proof" "c7" "Claim"))
+!(add-atom &mork (layer "test-proof" "c7" "committed"))
 
 ;; Claim statuses
-!(add-atom &mork (field "section1" "c5" "status" "refuted"))
+!(add-atom &mork (field "test-proof" "c5" "status" "refuted"))
 
 ;; DEPENDS_ON edges: c2 depends on c1
-!(add-atom &mork (edge "section1" "e20" "DEPENDS_ON" "c2" "c1"))
-!(add-atom &mork (rev-edge "section1" "c1" "DEPENDS_ON" "c2" "e20"))
-!(add-atom &mork (layer "section1" "edge:e20" "committed"))
+!(add-atom &mork (edge "test-proof" "e20" "DEPENDS_ON" "c2" "c1"))
+!(add-atom &mork (rev-edge "test-proof" "c1" "DEPENDS_ON" "c2" "e20"))
+!(add-atom &mork (layer "test-proof" "edge:e20" "committed"))
 
 ;; DEPENDS_ON edges: c3 depends on c2
-!(add-atom &mork (edge "section1" "e21" "DEPENDS_ON" "c3" "c2"))
-!(add-atom &mork (rev-edge "section1" "c2" "DEPENDS_ON" "c3" "e21"))
-!(add-atom &mork (layer "section1" "edge:e21" "committed"))
+!(add-atom &mork (edge "test-proof" "e21" "DEPENDS_ON" "c3" "c2"))
+!(add-atom &mork (rev-edge "test-proof" "c2" "DEPENDS_ON" "c3" "e21"))
+!(add-atom &mork (layer "test-proof" "edge:e21" "committed"))
 
 ;; DEPENDS_ON edges: c4 depends on c3
-!(add-atom &mork (edge "section1" "e22" "DEPENDS_ON" "c4" "c3"))
-!(add-atom &mork (rev-edge "section1" "c3" "DEPENDS_ON" "c4" "e22"))
-!(add-atom &mork (layer "section1" "edge:e22" "committed"))
+!(add-atom &mork (edge "test-proof" "e22" "DEPENDS_ON" "c4" "c3"))
+!(add-atom &mork (rev-edge "test-proof" "c3" "DEPENDS_ON" "c4" "e22"))
+!(add-atom &mork (layer "test-proof" "edge:e22" "committed"))
 
 ;; DEPENDS_ON edges: c6 depends on c5
-!(add-atom &mork (edge "section1" "e23" "DEPENDS_ON" "c6" "c5"))
-!(add-atom &mork (rev-edge "section1" "c5" "DEPENDS_ON" "c6" "e23"))
-!(add-atom &mork (layer "section1" "edge:e23" "committed"))
+!(add-atom &mork (edge "test-proof" "e23" "DEPENDS_ON" "c6" "c5"))
+!(add-atom &mork (rev-edge "test-proof" "c5" "DEPENDS_ON" "c6" "e23"))
+!(add-atom &mork (layer "test-proof" "edge:e23" "committed"))
 
 ;; DEPENDS_ON edges: c7 depends on c6
-!(add-atom &mork (edge "section1" "e24" "DEPENDS_ON" "c7" "c6"))
-!(add-atom &mork (rev-edge "section1" "c6" "DEPENDS_ON" "c7" "e24"))
-!(add-atom &mork (layer "section1" "edge:e24" "committed"))
+!(add-atom &mork (edge "test-proof" "e24" "DEPENDS_ON" "c7" "c6"))
+!(add-atom &mork (rev-edge "test-proof" "c6" "DEPENDS_ON" "c7" "e24"))
+!(add-atom &mork (layer "test-proof" "edge:e24" "committed"))
 
 ;; Additional states
-!(add-atom &mork (node "section1" "s2" "State"))
-!(add-atom &mork (layer "section1" "s2" "committed"))
-!(add-atom &mork (node "section1" "s3" "State"))
-!(add-atom &mork (layer "section1" "s3" "committed"))
-!(add-atom &mork (node "section1" "s4" "State"))
-!(add-atom &mork (layer "section1" "s4" "committed"))
+!(add-atom &mork (node "test-proof" "s2" "State"))
+!(add-atom &mork (layer "test-proof" "s2" "committed"))
+!(add-atom &mork (node "test-proof" "s3" "State"))
+!(add-atom &mork (layer "test-proof" "s3" "committed"))
+!(add-atom &mork (node "test-proof" "s4" "State"))
+!(add-atom &mork (layer "test-proof" "s4" "committed"))
 
 ;; State statuses
-!(add-atom &mork (field "section1" "s1" "status" "formally-closed"))
-!(add-atom &mork (field "section1" "s2" "status" "formally-closed"))
-!(add-atom &mork (field "section1" "s3" "status" "open"))
-!(add-atom &mork (field "section1" "s4" "status" "formally-closed"))
+!(add-atom &mork (field "test-proof" "s1" "status" "formally-closed"))
+!(add-atom &mork (field "test-proof" "s2" "status" "formally-closed"))
+!(add-atom &mork (field "test-proof" "s3" "status" "open"))
+!(add-atom &mork (field "test-proof" "s4" "status" "formally-closed"))
 
 ;; USES_CLAIM edges: s1 uses c6
-!(add-atom &mork (edge "section1" "e25" "USES_CLAIM" "s1" "c6"))
-!(add-atom &mork (rev-edge "section1" "c6" "USES_CLAIM" "s1" "e25"))
-!(add-atom &mork (layer "section1" "edge:e25" "committed"))
+!(add-atom &mork (edge "test-proof" "e25" "USES_CLAIM" "s1" "c6"))
+!(add-atom &mork (rev-edge "test-proof" "c6" "USES_CLAIM" "s1" "e25"))
+!(add-atom &mork (layer "test-proof" "edge:e25" "committed"))
 
 ;; USES_CLAIM edges: s2 uses c7
-!(add-atom &mork (edge "section1" "e26" "USES_CLAIM" "s2" "c7"))
-!(add-atom &mork (rev-edge "section1" "c7" "USES_CLAIM" "s2" "e26"))
-!(add-atom &mork (layer "section1" "edge:e26" "committed"))
+!(add-atom &mork (edge "test-proof" "e26" "USES_CLAIM" "s2" "c7"))
+!(add-atom &mork (rev-edge "test-proof" "c7" "USES_CLAIM" "s2" "e26"))
+!(add-atom &mork (layer "test-proof" "edge:e26" "committed"))
 
 ;; USES_CLAIM edges: s3 uses c6
-!(add-atom &mork (edge "section1" "e27" "USES_CLAIM" "s3" "c6"))
-!(add-atom &mork (rev-edge "section1" "c6" "USES_CLAIM" "s3" "e27"))
-!(add-atom &mork (layer "section1" "edge:e27" "committed"))
+!(add-atom &mork (edge "test-proof" "e27" "USES_CLAIM" "s3" "c6"))
+!(add-atom &mork (rev-edge "test-proof" "c6" "USES_CLAIM" "s3" "e27"))
+!(add-atom &mork (layer "test-proof" "edge:e27" "committed"))
 
 ;; USES_CLAIM edges: s4 uses c1
-!(add-atom &mork (edge "section1" "e28" "USES_CLAIM" "s4" "c1"))
-!(add-atom &mork (rev-edge "section1" "c1" "USES_CLAIM" "s4" "e28"))
-!(add-atom &mork (layer "section1" "edge:e28" "committed"))
+!(add-atom &mork (edge "test-proof" "e28" "USES_CLAIM" "s4" "c1"))
+!(add-atom &mork (rev-edge "test-proof" "c1" "USES_CLAIM" "s4" "e28"))
+!(add-atom &mork (layer "test-proof" "edge:e28" "committed"))
 
 
 ;; =========================================================================
@@ -104,17 +104,17 @@
 
 ;; c2 directly depends on c1
 !(test
-   (direct-depends? "section1" "c2" "c1")
+   (direct-depends? "test-proof" "c2" "c1")
    True)
 
 ;; c1 does NOT depend on c2 (wrong direction)
 !(test
-   (direct-depends? "section1" "c1" "c2")
+   (direct-depends? "test-proof" "c1" "c2")
    False)
 
 ;; c3 does NOT directly depend on c1 (it depends on c2)
 !(test
-   (direct-depends? "section1" "c3" "c1")
+   (direct-depends? "test-proof" "c3" "c1")
    False)
 
 
@@ -124,51 +124,51 @@
 
 ;; Base case: every claim reaches itself
 !(test
-   (reaches? "section1" "c1" "c1")
+   (reaches? "test-proof" "c1" "c1")
    True)
 
 !(test
-   (reaches? "section1" "c5" "c5")
+   (reaches? "test-proof" "c5" "c5")
    True)
 
 ;; Direct dependency
 !(test
-   (reaches? "section1" "c2" "c1")
+   (reaches? "test-proof" "c2" "c1")
    True)
 
 ;; Transitive dependency (2 hops: c3 → c2 → c1)
 !(test
-   (reaches? "section1" "c3" "c1")
+   (reaches? "test-proof" "c3" "c1")
    True)
 
 ;; Transitive dependency (3 hops: c4 → c3 → c2 → c1)
 !(test
-   (reaches? "section1" "c4" "c1")
+   (reaches? "test-proof" "c4" "c1")
    True)
 
 ;; Wrong direction: c1 does NOT reach c4
 !(test
-   (reaches? "section1" "c1" "c4")
+   (reaches? "test-proof" "c1" "c4")
    False)
 
 ;; Direct dependency in chain 2
 !(test
-   (reaches? "section1" "c6" "c5")
+   (reaches? "test-proof" "c6" "c5")
    True)
 
 ;; Transitive dependency in chain 2 (c7 → c6 → c5)
 !(test
-   (reaches? "section1" "c7" "c5")
+   (reaches? "test-proof" "c7" "c5")
    True)
 
 ;; Cross-chain: c5 does NOT reach c1 (different chains)
 !(test
-   (reaches? "section1" "c5" "c1")
+   (reaches? "test-proof" "c5" "c1")
    False)
 
 ;; Cross-chain: c7 does NOT reach c1
 !(test
-   (reaches? "section1" "c7" "c1")
+   (reaches? "test-proof" "c7" "c1")
    False)
 
 
@@ -177,25 +177,25 @@
 ;; =========================================================================
 
 !(test
-   (collapse (deps-of "section1" "c3"))
+   (collapse (deps-of "test-proof" "c3"))
    ("c2"))
 
 !(test
-   (collapse (deps-of "section1" "c2"))
+   (collapse (deps-of "test-proof" "c2"))
    ("c1"))
 
 ;; c1 has no dependencies
 !(test
-   (collapse (deps-of "section1" "c1"))
+   (collapse (deps-of "test-proof" "c1"))
    ())
 
 !(test
-   (collapse (deps-of "section1" "c6"))
+   (collapse (deps-of "test-proof" "c6"))
    ("c5"))
 
 ;; c5 has no dependencies
 !(test
-   (collapse (deps-of "section1" "c5"))
+   (collapse (deps-of "test-proof" "c5"))
    ())
 
 
@@ -205,22 +205,22 @@
 
 ;; Everything that depends on c1: c2, c3, c4
 !(test
-   (collapse (depends-on "section1" "c1"))
+   (collapse (depends-on "test-proof" "c1"))
    (("c2" "c3" "c4")))
 
 ;; Everything that depends on c5: c6, c7
 !(test
-   (collapse (depends-on "section1" "c5"))
+   (collapse (depends-on "test-proof" "c5"))
    (("c6" "c7")))
 
 ;; Nothing depends on c7
 !(test
-   (collapse (depends-on "section1" "c7"))
+   (collapse (depends-on "test-proof" "c7"))
    (()))
 
 ;; Nothing depends on c4 (end of chain 1)
 !(test
-   (collapse (depends-on "section1" "c4"))
+   (collapse (depends-on "test-proof" "c4"))
    (()))
 
 
@@ -230,22 +230,22 @@
 
 ;; Everything c4 depends on: c3, c2, c1
 !(test
-   (collapse (depends-on-chain "section1" "c4"))
+   (collapse (depends-on-chain "test-proof" "c4"))
    (("c1" "c2" "c3")))
 
 ;; c1 depends on nothing
 !(test
-   (collapse (depends-on-chain "section1" "c1"))
+   (collapse (depends-on-chain "test-proof" "c1"))
    (()))
 
 ;; c6 depends on c5
 !(test
-   (collapse (depends-on-chain "section1" "c6"))
+   (collapse (depends-on-chain "test-proof" "c6"))
    (("c5")))
 
 ;; c7 depends on c6, c5
 !(test
-   (collapse (depends-on-chain "section1" "c7"))
+   (collapse (depends-on-chain "test-proof" "c7"))
    (("c5" "c6")))
 
 
@@ -255,29 +255,29 @@
 
 ;; Adding c1→c4 would cycle: c4 already reaches c1
 !(test
-   (would-cycle? "section1" "c1" "c4")
+   (would-cycle? "test-proof" "c1" "c4")
    True)
 
 ;; Adding c5→c7 would cycle: c7 already reaches c5
 !(test
-   (would-cycle? "section1" "c5" "c7")
+   (would-cycle? "test-proof" "c5" "c7")
    True)
 
 ;; Adding c1→c5 would NOT cycle: c5 does not reach c1
 !(test
-   (would-cycle? "section1" "c1" "c5")
+   (would-cycle? "test-proof" "c1" "c5")
    False)
 
 ;; Adding c4→c1 would cycle: c1 does not reach c4 yet, but wait —
 ;; actually c4 depends on c3 depends on c2 depends on c1, so
 ;; c1 does NOT reach c4. So adding c4→c1 would NOT cycle.
 !(test
-   (would-cycle? "section1" "c4" "c1")
+   (would-cycle? "test-proof" "c4" "c1")
    False)
 
 ;; Adding c1→c2 would cycle: c2 already reaches c1
 !(test
-   (would-cycle? "section1" "c1" "c2")
+   (would-cycle? "test-proof" "c1" "c2")
    True)
 
 
@@ -290,22 +290,22 @@
 ;; but the current code does NOT exclude the root — if the test fails
 ;; with c5 included, that's the bug to fix.
 !(test
-   (collapse (taint-cone "section1" "c5"))
+   (collapse (taint-cone "test-proof" "c5"))
    (("c6" "c7")))
 
 ;; c1 is not refuted: empty taint cone
 !(test
-   (collapse (taint-cone "section1" "c1"))
+   (collapse (taint-cone "test-proof" "c1"))
    (()))       
 
 ;; c6 is not refuted: empty taint cone
 !(test
-   (collapse (taint-cone "section1" "c6"))
+   (collapse (taint-cone "test-proof" "c6"))
    (()))
 
 ;; c2 is not refuted: empty taint cone
 !(test
-   (collapse (taint-cone "section1" "c2"))
+   (collapse (taint-cone "test-proof" "c2"))
    (()))
 
 
@@ -319,20 +319,20 @@
 ;;   s3: open + uses c6 → already open, NOT affected
 ;;   s4: formally-closed + uses c1 → c1 does NOT reach c5, NOT affected
 !(test
-   (collapse (affected-states "section1" "c5"))
+   (collapse (affected-states "test-proof" "c5"))
    (("s1" "s2")))
 
 ;; c1 is not refuted: no affected states
 !(test
-   (collapse (affected-states "section1" "c1"))
+   (collapse (affected-states "test-proof" "c1"))
    (()))
 
 ;; c6 is not refuted: no affected states
 !(test
-   (collapse (affected-states "section1" "c6"))
+   (collapse (affected-states "test-proof" "c6"))
    (()))
 
 ;; c2 is not refuted: no affected states
 !(test
-   (collapse (affected-states "section1" "c2"))
+   (collapse (affected-states "test-proof" "c2"))
    (()))

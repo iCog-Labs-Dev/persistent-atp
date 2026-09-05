@@ -7,45 +7,45 @@
 ;;1.1 incoming edges
 
 !(test
-   (collapse (incoming-edges "section1" "s1"))
+   (collapse (incoming-edges "test-proof" "s1"))
    (("ON_STATE" "a1" "e3")))
 
 !(test
-   (collapse (incoming-edges "section1" "m1"))
+   (collapse (incoming-edges "test-proof" "m1"))
    (("PROPOSES" "s1" "e1")))
 
 !(test
-   (collapse (incoming-edges "section1" "c2"))
+   (collapse (incoming-edges "test-proof" "c2"))
    ())
 
 ;; 1.2 outgoing-edges
 
 !(test
-   (collapse (outgoing-edges "section1" "s1"))
+   (collapse (outgoing-edges "test-proof" "s1"))
    (("PROPOSES" "m1" "e1") ("SUPPORTED_BY" "c1" "e2")))
 
 !(test
-   (collapse (outgoing-edges "section1" "a1"))
+   (collapse (outgoing-edges "test-proof" "a1"))
    (("ON_STATE" "s1" "e3")))
 
 !(test
-   (collapse (outgoing-edges "section1" "c2"))
+   (collapse (outgoing-edges "test-proof" "c2"))
    ())
 
 ;; 1.3 incident-edges (incoming + outgoing)
 
 !(test
-   (collapse (incident-edges "section1" "s1"))
+   (collapse (incident-edges "test-proof" "s1"))
    ((("ON_STATE" "a1" "e3") ("PROPOSES" "m1" "e1") ("SUPPORTED_BY" "c1" "e2"))))
 
 !(test
-   (collapse (incident-edges "section1" "m1"))
+   (collapse (incident-edges "test-proof" "m1"))
    ((("PROPOSES" "s1" "e1"))))
 
 !(test
-   (collapse (incident-edges "section1" "a1"))
+   (collapse (incident-edges "test-proof" "a1"))
    ((("ON_STATE" "s1" "e3"))))
 
 !(test
-   (collapse (incident-edges "section1" "c2"))
+   (collapse (incident-edges "test-proof" "c2"))
    (()))
