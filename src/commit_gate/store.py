@@ -233,6 +233,22 @@ class JournalStore:
         ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def read_events_since(
+        self, proof_id: str, after_revision: int
+    ) -> Sequence[tuple[int, dict[str, Any]]]:
+        """Every `(revision, payload)` committed after `after_revision`, in order.
+ 
+        For incremental consumers (a `GraphProjection` catching up from its
+        last-applied watermark) that shouldn't re-read the whole journal on
+        every pass. `after_revision=0` returns every event for the proof.
+        """
+        rows = self._conn.execute(
+            "SELECT revision, payload FROM journal "
+            "WHERE proof_id = ? AND revision > ? ORDER BY revision ASC",
+            (proof_id, after_revision),
+        ).fetchall()
+        return [(row["revision"], json.loads(row["payload"])) for row in rows]
+
     def read_chain(self, proof_id: str) -> Sequence[tuple[int, str, str]]:
         """Every `(revision, event_hash, prev_hash)` for a proof, in order."""
         rows = self._conn.execute(

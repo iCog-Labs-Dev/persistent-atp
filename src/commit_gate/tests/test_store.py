@@ -40,7 +40,42 @@ class TestJournalStore(unittest.TestCase):
             store.read_chain("p1"),
             [(1, first, GENESIS_HASH), (2, second, first)],
         )
+    def test_read_events_since_returns_only_the_later_revisions(self):     
+        store = JournalStore()
+        store.append(payload(actor="first"))
+        store.append(payload(actor="second"))
+        store.append(payload(actor="third"))
 
+        events = store.read_events_since("p1", after_revision=1)
+
+        self.assertEqual([rev for rev, _ in events], [2, 3])
+        self.assertEqual([p["actor"] for _, p in events], ["second", "third"])
+
+    def test_read_events_since_zero_returns_everything(self):
+        store = JournalStore()
+        store.append(payload())
+        store.append(payload())
+
+        events = store.read_events_since("p1", after_revision=0)
+
+        self.assertEqual(len(events), 2)
+
+    def test_read_events_since_the_current_head_returns_nothing(self):
+        store = JournalStore()
+        revision, _ = store.append(payload())
+
+        self.assertEqual(store.read_events_since("p1", after_revision=revision), [])
+
+    def test_read_events_since_is_scoped_to_the_proof(self):
+        store = JournalStore()
+        store.append(payload(proof_id="p1"))
+        store.append(payload(proof_id="p2"))
+
+        events = store.read_events_since("p1", after_revision=0)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][1]["proof_id"], "p1")
+              
     def test_revisions_are_numbered_per_proof(self):
         store = JournalStore()
         store.append(payload(proof_id="p1"))
