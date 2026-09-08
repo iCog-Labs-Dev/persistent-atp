@@ -24,12 +24,11 @@ from .constants import (
     _edge_id,
 )
 from .rules import RulesMixin
-from .replay import ReplayMixin
 from .schema import REL_WHITELIST, ensure_constraints
 from .session import Statement, TransactionMixin, translate_errors
 
 
-class Neo4jAdapter(TransactionMixin, ReplayMixin, RulesMixin):
+class Neo4jAdapter(TransactionMixin, RulesMixin):
     """A Neo4j projection of the paper's MORK-backed PeTTa metagraph.
 
     Three linked DAGs (search / justification / provenance) plus a speculative
