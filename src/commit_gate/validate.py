@@ -491,6 +491,28 @@ def check_references(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
                         f"{op.rel_type} target {op.dst_id!r} is {dst_label}, expected {exp_dst}",
                         index,
                     )
+        elif isinstance(op, UpsertNode):
+            record = view.node(op.node_id)
+            if record is None:
+                continue  # genuine create — nothing to check against
+
+            for field, proposed in op.fields.items():
+                committed = record.fields.get(field, UNSET)
+                if committed is UNSET:
+                    yield Rejection(
+                        Reason.UPSERT_FIELD_CONFLICT,
+                        f"UpsertNode on {op.node_id!r} field {field!r}: "
+                        f"committed=<absent>, proposed={proposed!r}",
+                        index,
+                    )
+                elif committed != proposed:
+                    yield Rejection(
+                        Reason.UPSERT_FIELD_CONFLICT,
+                        f"UpsertNode on {op.node_id!r} field {field!r}: "
+                        f"committed={committed!r}, proposed={proposed!r}",
+                        index,
+                    )
+
         elif isinstance(op, RemoveEdge):
             # MemoryView drops an unknown removal silently and MORK reports OK
             # whether or not its exact-byte match found anything, so neither

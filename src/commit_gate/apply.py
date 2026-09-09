@@ -25,7 +25,11 @@ def apply_ops(view: MemoryView, ops: Sequence[Op]) -> None:
             if existing is None:
                 view.add_node(op.node_id, op.label, op.fields)
             else:
-                # Upsert is idempotent. It confirms the node exists.
+                # Idempotent no-op. The gate's check_references rejects any
+                # UpsertNode whose fields differ from the committed node
+                # (Reason.UPSERT_FIELD_CONFLICT), so an UpsertNode can only
+                # reach apply for an existing node when its fields already
+                # match exactly.
                 pass
         elif isinstance(op, SetField):
             existing = view.node(op.node_id)

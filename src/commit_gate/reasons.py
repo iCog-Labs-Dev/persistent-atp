@@ -40,6 +40,7 @@ class Reason(StrEnum):
     UNKNOWN_NODE = "unknown-node"
     UNKNOWN_EDGE = "unknown-edge"
     NODE_ALREADY_EXISTS_WITH_LABEL = "node-already-exists-with-label"
+    UPSERT_FIELD_CONFLICT = "upsert-field-conflict"          
     EDGE_ENDPOINT_TYPE_INVALID = "edge-endpoint-type-invalid"
 
     PRIOR_VALUE_MISMATCH = "prior-value-mismatch"
