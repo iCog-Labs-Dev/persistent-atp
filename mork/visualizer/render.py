@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List
 
 from .graph import Graph
 
@@ -26,14 +26,33 @@ def _escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _wrap(text: str, width: int = 30) -> list:
+    """Word-wraps text to a max width per line, never cutting a word or
+    discarding information -- unlike truncation, every character survives,
+    just spread across more lines."""
+    words = text.split()
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
 def _node_label(node_id: str, label: str, fields: dict) -> str:
     lines = [f"{label}: {node_id}"]
     for key in ("description", "statement", "summary", "status"):
         if key in fields:
             value = fields[key]
-            if len(value) > 40:
-                value = value[:37] + "..."
-            lines.append(f"{key}: {value}")
+            wrapped = _wrap(value)
+            lines.append(f"{key}: {wrapped[0]}")
+            lines.extend(wrapped[1:])
     return "\\n".join(_escape(line) for line in lines)
 
 
