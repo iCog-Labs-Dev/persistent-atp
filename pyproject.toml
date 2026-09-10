@@ -23,7 +23,8 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["atp_bridge*", "commit_gate*", "shared*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "neo4j_adapter/tests"]
-
+testpaths = ["src/atp_bridge/tests", "src/commit_gate/tests", "src/shared/tests"]
