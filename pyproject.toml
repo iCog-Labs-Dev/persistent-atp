@@ -25,5 +25,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "neo4j_adapter/tests"]
+testpaths = ["src/commit_gate/tests", "src/shared/tests", "neo4j_adapter/tests", "mork"]
 
