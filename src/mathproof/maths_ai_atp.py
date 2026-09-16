@@ -28,8 +28,9 @@ missing request fields  invalid-request
 ``formal_search_resume`` hands the same goal back to the reasoner -- its
 Thompson-sampler state persists across calls, so a resumed run continues the
 search rather than restarting it blind. ``formal_replay`` delegates to an
-injected verdict function; independent Lean replay of certificates remains
-Phase 1 scope.
+injected verdict function; :mod:`mathproof.replay` provides the real one
+(``lean_replay_fn`` over Pantograph), while the default remains the Phase 0
+stub so test suites stay deterministic without a Lean backend.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ import asyncio
 import time
 from typing import Any, Callable, Mapping
 
-from commit_gate.vocab import RunDisposition
+from commit_gate.vocab import ExecutorResult, NON_KERNEL_TACTICS, RunDisposition
 from mathproof.formal_atp import (
     FormalATPAdapter,
     ReplayFn,
@@ -113,12 +114,27 @@ def _node_annotations(node: Any) -> dict[str, float]:
     return annotations
 
 
+def _kernel_closed_nodes(graph: Any) -> set[int]:
+    """Nodes whose solved status rests on a real tactic application.
+
+    A PLN-fallback edge scores a branch shut without any Lean execution, so
+    it contributes nothing here: a node closed only by fallback stays open,
+    and a root so closed yields no certificate.
+    """
+    closed: set[int] = set()
+    for edge in graph.edges.values():
+        if edge.status == "solved" and str(edge.tactic.tactic_name) not in NON_KERNEL_TACTICS:
+            closed.add(edge.source_id)
+    return closed
+
+
 def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict[str, Any]:
     run_id = request["run_id"]
     proof_id = request["proof_id"]
     env_hash = request["environment_hash"]
 
     state_ids = {node_id: f"{proof_id}/fs-{node_id + 1}" for node_id in graph.nodes}
+    kernel_closed = _kernel_closed_nodes(graph)
 
     parent_edges = {}
     multi_child = set()
@@ -130,6 +146,11 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
 
     states = []
     for node_id, node in graph.nodes.items():
+        if node.status == "solved" and node_id not in kernel_closed:
+            # Heuristic closure only: the state stays open for a resumed run.
+            status = "open"
+        else:
+            status = _STATE_STATUS.get(node.status, "open")
         states.append(
             build_state(
                 proof_id,
@@ -137,26 +158,36 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
                 _goal_text(node.goal),
                 env_hash,
                 kind="and" if node_id in multi_child else "or",
-                status=_STATE_STATUS.get(node.status, "open"),
+                status=status,
                 annotations=_node_annotations(node),
             )
         )
 
     tactic_edges = []
     for serial, edge in enumerate(graph.edges.values(), start=1):
-        rejected = edge.status == "dead"
+        tactic_name = str(edge.tactic.tactic_name)
+        if tactic_name in NON_KERNEL_TACTICS:
+            executor_result = ExecutorResult.EMPTY_OUTPUT.value
+        elif edge.status == "dead":
+            executor_result = ExecutorResult.LEAN_REJECTED.value
+        else:
+            executor_result = ExecutorResult.LEAN_ACCEPTED.value
+        diagnostic = None
+        if executor_result == ExecutorResult.LEAN_REJECTED.value:
+            diagnostic = _digest("diagnostic", serial, tactic_name, getattr(edge, "note", None) or "")
         tactic_edges.append(
             build_tactic_edge(
                 proof_id,
                 serial,
                 state_ids[edge.source_id],
-                "lean-rejected" if rejected else "lean-accepted",
+                executor_result,
                 len(edge.child_ids),
                 [state_ids[cid] for cid in edge.child_ids],
-                tactic_label=str(edge.tactic.tactic_name),
+                tactic_label=tactic_name,
                 tactic_args=[str(a) for a in (edge.tactic.arguments or [])],
                 model_provenance={"search_policy_name": "maths-ai-hybrid"},
                 annotations={"gnn_tactic_prior": float(edge.tactic.probability)},
+                **({"diagnostic_artifact": diagnostic} if diagnostic else {}),
             )
         )
 
@@ -179,7 +210,7 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
     if request.get("formal_declaration_id"):
         result["declaration_id"] = request["formal_declaration_id"]
 
-    if graph.is_solved():
+    if graph.is_solved() and graph.root_id in kernel_closed:
         trace = graph.proof_trace()
         certificate_hash = _digest("certificate", run_id, trace)
         result.update(
@@ -223,6 +254,13 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
         return result
 
     result["disposition"] = RunDisposition.BUDGET_EXHAUSTED.value
+    if graph.is_solved():
+        # The root was closed by heuristic scoring alone, so there is no
+        # kernel proof to certify. Keep the goal on the frontier: a resumed
+        # run goes back to the reasoner for real tactics.
+        root_id = state_ids[graph.root_id]
+        if root_id not in result["checkpoint"]["frontier_state_ids"]:
+            result["checkpoint"]["frontier_state_ids"].append(root_id)
     return result
 
 
