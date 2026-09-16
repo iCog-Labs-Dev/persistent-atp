@@ -117,3 +117,82 @@ class TestCommitGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRejectionJournal(unittest.TestCase):
+    """A refused write is not merged, and not forgotten either."""
+
+    def setUp(self):
+        self.view = MemoryView()
+        self.store = JournalStore()
+        self.gate = CommitGate(self.view, self.store)
+
+    def _proposal(self, token, lease="lease-a", node_id="p1/fs1", base=0):
+        return Proposal(
+            proof_id="p1",
+            actor="worker-1",
+            worker_class="test",
+            ops=(UpsertNode("FormalState", node_id, {"status": "open"}),),
+            base_revision=base,
+            lease_id=lease,
+            fencing_token=token,
+        )
+
+    def _invalid(self):
+        return Proposal(
+            proof_id="p1",
+            actor="test",
+            worker_class="test",
+            ops=(UpsertNode("TacticApplication", "p1/ta1", {"executor_result": "lean-accepted"}),),
+            base_revision=0,
+        )
+
+    def test_superseded_fencing_token_is_rejected_not_merged(self):
+        token_a = self.store.acquire_lease("p1", "lease-a")
+        first = self.gate.commit(self._proposal(token_a))
+        self.assertTrue(first.accepted)
+
+        self.store.acquire_lease("p1", "lease-a")
+
+        stale = self._proposal(token_a, node_id="p1/fs2", base=1)
+        result = self.gate.commit(stale)
+        self.assertFalse(result.accepted)
+        self.assertEqual(
+            [r.reason for r in result.rejections],
+            [Reason.FENCING_TOKEN_SUPERSEDED],
+        )
+        self.assertEqual(len(self.store.read_events("p1")), 1)
+        self.assertEqual(self.store.head("p1"), (1, first.event_hash))
+
+    def test_rejection_lands_on_the_append_only_trail(self):
+        result = self.gate.commit(self._invalid())
+        self.assertFalse(result.accepted)
+
+        trail = self.store.read_rejections("p1")
+        self.assertEqual(len(trail), 1)
+        self.assertEqual(trail[0]["payload"]["actor"], "test")
+        self.assertEqual(trail[0]["reason"], "missing-required-field")
+
+        stale = Proposal(
+            proof_id="p1",
+            actor="worker-2",
+            worker_class="test",
+            ops=(UpsertNode("FormalState", "p1/fs9", {"status": "open"}),),
+            base_revision=0,
+            lease_id="nope",
+            fencing_token=99,
+        )
+        self.gate.commit(stale)
+        trail_after = self.store.read_rejections("p1")
+        self.assertEqual(len(trail_after), 2)
+        self.assertEqual(trail_after[0], trail[0])
+
+    def test_accepted_commits_write_no_rejection_rows(self):
+        token = self.store.acquire_lease("p1", "lease-a")
+        self.gate.commit(self._proposal(token))
+        self.assertEqual(self.store.read_rejections("p1"), [])
+        self.assertEqual(self.store.verify_chain("p1"), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

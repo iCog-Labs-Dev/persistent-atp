@@ -79,6 +79,18 @@ class JournalStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rejections (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                proof_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                payload TEXT,
+                committed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
@@ -232,6 +244,56 @@ class JournalStore:
             (proof_id,),
         ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
+
+    def record_rejection(
+        self,
+        proof_id: str,
+        reason: str,
+        detail: str,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Journal one refused proposal as an auditable event (Invariants 8, 10).
+
+        Rejections never enter the hash chain -- the chain records committed
+        history only -- but late or stale work must remain visible to audit
+        rather than vanishing at the door. Returns the rejection's sequence
+        number. Raises `ConcurrencyError` if the write lock cannot be taken;
+        the gate treats recording as best-effort for that case alone.
+        """
+        with self._write() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO rejections (proof_id, reason, detail, payload)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    proof_id,
+                    str(reason),
+                    detail,
+                    canonical_json(payload).decode("utf-8") if payload else None,
+                ),
+            )
+        return cursor.lastrowid
+
+    def read_rejections(self, proof_id: str) -> Sequence[dict[str, Any]]:
+        """Every recorded rejection for a proof, oldest first."""
+        rows = self._conn.execute(
+            """
+            SELECT seq, reason, detail, payload, committed_at
+            FROM rejections WHERE proof_id = ? ORDER BY seq ASC
+            """,
+            (proof_id,),
+        ).fetchall()
+        return [
+            {
+                "seq": row["seq"],
+                "reason": row["reason"],
+                "detail": row["detail"],
+                "payload": json.loads(row["payload"]) if row["payload"] else None,
+                "committed_at": row["committed_at"],
+            }
+            for row in rows
+        ]
 
     def read_chain(self, proof_id: str) -> Sequence[tuple[int, str, str]]:
         """Every `(revision, event_hash, prev_hash)` for a proof, in order."""
