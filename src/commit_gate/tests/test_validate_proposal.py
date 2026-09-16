@@ -236,7 +236,10 @@ class AnnotationSeparation(unittest.TestCase):
         self.assertIn(Reason.MISSING_PRIOR_VALUE, reasons_of(proposal))
 
     def test_expected_null_prior_is_distinct_from_no_expectation(self):
-        proposal = propose(SetField("Alignment", "p17/al1", "verdict", "aligned", prior=None))
+        proposal = replace(
+            propose(SetField("Alignment", "p17/al1", "verdict", "aligned", prior=None)),
+            worker_class=WorkerClass.ALIGNMENT_REVIEWER,
+        )
         self.assertEqual(validate_proposal(proposal), [])
 
 
@@ -336,6 +339,57 @@ class Findings(unittest.TestCase):
         proposal = propose(state("p17/fs2"), state("p22/fs3"))
         findings = validate_proposal(proposal)
         self.assertEqual([f.op_index for f in findings], [1])
- 
+
+
+class NonKernelClosure:
+    @staticmethod
+    def fallback_tactic(
+        node_id: str = "p17/ta9",
+        result: str = str(ExecutorResult.LEAN_ACCEPTED),
+        status: str = TacticStatus.PENDING,
+    ) -> UpsertNode:
+        return UpsertNode(
+            "TacticApplication",
+            node_id,
+            {
+                "tactic_label": "PLN_fallback",
+                "tactic_family": "pln",
+                "executor_result": result,
+                "status": str(status),
+                "subgoal_count": 0,
+            },
+        )
+
+
+class TestNonKernelClosure(unittest.TestCase):
+    """C6: the tactic label decides, never the producer's claimed result."""
+
+    def reasons(self, proposal: Proposal) -> set[Reason]:
+        return {f.reason for f in validate_proposal(proposal)}
+
+    def test_c6_fallback_label_cannot_claim_lean_acceptance(self):
+        proposal = propose(NonKernelClosure.fallback_tactic())
+        self.assertIn(Reason.NON_KERNEL_CLOSURE, self.reasons(proposal))
+
+    def test_c6_fallback_edge_closing_a_state_is_rejected(self):
+        proposal = propose(
+            NonKernelClosure.fallback_tactic(result=str(ExecutorResult.EMPTY_OUTPUT)),
+            state("p17/fs2"),
+            AddEdge("CLOSES_STATE", "p17/ta9", "p17/fs2", "p17/e9"),
+        )
+        found = self.reasons(proposal)
+        self.assertIn(Reason.NON_KERNEL_CLOSURE, found)
+
+    def test_honestly_labelled_fallback_edge_passes(self):
+        proposal = propose(
+            NonKernelClosure.fallback_tactic(result=str(ExecutorResult.EMPTY_OUTPUT))
+        )
+        self.assertNotIn(Reason.NON_KERNEL_CLOSURE, self.reasons(proposal))
+
+    def test_kernel_label_with_lean_acceptance_is_untouched(self):
+        proposal = propose(tactic(result=ExecutorResult.LEAN_ACCEPTED, subgoals=0))
+        self.assertNotIn(Reason.NON_KERNEL_CLOSURE, self.reasons(proposal))
+
+
 if __name__ == "__main__":
     unittest.main()
