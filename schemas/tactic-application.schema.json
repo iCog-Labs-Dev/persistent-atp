@@ -129,6 +129,12 @@
         "expected_information_gain": { "type": "number" },
         "verification_value": { "type": "number" },
         "repeated_failure_risk": { "type": "number" },
+        "expected_theorem_impact": { "type": "number" },
+        "novelty_and_mechanism_diversity": { "type": "number" },
+        "formalization_readiness": { "type": "number" },
+        "estimated_cost": { "type": "number" },
+        "human_priority": { "type": "number" },
+        "availability_of_suitable_worker_or_model_or_tool": { "type": "number" },
         "derived_priority": { "type": "number" }
       }
     }

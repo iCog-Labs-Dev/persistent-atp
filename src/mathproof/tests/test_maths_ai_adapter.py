@@ -118,6 +118,44 @@ def dead_graph():
     return StubGraph([root], [edge], exhausted=True)
 
 
+def pln_solved_graph():
+    root = StubNode(0, StubGoal(REQUEST["goal_text"]), "solved")
+    edge = StubEdge(0, StubTactic("PLN_fallback", [], 1.0), [], status="solved")
+    return StubGraph(
+        [root],
+        [edge],
+        solved=True,
+        trace={"goal": REQUEST["goal_text"], "tactic": "PLN_fallback"},
+    )
+
+
+def mixed_root_graph():
+    root = StubNode(0, StubGoal(REQUEST["goal_text"]), "solved")
+    return StubGraph(
+        [root],
+        [
+            StubEdge(0, StubTactic("exact", ["Or.comm"], 0.93), [], status="solved"),
+            StubEdge(0, StubTactic("PLN_fallback", [], 1.0), [], status="solved"),
+        ],
+        solved=True,
+        trace={"goal": REQUEST["goal_text"], "tactic": "exact"},
+    )
+
+
+def mid_graph_fallback_branch():
+    root = StubNode(0, StubGoal(REQUEST["goal_text"]), "solved")
+    side = StubNode(1, StubGoal("side goal"), "solved")
+    return StubGraph(
+        [root, side],
+        [
+            StubEdge(0, StubTactic("exact", ["Or.comm"], 0.93), [], status="solved"),
+            StubEdge(0, StubTactic("PLN_fallback", [], 1.0), [1], status="solved"),
+        ],
+        solved=True,
+        trace={"goal": REQUEST["goal_text"], "tactic": "exact"},
+    )
+
+
 class TestMathsAIFormalATP(unittest.TestCase):
     def test_satisfies_the_adapter_protocol(self):
         self.assertIsInstance(MathsAIFormalATP(reasoner=StubReasoner()), FormalATPAdapter)
@@ -180,6 +218,68 @@ class TestMathsAIFormalATP(unittest.TestCase):
         obstruction = result["obstructions"][0]
         self.assertEqual(obstruction["kind"], "search-policy")
         self.assertEqual(obstruction["environment_hash"], REQUEST["environment_hash"])
+
+    def test_pln_only_root_is_downgraded_not_proved(self):
+        result = dict(
+            MathsAIFormalATP(reasoner=StubReasoner(pln_solved_graph())).formal_search_start(REQUEST)
+        )
+        self.assertEqual(result["disposition"], RunDisposition.BUDGET_EXHAUSTED.value)
+        self.assertNotIn("certificate", result)
+        root = next(s for s in result["states"] if s["state_id"] == "p1/fs-1")
+        self.assertEqual(root["status"], "open")
+        self.assertIn("p1/fs-1", result["checkpoint"]["frontier_state_ids"])
+        self.assertEqual(result["tactic_edges"][0]["executor_result"], "empty-output")
+
+    def test_real_branch_still_proves_alongside_a_fallback_edge(self):
+        result = dict(
+            MathsAIFormalATP(reasoner=StubReasoner(mixed_root_graph())).formal_search_start(REQUEST)
+        )
+        self.assertEqual(result["disposition"], RunDisposition.PROVED_PENDING_REPLAY.value)
+        self.assertIn("certificate", result)
+        root = next(s for s in result["states"] if s["state_id"] == "p1/fs-1")
+        self.assertEqual(root["status"], "formally-closed")
+        by_label = {e["tactic_label"]: e for e in result["tactic_edges"]}
+        self.assertEqual(by_label["exact"]["executor_result"], "lean-accepted")
+        self.assertEqual(by_label["PLN_fallback"]["executor_result"], "empty-output")
+
+    def test_fallback_closed_side_branch_stays_open(self):
+        result = dict(
+            MathsAIFormalATP(reasoner=StubReasoner(mid_graph_fallback_branch())).formal_search_start(REQUEST)
+        )
+        statuses = {s["state_id"]: s["status"] for s in result["states"]}
+        self.assertEqual(statuses["p1/fs-1"], "formally-closed")
+        self.assertEqual(statuses["p1/fs-2"], "open")
+        fallback = next(e for e in result["tactic_edges"] if e["tactic_label"] == "PLN_fallback")
+        self.assertEqual(fallback["executor_result"], "empty-output")
+
+    def test_dead_edges_carry_kernel_diagnostics(self):
+        result = dict(
+            MathsAIFormalATP(reasoner=StubReasoner(dead_graph())).formal_search_start(REQUEST)
+        )
+        dead = result["tactic_edges"][0]
+        self.assertEqual(dead["executor_result"], "lean-rejected")
+        self.assertRegex(dead["diagnostic_artifact"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_c6_soundness_flags_fallback_claiming_lean_acceptance(self):
+        from mathproof.soundness import SoundnessReason
+
+        result = dict(
+            MathsAIFormalATP(reasoner=StubReasoner(pln_solved_graph())).formal_search_start(REQUEST)
+        )
+        result["tactic_edges"][0]["executor_result"] = "lean-accepted"
+        reasons = [v.reason for v in validate_formal_search_result(result)]
+        self.assertIn(SoundnessReason.NON_KERNEL_CLOSURE, reasons)
+
+    def test_c6_honestly_labelled_fallback_results_stay_clean(self):
+        from mathproof.soundness import SoundnessReason
+
+        for graph in (pln_solved_graph(), mixed_root_graph()):
+            with self.subTest(graph=type(graph).__name__):
+                result = dict(
+                    MathsAIFormalATP(reasoner=StubReasoner(graph)).formal_search_start(REQUEST)
+                )
+                reasons = [v.reason for v in validate_formal_search_result(result)]
+                self.assertNotIn(SoundnessReason.NON_KERNEL_CLOSURE, reasons)
 
     def test_reasoner_failure_emits_internal_error(self):
         class Exploding:
