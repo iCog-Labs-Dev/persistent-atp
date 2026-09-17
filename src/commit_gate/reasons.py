@@ -36,6 +36,7 @@ class Reason(StrEnum):
     ORPHAN_CLOSURE_EDGE = "orphan-closure-edge"
 
     HEURISTIC_CLOSURE_ATTEMPT = "heuristic-closure-attempt"
+    NON_KERNEL_CLOSURE = "non-kernel-closure"
 
     UNKNOWN_NODE = "unknown-node"
     UNKNOWN_EDGE = "unknown-edge"
@@ -52,6 +53,8 @@ class Reason(StrEnum):
     PROMOTION_WITHOUT_REPLAY = "promotion-without-replay"
     PROMOTION_WITHOUT_ALIGNMENT = "promotion-without-alignment"
     ENVIRONMENT_DRIFT = "environment-drift"
+    CRITIC_VERDICT_REQUIRED = "critic-verdict-required"
+    WORKER_CLASS_OUT_OF_AUTHORITY = "worker-class-out-of-authority"
 
     # Lost races. The proposal was well formed; the journal moved under it.
     STALE_BASE_REVISION = "stale-base-revision"
