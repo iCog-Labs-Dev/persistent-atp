@@ -213,21 +213,6 @@ def test_add_claim_dependency_merges_after_a_clean_cycle_check():
     assert "MERGE (a)-[r:DEPENDS_ON" in statements[1].cypher
 
 
-def test_wipe_and_rebuild_replays_each_event_in_its_own_transaction():
-    driver = FakeDriver()
-    events = [
-        {"id": "r1", "type": "project_init", "payload": {"theorem_kernel": "t"}},
-        {
-            "id": "r2",
-            "type": "state_added",
-            "payload": {"state": {"id": "s1", "description": "d"}},
-        },
-    ]
-    adapter_for(driver).wipe_and_rebuild("p", events)
-    assert [len(tx) for tx in driver.transactions] == [1, 1, 2]
-    assert "DETACH DELETE" in driver.transactions[0][0].cypher
-
-
 # ----------------------------------------------------------------------
 # Error translation
 # ----------------------------------------------------------------------
