@@ -25,6 +25,8 @@ __all__ = [
     "FormalStateStatus",
     "StateStatus",
     "StateKind",
+    "ResearchStateStatus",
+    "ResearchMoveStatus",
     "DeclarationStatus",
     "CertificateStatus",
     "AlignmentLifecycle",
@@ -39,6 +41,8 @@ __all__ = [
     "WorkerClass",
     "ANNOTATION_FIELDS",
     "TERMINAL_EXECUTOR_FAILURES",
+    "NON_KERNEL_TACTICS",
+    "STANDARD_LEAN_AXIOMS",
     "GATE_LABELS",
     "GRAPH_LABELS",
     "GRAPH_ONLY_LABELS",
@@ -92,6 +96,38 @@ class StateKind(StrEnum):
     OR = "or"
     AND = "and"
     GOAL = "goal"
+
+
+class ResearchStateStatus(StrEnum):
+    """Research state operational status.
+
+    The minimal lifecycle the global scheduler needs: a move whose parent
+    state is ``superseded`` or ``refuted`` leaves the eligible frontier
+    til the taint is resolved.
+    """
+
+    OPEN = "open"
+    SUPERSEDED = "superseded"
+    REFUTED = "refuted"
+    STALE = "stale"
+
+
+class ResearchMoveStatus(StrEnum):
+    """Research move status: leasing plus pruning outcomes.
+
+    ``queued``/``open`` are the frontier statuses the scheduler leases from;
+    ``leased`` marks an active dispatch; ``refuted``/``dominated``/
+    ``exhausted`` are pruning outcomes.
+    """
+
+    QUEUED = "queued"
+    OPEN = "open"
+    LEASED = "leased"
+    CLOSED = "closed"
+    REFUTED = "refuted"
+    DOMINATED = "dominated"
+    EXHAUSTED = "exhausted"
+    STALE = "stale"
 
 
 class TacticStatus(StrEnum):
@@ -204,6 +240,26 @@ TERMINAL_EXECUTOR_FAILURES = frozenset(
 )
 """Executor outcomes that are infrastructure failures, not mathematical ones."""
 
+NON_KERNEL_TACTICS = frozenset({"PLN_fallback"})
+"""Tactic labels that close branches without Lean kernel evidence.
+
+The hybrid reasoner's PLN fallback marks a branch solved when its STV score
+is high enough -- no tactic ever ran. An edge with one of these labels can
+never carry `lean-accepted` semantics or close a state, no matter what an
+adapter or worker claims in other fields.
+"""
+
+STANDARD_LEAN_AXIOMS = frozenset(
+    {"propext", "Classical.choice", "Quot.sound"}
+)
+"""The three axioms Lean 4's standard library is built on.
+
+Nearly every mathlib proof transitively depends on them, so they are the
+default allowlist for replay axiom policy: what is denied is a *fresh*
+`axiom` declaration outside this closure -- the actual soundness hole --
+not the logical foundation of the ecosystem.
+"""
+
 
 class ReplayStatus(StrEnum):
     """Independent replay outcome (6.11)."""
@@ -278,6 +334,12 @@ ANNOTATION_FIELDS = frozenset(
         "expected_information_gain",
         "verification_value",
         "repeated_failure_risk",
+        "expected_theorem_impact",
+        "novelty_and_mechanism_diversity",
+        "formalization_readiness",
+        "estimated_cost",
+        "human_priority",
+        "availability_of_suitable_worker_or_model_or_tool",
         "derived_priority",
     }
 )
@@ -337,6 +399,8 @@ GATE_LABELS = frozenset(
         "Obstruction",
         "Attempt",
         "Artifact",
+        "ResearchState",
+        "ResearchMove",
     }
     | GRAPH_ONLY_LABELS
 )
