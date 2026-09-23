@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/tactic-application.schema.json",
+  "title": "TacticApplication",
+  "description": "One tactic applied to one exact state (Appendix B.3). The application records the source state, the tactic name and arguments, what the executor actually reported, the exact count of Lean-produced goals together with their complete ID list, a diagnostic artifact on rejection, and the model/policy provenance behind choosing it. A tactic is an AND edge: every produced goal becomes a required child state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tactic_id",
+    "source_state_id",
+    "executor_result",
+    "subgoal_count",
+    "produced_goal_ids"
+  ],
+  "properties": {
+    "tactic_id": {
+      "type": "string",
+      "pattern": "^[^/]+/ta-[1-9][0-9]*$"
+    },
+    "source_state_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fs-[1-9][0-9]*$"
+    },
+    "tactic_label": { "type": "string", "minLength": 1 },
+    "tactic_args": { "type": "array", "items": { "type": "string" } },
+    "executor_result": {
+      "description": "Mirrors commit_gate.vocab.ExecutorResult (11.3).",
+      "enum": [
+        "lean-accepted",
+        "lean-rejected",
+        "timeout",
+        "backend-missing",
+        "parse-failure",
+        "crash",
+        "empty-output"
+      ]
+    },
+    "subgoal_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Exactly how many goals Lean produced. Zero means real closure -- nothing else does."
+    },
+    "produced_goal_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The complete child list; its length must equal subgoal_count."
+    },
+    "diagnostic_artifact": {
+      "$ref": "#/$defs/sha256",
+      "description": "Required when Lean rejected the tactic; forbidden for infrastructure failures, which carry no mathematical diagnostic."
+    },
+    "status": {
+      "description": "Mirrors commit_gate.vocab.TacticStatus.",
+      "enum": [
+        "pending",
+        "queued",
+        "open",
+        "leased",
+        "closed",
+        "reopened",
+        "refuted",
+        "dominated",
+        "exhausted",
+        "dead"
+      ]
+    },
+    "model_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_bundle_artifact": { "$ref": "#/$defs/sha256" },
+        "search_policy_name": { "type": "string" }
+      }
+    },
+    "annotations": {
+      "$ref": "#/$defs/score_vector"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "executor_result": { "const": "lean-rejected" } } },
+      "then": { "required": ["diagnostic_artifact"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "executor_result": {
+            "enum": [
+              "timeout",
+              "backend-missing",
+              "parse-failure",
+              "crash",
+              "empty-output"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "diagnostic_artifact": { "not": {} },
+          "status": { "not": { "const": "closed" } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "score_vector": {
+      "description": "Scheduling annotations only; never truth.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gnn_tactic_prior": { "type": "number" },
+        "argument_probability": { "type": "number" },
+        "premise_relevance": { "type": "number" },
+        "pln_strength": { "type": "number" },
+        "pln_confidence": { "type": "number" },
+        "proof_number": { "type": "integer" },
+        "disproof_number": { "type": "integer" },
+        "depth": { "type": "integer" },
+        "estimated_execution_cost": { "type": "number" },
+        "state_novelty": { "type": "number" },
+        "transposition_count": { "type": "integer" },
+        "failure_family": { "type": "string" },
+        "dependency_centrality": { "type": "number" },
+        "expected_information_gain": { "type": "number" },
+        "verification_value": { "type": "number" },
+        "repeated_failure_risk": { "type": "number" },
+        "expected_theorem_impact": { "type": "number" },
+        "novelty_and_mechanism_diversity": { "type": "number" },
+        "formalization_readiness": { "type": "number" },
+        "estimated_cost": { "type": "number" },
+        "human_priority": { "type": "number" },
+        "availability_of_suitable_worker_or_model_or_tool": { "type": "number" },
+        "derived_priority": { "type": "number" }
+      }
+    }
+  }
+}

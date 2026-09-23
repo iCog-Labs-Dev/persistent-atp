@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/formal-state.schema.json",
+  "title": "FormalState",
+  "description": "One exact Lean state in a proof's search graph (Section 5.9). The exact_state_hash identifies the concrete target/context under a pinned environment and serialization version; the semantic_signature is a normalized-similarity key that may only *propose* transpositions. They are separate required fields by design: equal semantics never merge states, and no field here carries truth -- only Lean replay can close a state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state_id", "exact_state_hash", "semantic_signature"],
+  "properties": {
+    "state_id": {
+      "type": "string",
+      "description": "Allocator-issued ID scoped to the proof, e.g. 'p1/fs-1'.",
+      "pattern": "^[^/]+/fs-[1-9][0-9]*$"
+    },
+    "kind": {
+      "description": "AND/OR search role (9.6).",
+      "enum": ["or", "and", "goal"]
+    },
+    "goal_text": {
+      "type": "string",
+      "description": "The concrete Lean target as elaborated."
+    },
+    "context_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "environment_id": {
+      "type": "string"
+    },
+    "environment_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "serialization_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "exact_state_hash": {
+      "$ref": "#/$defs/sha256",
+      "description": "Hash over goal_text + context + environment identity + serialization_version. Identity, never similarity."
+    },
+    "semantic_signature": {
+      "$ref": "#/$defs/sha256",
+      "description": "Normalized similarity key. May propose transpositions only; never merges or closes states."
+    },
+    "is_theorem": {
+      "type": "boolean"
+    },
+    "status": {
+      "description": "Mirrors commit_gate.vocab.FormalStateStatus.",
+      "enum": [
+        "open",
+        "expanded",
+        "formally-closed",
+        "lean-verified",
+        "tainted",
+        "reopened",
+        "failed",
+        "pruned",
+        "stale"
+      ]
+    },
+    "annotations": {
+      "$ref": "#/$defs/score_vector",
+      "description": "Scheduling features only. A state carrying scores is not one step closer to being true."
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "score_vector": {
+      "$ref": "https://persistent-atp.invalid/schemas/score-vector.schema.json"
+    }
+  }
+}

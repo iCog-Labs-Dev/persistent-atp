@@ -1,0 +1,61 @@
+{
+  "run_id": "p1/fr-2",
+  "proof_id": "p1",
+  "declaration_id": "p1/fd-1",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "disposition": "budget-exhausted",
+  "root_state_id": "p1/fs-3",
+  "checkpoint": {
+    "epoch_ms": 1724419260000,
+    "frontier_state_ids": ["p1/fs-4"]
+  },
+  "states": [
+    {
+      "state_id": "p1/fs-3",
+      "kind": "or",
+      "goal_text": "n + m = m + n",
+      "exact_state_hash": "sha256:5353535353535353535353535353535353535353535353535353535353535353",
+      "semantic_signature": "sha256:6363636363636363636363636363636363636363636363636363636363636363",
+      "status": "open",
+      "annotations": {"depth": 0, "derived_priority": 0.8}
+    },
+    {
+      "state_id": "p1/fs-4",
+      "kind": "or",
+      "goal_text": "induction on n reduces to cases already proven",
+      "exact_state_hash": "sha256:5454545454545454545454545454545454545454545454545454545454545454",
+      "semantic_signature": "sha256:6464646464646464646464646464646464646464646464646464646464646464",
+      "status": "open",
+      "annotations": {"depth": 1, "derived_priority": 0.6}
+    }
+  ],
+  "tactic_edges": [
+    {
+      "tactic_id": "p1/ta-3",
+      "source_state_id": "p1/fs-3",
+      "tactic_label": "simp",
+      "tactic_args": ["Nat.add_comm"],
+      "executor_result": "lean-rejected",
+      "subgoal_count": 0,
+      "produced_goal_ids": [],
+      "diagnostic_artifact": "sha256:7272727272727272727272727272727272727272727272727272727272727272",
+      "status": "dead",
+      "annotations": {"failure_family": "simp-made-no-progress"}
+    },
+    {
+      "tactic_id": "p1/ta-4",
+      "source_state_id": "p1/fs-3",
+      "tactic_label": "induction",
+      "tactic_args": ["n"],
+      "executor_result": "lean-accepted",
+      "subgoal_count": 1,
+      "produced_goal_ids": ["p1/fs-4"]
+    }
+  ],
+  "obstructions": [],
+  "artifacts": [],
+  "budget_used": {
+    "tactic_steps": 512,
+    "wall_clock_ms": 60000
+  }
+}

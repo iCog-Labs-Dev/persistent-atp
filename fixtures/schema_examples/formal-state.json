@@ -1,0 +1,17 @@
+{
+  "state_id": "p1/fs-1",
+  "kind": "or",
+  "goal_text": "a + b = b + a",
+  "context_digest": "sha256:2929292929292929292929292929292929292929292929292929292929292929",
+  "environment_id": "lean-4.9.0-mathlib-pinned",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "serialization_version": 1,
+  "exact_state_hash": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+  "semantic_signature": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+  "is_theorem": true,
+  "status": "open",
+  "annotations": {
+    "depth": 0,
+    "derived_priority": 0.5
+  }
+}

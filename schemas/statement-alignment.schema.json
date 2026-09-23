@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/statement-alignment.schema.json",
+  "title": "StatementAlignment",
+  "description": "Correspondence between an informal claim and a Lean declaration (Section 5.4). Informal claims and Lean declarations are separate objects; a Lean proof verifies the informal claim only when an accepted reviewer marks this alignment exact. Otherwise the result is a verified nearby theorem with an explicit relation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "alignment_id",
+    "claim_id",
+    "declaration_id",
+    "statement_hash",
+    "status"
+  ],
+  "properties": {
+    "alignment_id": {
+      "type": "string",
+      "pattern": "^[^/]+/al-[1-9][0-9]*$"
+    },
+    "claim_id": {
+      "type": "string",
+      "pattern": "^[^/]+/c-[1-9][0-9]*$"
+    },
+    "declaration_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fd-[1-9][0-9]*$"
+    },
+    "statement_hash": {
+      "$ref": "#/$defs/sha256",
+      "description": "Content hash of the informal statement."
+    },
+    "source_hash": {
+      "$ref": "#/$defs/sha256",
+      "description": "Content hash of the Lean source declaring it."
+    },
+    "imports": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "namespace": { "type": "string" },
+    "universe_assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "typeclass_assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "quantifier_correspondence": {
+      "type": "string",
+      "description": "How binders on each side correspond, e.g. 'forall a b : Nat <-> all a b in N'."
+    },
+    "domain_correspondence": {
+      "type": "string",
+      "description": "Domain of quantification on each side and any coercion between them."
+    },
+    "classical_assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "constructive_assumptions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "relation": {
+      "description": "Direction of mismatch between informal claim and formal statement.",
+      "enum": ["exact", "strengthening", "weakening", "reformulation"]
+    },
+    "reviewer": {
+      "type": "string",
+      "description": "Who accepted or rejected the correspondence."
+    },
+    "reviewer_verdict": {
+      "description": "Mirrors commit_gate.vocab.AlignmentVerdict.",
+      "enum": ["aligned", "weaker", "stronger", "mismatch", "ambiguous"]
+    },
+    "status": {
+      "description": "Protocol-level lifecycle (Section 5.4). 'aligned'/'mismatch' are review outcomes; 'superseded'/'stale' retire the record.",
+      "enum": ["draft", "review-needed", "aligned", "mismatch", "superseded", "stale"]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

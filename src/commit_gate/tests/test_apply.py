@@ -58,5 +58,13 @@ class TestApply(unittest.TestCase):
         self.assertIsNotNone(view.edge("e1"))
         self.assertEqual(len(view.edges_from("fs1", "HAS_TACTIC")), 1)
 
+    def test_apply_upsert_existing_node_matching(self):
+        view = MemoryView()
+        view.add_node("fs1", "FormalState", {"status": "open"})
+        apply_ops(view, [UpsertNode("FormalState", "fs1", {"status": "open"})])
+        node = view.node("fs1")
+        self.assertIsNotNone(node)
+        self.assertEqual(node.fields["status"], "open")
+
 if __name__ == "__main__":
     unittest.main()

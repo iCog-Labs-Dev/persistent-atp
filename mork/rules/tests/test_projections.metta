@@ -1,0 +1,60 @@
+;; test_projections.metta — Tests for Sections 6-7: routes and transposition
+
+!(import! &self ../projections)
+
+!(mm2-exec &mork 1)
+
+!(import! &self ./test_graph.metta)
+
+
+!(add-atom &mork (node "test-proof" "c3" "Claim"))
+!(add-atom &mork (layer "test-proof" "c3" "committed"))
+!(add-atom &mork (field "test-proof" "c1" "statement" "1+1=2"))
+!(add-atom &mork (field "test-proof" "c3" "statement" "1+1=2"))
+
+!(add-atom &mork (edge "test-proof" "e4" "PROPOSES" "s1" "m1"))
+!(add-atom &mork (rev-edge "test-proof" "m1" "PROPOSES" "s1" "e4"))
+!(add-atom &mork (layer "test-proof" "edge:e4" "committed"))
+
+;; 6.2 routes-to
+
+;; m1 is reached by e1 (PROPOSES from s1) and e4 (duplicate)
+!(test
+   (collapse (routes-to "test-proof" "m1"))
+   (("PROPOSES" "s1" "e1") ("PROPOSES" "s1" "e4")))
+
+;; c1 is reached by e2 (SUPPORTED_BY from s1)
+!(test
+   (collapse (routes-to "test-proof" "c1"))
+   (("SUPPORTED_BY" "s1" "e2")))
+
+;; a1 has no incoming edges
+!(test
+   (collapse (routes-to "test-proof" "a1"))
+   ())
+
+;; 6.3 predecessors
+
+;; m1's predecessor: s1 via e1 and e4
+!(test
+   (collapse (predecessors "test-proof" "m1"))
+   (("PROPOSES" "s1" "e1") ("PROPOSES" "s1" "e4")))
+
+;; s1's predecessor: a1 via e3
+!(test
+   (collapse (predecessors "test-proof" "s1"))
+   (("ON_STATE" "a1" "e3")))
+
+;; 7.1 exact-duplicate-edges
+
+;; e1 and e4 are exact duplicates (same PROPOSES s1->m1)
+!(test
+   (collapse (exact-duplicate-edges "test-proof"))
+   ((("PROPOSES" "s1" "m1" "e1" "e4") ("PROPOSES" "s1" "m1" "e4" "e1"))))
+
+;; 7.2 semantic-duplicate-claims
+
+;; c1 and c3 share statement "1+1=2"
+!(test
+   (collapse (semantic-duplicate-claims "test-proof"))
+   ((("c1" "c3" "1+1=2") ("c3" "c1" "1+1=2"))))

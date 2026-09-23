@@ -3,7 +3,7 @@ projector — Project event journal JSON to MORK add-atom commands.
 
 Public API:
     Projector, project_event_journal, project_from_file, generate_metta_file,
-    generate_query_templates, sanitize_value, extract_proof_id, extract_local_id  (core.py)
+    sanitize_value, extract_proof_id, extract_local_id  (core.py)
     project_journal_to_file, safe_filename              (writer.py)
 """
 
@@ -12,7 +12,6 @@ from .core import (
     extract_local_id,
     extract_proof_id,
     generate_metta_file,
-    generate_query_templates,
     project_event_journal,
     project_from_file,
     sanitize_value,
@@ -24,7 +23,6 @@ __all__ = [
     "project_event_journal",
     "project_from_file",
     "generate_metta_file",
-    "generate_query_templates",
     "sanitize_value",
     "extract_proof_id",
     "extract_local_id",

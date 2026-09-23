@@ -148,7 +148,7 @@ class CommitGate:
         """Validate `proposal` and, if it holds, journal and project it.
 
         A lost race is a rejection, not an exception: the proposer gets a code it
-        can act on, and nothing has been written.
+        can act on, nothing has been committed, and the refusal is audited.
 
         Holds the gate's lock throughout, which the graph depends on: changing a
         field means reading its current value and then replacing it, and a second
@@ -164,6 +164,7 @@ class CommitGate:
 
             rejections = validate_proposal(proposal, self._view)
             if rejections:
+                self._audit(proposal, rejections)
                 return CommitResult(
                     accepted=False,
                     rejections=tuple(rejections),
@@ -174,9 +175,11 @@ class CommitGate:
             try:
                 revision, event_hash = self._store.append(proposal.to_dict())
             except ConcurrencyError as exc:
+                rejection = Rejection(exc.reason, exc.detail)
+                self._audit(proposal, (rejection,))
                 return CommitResult(
                     accepted=False,
-                    rejections=(Rejection(exc.reason, exc.detail),),
+                    rejections=(rejection,),
                     event_hash=None,
                     revision=None,
                 )
@@ -193,3 +196,16 @@ class CommitGate:
                 event_hash=event_hash,
                 revision=revision,
             )
+
+    def _audit(self, proposal: Proposal, rejections) -> None:
+        """Copy refused proposals into the rejection log; never blocks the answer."""
+        for rejection in rejections:
+            try:
+                self._store.record_rejection(
+                    proposal.proof_id,
+                    str(rejection.reason),
+                    rejection.detail,
+                    payload=proposal.to_dict(),
+                )
+            except ConcurrencyError:
+                return

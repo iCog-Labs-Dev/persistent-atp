@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/formal-search-request.schema.json",
+  "title": "FormalSearchRequest",
+  "description": "What a coordinator sends to a formal ATP adapter (Section 6.2). The request binds proof/claim/declaration identity, the writer's lease, the pinned environment, and the search inputs. Every field is part of the protocol: adapters must reject unknown-shape requests as invalid-request, never guess.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proof_id",
+    "claim_id",
+    "formal_declaration_id",
+    "run_id",
+    "base_revision",
+    "lease_id",
+    "fencing_token",
+    "lean_source_artifact",
+    "environment_id",
+    "environment_hash"
+  ],
+  "properties": {
+    "proof_id": { "type": "string", "minLength": 1 },
+    "claim_id": {
+      "type": "string",
+      "description": "The research claim this search serves.",
+      "pattern": "^[^/]+/c-[1-9][0-9]*$"
+    },
+    "formal_declaration_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fd-[1-9][0-9]*$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fr-[1-9][0-9]*$"
+    },
+    "base_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Journal revision the caller believes is current."
+    },
+    "lease_id": { "type": "string" },
+    "fencing_token": { "type": "integer", "minimum": 1 },
+    "lean_source_artifact": {
+      "$ref": "#/$defs/sha256",
+      "description": "Content address of the Lean source being searched."
+    },
+    "environment_id": { "type": "string", "minLength": 1 },
+    "environment_hash": {
+      "$ref": "#/$defs/sha256",
+      "description": "Digest of the pinned toolchain (Section 13.2). Results are only valid under this hash."
+    },
+    "corpus_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "premise_corpus_artifact": { "$ref": "#/$defs/sha256" },
+        "retrieval_policy": { "type": "string" }
+      }
+    },
+    "model_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Heuristic models used for scheduling only.",
+      "properties": {
+        "tactic_model_artifact": { "$ref": "#/$defs/sha256" },
+        "argument_model_artifact": { "$ref": "#/$defs/sha256" },
+        "premise_model_artifact": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "search_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy_name": { "type": "string" },
+        "deny_sorry": { "const": true },
+        "max_tactic_steps": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["deny_sorry"]
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_steps": { "type": "integer", "minimum": 1 },
+        "wall_clock_ms": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

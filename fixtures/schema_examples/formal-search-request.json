@@ -1,0 +1,28 @@
+{
+  "proof_id": "p1",
+  "claim_id": "p1/c-1",
+  "formal_declaration_id": "p1/fd-1",
+  "run_id": "p1/fr-1",
+  "base_revision": 4,
+  "lease_id": "lease-p1-7",
+  "fencing_token": 2,
+  "lean_source_artifact": "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "environment_id": "lean-4.9.0-mathlib-pinned",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "corpus_manifest": {
+    "premise_corpus_artifact": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "retrieval_policy": "premise-relevance-top-64"
+  },
+  "model_bundle": {
+    "tactic_model_artifact": "sha256:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+  },
+  "search_policy": {
+    "policy_name": "conservative-deny-sorry",
+    "deny_sorry": true,
+    "max_tactic_steps": 256
+  },
+  "budget": {
+    "max_steps": 512,
+    "wall_clock_ms": 60000
+  }
+}

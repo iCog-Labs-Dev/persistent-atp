@@ -31,7 +31,7 @@ def _load(name: str, path: Path):
     return module
 
 
-graph_constants = _load("graph_constants", REPO_ROOT / "neo4j" / "constants.py")
+graph_constants = _load("graph_constants", REPO_ROOT / "neo4j_adapter" / "constants.py")
 
 
 class TestSingleSourceOfTruth(unittest.TestCase):

@@ -1,0 +1,16 @@
+{
+  "gnn_tactic_prior": 0.82,
+  "pln_strength": 0.71,
+  "pln_confidence": 0.66,
+  "proof_number": 3,
+  "disproof_number": 0,
+  "depth": 4,
+  "estimated_execution_cost": 12.5,
+  "state_novelty": 0.44,
+  "transposition_count": 1,
+  "dependency_centrality": 0.2,
+  "expected_information_gain": 1.75,
+  "verification_value": 0.9,
+  "repeated_failure_risk": 0.1,
+  "derived_priority": 2.31
+}

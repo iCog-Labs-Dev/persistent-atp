@@ -1,0 +1,65 @@
+{
+  "run_id": "p1/fr-3",
+  "proof_id": "p1",
+  "declaration_id": "p1/fd-2",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "disposition": "budget-exhausted",
+  "root_state_id": "p1/fs-5",
+  "checkpoint": {
+    "epoch_ms": 1724419320000,
+    "frontier_state_ids": ["p1/fs-6", "p1/fs-7", "p1/fs-8"]
+  },
+  "states": [
+    {
+      "state_id": "p1/fs-5",
+      "kind": "or",
+      "goal_text": "(P \u2227 Q) \u2194 (Q \u2227 P)",
+      "exact_state_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "semantic_signature": "sha256:6565656565656565656565656565656565656565656565656565656565656565",
+      "status": "expanded"
+    },
+    {
+      "state_id": "p1/fs-6",
+      "kind": "and",
+      "goal_text": "\u2192 direction: P \u2227 Q \u22a2 Q \u2227 P, component 1 (Q)",
+      "exact_state_hash": "sha256:5656565656565656565656565656565656565656565656565656565656565656",
+      "semantic_signature": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "status": "open"
+    },
+    {
+      "state_id": "p1/fs-7",
+      "kind": "and",
+      "goal_text": "\u2192 direction: P \u2227 Q \u22a2 Q \u2227 P, component 2 (\u2227 intro)",
+      "exact_state_hash": "sha256:5757575757575757575757575757575757575757575757575757575757575757",
+      "semantic_signature": "sha256:6767676767676767676767676767676767676767676767676767676767676767",
+      "status": "open"
+    },
+    {
+      "state_id": "p1/fs-8",
+      "kind": "or",
+      "goal_text": "\u2190 direction: Q \u2227 P \u22a2 P \u2227 Q",
+      "exact_state_hash": "sha256:5858585858585858585858585858585858585858585858585858585858585858",
+      "semantic_signature": "sha256:6868686868686868686868686868686868686868686868686868686868686868",
+      "status": "open"
+    }
+  ],
+  "tactic_edges": [
+    {
+      "tactic_id": "p1/ta-5",
+      "source_state_id": "p1/fs-5",
+      "tactic_label": "constructor",
+      "tactic_args": [],
+      "executor_result": "lean-accepted",
+      "subgoal_count": 3,
+      "produced_goal_ids": ["p1/fs-6", "p1/fs-7", "p1/fs-8"],
+      "model_provenance": {"search_policy_name": "conservative-deny-sorry"},
+      "annotations": {"gnn_tactic_prior": 0.95}
+    }
+  ],
+  "obstructions": [],
+  "artifacts": [],
+  "budget_used": {
+    "tactic_steps": 64,
+    "wall_clock_ms": 12000
+  }
+}

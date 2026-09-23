@@ -109,6 +109,29 @@ STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
         "exhausted": frozenset(),
         "dead": frozenset(),
     },
+    # The research layer's minimal lifecycle. A research move whose
+    # parent state was superseded or refuted leaves the frontier; pruning
+    # outcomes are terminal, stale is the sink.
+    ("ResearchState", "status"): {
+        "open": frozenset({"superseded", "refuted", "stale"}),
+        "superseded": frozenset({"stale"}),
+        "refuted": frozenset({"stale"}),
+        "stale": frozenset(),
+    },
+    ("ResearchMove", "status"): {
+        "queued": frozenset({"leased", "open", "dominated", "exhausted", "stale"}),
+        "open": frozenset(
+            {"leased", "closed", "refuted", "dominated", "exhausted", "stale"}
+        ),
+        "leased": frozenset(
+            {"open", "closed", "refuted", "dominated", "exhausted", "stale"}
+        ),
+        "closed": frozenset({"stale"}),
+        "refuted": frozenset(),
+        "dominated": frozenset(),
+        "exhausted": frozenset(),
+        "stale": frozenset(),
+    },
 }
 
 # Fields that can be set in UpsertNode but never changed via SetField.
@@ -130,10 +153,12 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
     ),
     "FormalRun": frozenset({"actor", "start_time"}),
     "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash"}),
-    "LeanReplay": frozenset( {"actor", "replayed_at", "status", "rejection_reason", "sorry_detected"} ),
+    "LeanReplay": frozenset(
+        {"actor", "replayed_at", "status", "sorry_detected", "rejection_reason"}
+    ),
     "Obstruction": frozenset({"kind", "description", "actor"}),
     "Proof": frozenset({"actor"}),
-    "Alignment": frozenset({"actor", "verdict"}),
+    "Alignment": frozenset({"actor"}),
     "Attempt": frozenset({"actor", "worker_class"}),
     "Environment": frozenset({"toolchain", "lake_manifest_hash", "mathlib_commit"}),
     "FormalCheckpoint": frozenset({"epoch_ms", "actor"}),

@@ -16,6 +16,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "jsonschema>=4.0",
+]
+# The production backend is not on PyPI and lives in a private repository,
+# so plain pip cannot resolve it — [tool.uv.sources] below applies to uv
+# only. Install it with `uv sync --extra real-atp`; everything else
+# (including the full test suite) runs without it, against injected fakes.
+real-atp = [
+    "mathematics-ai-atp",
 ]
 
 [tool.setuptools]
@@ -28,4 +36,15 @@ include = ["commit_gate*", "mork*"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "mork/tests"]
+testpaths = [
+    "src/commit_gate/tests",
+    "src/shared/tests",
+    "src/mathproof/tests",
+    "src/alignment/tests",
+    "mork/projector/tests",
+    "mork/visualizer/tests",
+    "mork/tests",
+]
+
+[tool.uv.sources]
+mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }

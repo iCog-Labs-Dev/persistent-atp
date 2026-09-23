@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/obstruction.schema.json",
+  "title": "Obstruction",
+  "description": "A typed formal failure surfaced to the research loop (Section 7.4). The obstruction retains the exact source states, diagnostics, run identity, environment identity, the premise and tactic families already tried, and the evidence behind the classification -- enough for a research worker to respond without re-deriving the failure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "obstruction_id",
+    "kind",
+    "formal_run_id",
+    "environment_hash"
+  ],
+  "properties": {
+    "obstruction_id": {
+      "type": "string",
+      "pattern": "^[^/]+/obs-[1-9][0-9]*$"
+    },
+    "kind": {
+      "description": "Mirrors commit_gate.vocab.ObstructionKind (7.4).",
+      "enum": [
+        "missing-lemma",
+        "missing-premise",
+        "representation-mismatch",
+        "statement-too-strong",
+        "statement-too-weak",
+        "library-gap",
+        "elaboration",
+        "typeclass",
+        "coercion",
+        "resource",
+        "search-policy",
+        "likely-false",
+        "unknown"
+      ]
+    },
+    "formal_run_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fr-[1-9][0-9]*$"
+    },
+    "formal_state_ids": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[^/]+/fs-[1-9][0-9]*$" }
+    },
+    "minimal_state_artifact": {
+      "$ref": "#/$defs/sha256",
+      "description": "Content address of the smallest exact failing state."
+    },
+    "diagnostic_artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "repeated_failure_family": {
+      "type": "string",
+      "description": "Failure family seen repeatedly at this point, if any."
+    },
+    "premises_considered": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tactic_families_considered": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+          "kind": {
+            "description": "Mirrors commit_gate.vocab.EvidenceKind (11.5).",
+            "enum": [
+              "lean-replay",
+              "random-sampling",
+              "exhaustive-finite-search",
+              "exact-symbolic",
+              "interval-arithmetic",
+              "checkable-certificate",
+              "heuristic-optimizer",
+              "model-score",
+              "critic-review",
+              "human-guidance"
+            ]
+          },
+          "artifact_hash": { "$ref": "#/$defs/sha256" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "suggested_escalation": {
+      "description": "Research response the obstruction invites (Section 7.4). Advisory only.",
+      "enum": [
+        "bridge-lemma",
+        "decomposition",
+        "representation-change",
+        "generalize-statement",
+        "restrict-statement",
+        "invariant",
+        "premise-expansion",
+        "counterexample-search"
+      ]
+    },
+    "environment_hash": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

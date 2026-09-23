@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/worker-result.schema.json",
+  "description": "The structured result any worker returns (Section 3: workers are proposers). A worker never writes state directly; its result becomes a Proposal the commit gate validates. The result carries who produced it, under which lease, what evidence class supports it, and content addresses of everything it produced -- speculative outputs stay separate from verified dependencies via the evidence kind.",
+  "title": "WorkerResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result_id", "worker_class", "proof_id"],
+  "properties": {
+    "result_id": {
+      "type": "string",
+      "pattern": "^[^/]+/at-[1-9][0-9]*$",
+      "description": "The attempt this result closes."
+    },
+    "worker_class": {
+      "description": "Mirrors commit_gate.vocab.WorkerClass.",
+      "enum": [
+        "coordinator",
+        "llm-research",
+        "hyperon",
+        "formal-atp",
+        "replayer",
+        "critic",
+        "experiment",
+        "alignment-reviewer",
+        "human",
+        "maintenance"
+      ]
+    },
+    "proof_id": { "type": "string", "minLength": 1 },
+    "base_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Journal revision this result was produced against."
+    },
+    "lease_id": { "type": "string" },
+    "fencing_token": { "type": "integer", "minimum": 1 },
+    "summary": { "type": "string" },
+    "produced_claim_ids": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[^/]+/c-[1-9][0-9]*$" }
+    },
+    "produced_obstruction_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^/]+/obs-[1-9][0-9]*$"
+      }
+    },
+    "artifact_hashes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "evidence_kind": {
+      "description": "Mirrors commit_gate.vocab.EvidenceKind (11.5): heuristic evidence can never back a verified conclusion.",
+      "enum": [
+        "lean-replay",
+        "random-sampling",
+        "exhaustive-finite-search",
+        "exact-symbolic",
+        "interval-arithmetic",
+        "checkable-certificate",
+        "heuristic-optimizer",
+        "model-score",
+        "critic-review",
+        "human-guidance"
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
