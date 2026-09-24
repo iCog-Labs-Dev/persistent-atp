@@ -33,3 +33,14 @@ scripts/with-mork.sh .venv/bin/pytest -q mork/tests \
 `MORK_LIBRARY=/absolute/path/to/libmork_ffi.so`. Without the library, ordinary
 CI runs the codec and projector coverage and reports real-FFI cases as skipped.
 
+For a fresh checkout, `--install` clones the pinned `mork_ffi`, MORK, and
+PathMap sources into `.mork-ffi-src/`, builds the shared library, and runs the
+given command:
+
+```bash
+scripts/with-mork.sh --install .venv/bin/python scripts/alignment-mork-exp.py
+```
+
+The installer requires Git, Cargo, a nightly Rust toolchain, and network
+access.
+
