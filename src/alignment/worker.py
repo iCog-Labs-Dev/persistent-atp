@@ -18,6 +18,15 @@ __all__ = [
 ]
 
 
+def _alignment_edge_id(
+    proof_id: str, alignment_id: str, target_id: str, rel_type: str
+) -> str:
+    """Build a proof-scoped edge id without repeating qualified prefixes."""
+    alignment_local = alignment_id.split("/", 1)[-1]
+    target_local = target_id.split("/", 1)[-1]
+    return f"{proof_id}/{alignment_local}->{target_local}:{rel_type}"
+
+
 def build_alignment_proposal(
     *,
     proof_id: str,
@@ -48,7 +57,12 @@ def build_alignment_proposal(
                 rel_type="ALIGNS_CLAIM",
                 src_id=alignment_id,
                 dst_id=request.claim_id,
-                edge_id=f"{alignment_id}->{request.claim_id}:ALIGNS_CLAIM",
+                edge_id=_alignment_edge_id(
+                    proof_id,
+                    alignment_id,
+                    request.claim_id,
+                    "ALIGNS_CLAIM",
+                ),
             )
         )
         ops.append(
@@ -56,7 +70,12 @@ def build_alignment_proposal(
                 rel_type="ALIGNS_DECLARATION",
                 src_id=alignment_id,
                 dst_id=request.declaration_id,
-                edge_id=f"{alignment_id}->{request.declaration_id}:ALIGNS_DECLARATION",
+                edge_id=_alignment_edge_id(
+                    proof_id,
+                    alignment_id,
+                    request.declaration_id,
+                    "ALIGNS_DECLARATION",
+                ),
             )
         )
     else:
@@ -171,4 +190,3 @@ def build_worker_result(
     if request.source_hash:
         payload["artifact_hashes"] = [request.source_hash]
     return payload
-

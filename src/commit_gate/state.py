@@ -138,6 +138,7 @@ class MemoryView:
 
     def add_node(self, node_id: str, label: str, fields: Mapping[str, Any] | None = None) -> None:
         self.nodes[node_id] = NodeRecord(node_id, label, dict(fields or {}))
+        self._sync_state_reference(node_id)
 
     def set_field(self, node_id: str, name: str, value: Any) -> None:
         current = self.nodes[node_id]
@@ -152,9 +153,14 @@ class MemoryView:
         edge_id: str,
         fields: Mapping[str, Any] | None = None,
     ) -> None:
+        if edge_id in self.edges:
+            self.remove_edge(edge_id)
         self.edges[edge_id] = EdgeRecord(edge_id, rel_type, src_id, dst_id, dict(fields or {}))
         self._out[(src_id, rel_type)].append(edge_id)
         self._in[(dst_id, rel_type)].append(edge_id)
+        affected = self._state_reference_node(self.edges[edge_id])
+        if affected is not None:
+            self._sync_state_reference(affected)
 
     def remove_edge(self, edge_id: str) -> None:
         record = self.edges.pop(edge_id, None)
@@ -162,6 +168,9 @@ class MemoryView:
             return
         self._out[(record.src_id, record.rel_type)].remove(edge_id)
         self._in[(record.dst_id, record.rel_type)].remove(edge_id)
+        affected = self._state_reference_node(record)
+        if affected is not None:
+            self._sync_state_reference(affected)
 
     def node(self, node_id: str) -> NodeRecord | None:
         return self.nodes.get(node_id)
@@ -174,3 +183,35 @@ class MemoryView:
 
     def edges_to(self, node_id: str, rel_type: str) -> tuple[EdgeRecord, ...]:
         return tuple(self.edges[e] for e in self._in.get((node_id, rel_type), ()))
+
+    def _sync_state_reference(self, node_id: str) -> None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return
+        if node.label == "Move":
+            candidates = {
+                edge.src_id.split("/", 1)[-1]
+                for edge in self.edges_to(node_id, "PROPOSES")
+            }
+        elif node.label == "Attempt":
+            candidates = {
+                edge.dst_id.split("/", 1)[-1]
+                for edge in self.edges_from(node_id, "ON_STATE")
+            }
+        else:
+            return
+
+        fields = dict(node.fields)
+        if len(candidates) == 1:
+            fields["state_id"] = next(iter(candidates))
+        else:
+            fields.pop("state_id", None)
+        self.nodes[node_id] = NodeRecord(node_id, node.label, fields)
+
+    @staticmethod
+    def _state_reference_node(edge: EdgeRecord) -> str | None:
+        if edge.rel_type == "PROPOSES":
+            return edge.dst_id
+        if edge.rel_type == "ON_STATE":
+            return edge.src_id
+        return None

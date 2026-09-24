@@ -340,15 +340,14 @@ class TestAlignmentCommitGateIntegration(unittest.TestCase):
         self.assertEqual(node.label, "Alignment")
         self.assertEqual(node.fields["verdict"], "aligned")
 
-        claim_edge = self.view.edge("p1/al-1->p1/c-1:ALIGNS_CLAIM")
+        claim_edge = self.view.edge("p1/al-1->c-1:ALIGNS_CLAIM")
         self.assertIsNotNone(claim_edge)
         self.assertEqual(claim_edge.rel_type, "ALIGNS_CLAIM")
 
-        decl_edge = self.view.edge("p1/al-1->p1/fd-1:ALIGNS_DECLARATION")
+        decl_edge = self.view.edge("p1/al-1->fd-1:ALIGNS_DECLARATION")
         self.assertIsNotNone(decl_edge)
         self.assertEqual(decl_edge.rel_type, "ALIGNS_DECLARATION")
 
 
 if __name__ == "__main__":
     unittest.main()
-
