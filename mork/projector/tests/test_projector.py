@@ -231,6 +231,48 @@ class TestProjectorCore(unittest.TestCase):
             '(rev-edge "test" "m1" "PROPOSES" "s1" "e1")', blob
         )
 
+    def test_removed_state_edge_does_not_leave_derived_state_id(self):
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Move", "id": "test/m1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+            ]),
+            (2, [{"op": "remove_edge", "rel": "PROPOSES", "edge_id": "test/e1"}]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"state_id"', blob)
+
+    def test_ambiguous_state_edges_do_not_invent_a_state_id(self):
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Move", "id": "test/m1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s2",
+                 "dst": "test/m1", "edge_id": "test/e2"},
+            ]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"state_id"', blob)
+
+    def test_readding_an_edge_id_replaces_its_atom_family(self):
+        journal = make_journal(
+            (1, [{
+                "op": "add_edge", "rel": "OLD", "src": "test/a",
+                "dst": "test/b", "edge_id": "test/e1", "fields": {"old": 1},
+            }]),
+            (2, [{
+                "op": "add_edge", "rel": "NEW", "src": "test/c",
+                "dst": "test/d", "edge_id": "test/e1", "fields": {"new": 2},
+            }]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"OLD"', blob)
+        self.assertNotIn('"old"', blob)
+        self.assertIn('(edge "test" "e1" "NEW" "c" "d")', blob)
+        self.assertIn('(efield "test" "e1" "new" 2)', blob)
+
 
 class TestProjectJournalToFile(unittest.TestCase):
     """End-to-end: real journal -> .metta file named after the proof."""

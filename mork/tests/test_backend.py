@@ -14,6 +14,7 @@ import unittest
 from commit_gate.apply import apply_ops
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.state import GraphView, MemoryView, ReadView, WriteView
+from mork.atoms import edge_atoms
 from mork.backend.ffi import MorkSpace, MorkUnavailable
 from mork.backend.view import MorkView, decode, encode, tokens
 from mork.projector.core import extract_local_id, extract_proof_id
@@ -52,7 +53,16 @@ class TestCodec(unittest.TestCase):
                 self.assertIs(type(back), type(value))
 
     def test_round_trips_text_that_would_break_an_s_expression(self):
-        for value in ['quo"te', "back\\slash", "(paren)", "a\nb", "λ", "a b"]:
+        for value in [
+            'quo"te',
+            "back\\slash",
+            "(paren)",
+            "a\nb",
+            "λ",
+            "a b",
+            "sha256:" + "a" * 64,
+            "long unicode λ" * 20,
+        ]:
             with self.subTest(value=value):
                 self.assertEqual(decode(encode(value)), value)
 
@@ -107,6 +117,10 @@ class TestMorkViewNodes(unittest.TestCase):
         self.assertEqual(node.node_id, self.id_for("s1"))
         self.assertEqual(node.label, "FormalState")
         self.assertEqual(node.fields, {"status": "open"})
+        self.assertIn(
+            f'(layer "{self.proof}" "s1" "committed")',
+            self.view.atoms(self.proof),
+        )
 
     def test_node_without_fields_reads_back_empty(self):
         self.view.add_node(self.id_for("s1"), "FormalState")
@@ -176,6 +190,13 @@ class TestMorkViewEdges(unittest.TestCase):
         self.assertEqual(edge.src_id, self.id_for("s1"))
         self.assertEqual(edge.dst_id, self.id_for("m1"))
         self.assertEqual(edge.fields, {"weight": 0.8})
+        atoms = self.view.atoms(self.proof)
+        self.assertIn(
+            f'(rev-edge "{self.proof}" "m1" "PROPOSES" "s1" "e1")', atoms
+        )
+        self.assertIn(
+            f'(layer "{self.proof}" "edge:e1" "committed")', atoms
+        )
 
     def test_edges_from_and_to(self):
         self.view.add_edge(
@@ -225,6 +246,55 @@ class TestMorkViewEdges(unittest.TestCase):
         self.assertEqual(self.view.edges_from(self.id_for("s1"), "PROPOSES"), ())
         pattern = f'(efield "{self.proof}" "e1" $name $value)'
         self.assertEqual(_SPACE.match(pattern, pattern), [])
+        atoms = self.view.atoms(self.proof)
+        self.assertFalse(any("rev-edge" in atom and '"e1"' in atom for atom in atoms))
+        self.assertNotIn(
+            f'(layer "{self.proof}" "edge:e1" "committed")', atoms
+        )
+
+    def test_replacing_edge_cleans_stale_fields_and_reverse_index(self):
+        self.view.add_edge(
+            "PROPOSES", self.id_for("s1"), self.id_for("m1"), self.id_for("e1"),
+            {"old": 1},
+        )
+        self.view.add_node(self.id_for("s2"), "FormalState")
+        self.view.add_edge(
+            "ON_STATE", self.id_for("m1"), self.id_for("s2"), self.id_for("e1"),
+            {"new": 2},
+        )
+
+        edge = self.view.edge(self.id_for("e1"))
+        self.assertEqual(edge.rel_type, "ON_STATE")
+        self.assertEqual(edge.fields, {"new": 2})
+        atoms = self.view.atoms(self.proof)
+        self.assertFalse(any('"old"' in atom for atom in atoms))
+        old_reverse = edge_atoms(
+            "PROPOSES", self.id_for("s1"), self.id_for("m1"), self.id_for("e1")
+        )[1]
+        new_reverse = edge_atoms(
+            "ON_STATE", self.id_for("m1"), self.id_for("s2"), self.id_for("e1")
+        )[1]
+        self.assertNotIn(old_reverse, atoms)
+        self.assertIn(new_reverse, atoms)
+
+    def test_derived_state_id_tracks_unambiguous_active_edges(self):
+        self.view.add_node(self.id_for("m1"), "Move")
+        self.view.add_node(self.id_for("s2"), "FormalState")
+        self.view.add_edge(
+            "PROPOSES", self.id_for("s1"), self.id_for("m1"), self.id_for("e1")
+        )
+        self.assertEqual(self.view.node(self.id_for("m1")).fields["state_id"], "s1")
+
+        self.view.add_edge(
+            "PROPOSES", self.id_for("s2"), self.id_for("m1"), self.id_for("e2")
+        )
+        self.assertNotIn("state_id", self.view.node(self.id_for("m1")).fields)
+
+        self.view.remove_edge(self.id_for("e2"))
+        self.assertEqual(self.view.node(self.id_for("m1")).fields["state_id"], "s1")
+
+        self.view.remove_edge(self.id_for("e1"))
+        self.assertNotIn("state_id", self.view.node(self.id_for("m1")).fields)
 
     def test_remove_edge_that_was_never_added_is_a_no_op(self):
         self.view.remove_edge(self.id_for("nobody"))
