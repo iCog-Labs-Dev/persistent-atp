@@ -92,6 +92,10 @@ class JournalStore:
             """
         )
 
+    def close(self) -> None:
+        """Close the database and release its WAL sidecars."""
+        self._conn.close()
+
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
         """Hold the database write lock for the whole block, or roll back."""

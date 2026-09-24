@@ -17,7 +17,9 @@ __all__ = [
     "compute_content_hash",
 ]
 
-RelationType = Literal["exact", "strengthening", "weakening", "reformulation"]
+RelationType = Literal[
+    "exact", "strengthening", "weakening", "reformulation", "mismatch"
+]
 
 
 def compute_content_hash(text: str) -> str:

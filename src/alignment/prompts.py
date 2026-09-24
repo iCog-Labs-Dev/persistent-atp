@@ -9,7 +9,7 @@ You MUST systematically audit the candidate across the 8 dimensions defined in T
 3. Finiteness & Decidability: Are there hidden assumptions of finiteness, non-emptiness, or decidability not present in the informal claim?
 4. Universe & Typeclasses: Are universe levels and typeclass constraints appropriate?
 5. Classical vs Constructive: Does the formalization require classical logic or noncomputability that changes the claim's content?
-6. Relative Strength: Is the formal statement 'exact', 'strengthening' (proves more than asked), 'weakening' (proves less/trivialized), or 'reformulation'?
+6. Relative Strength: Classify the formal statement using the relation definitions below.
 7. Definition Faithfulness: Do the formal library definitions match the standard mathematical concepts intended?
 8. Target Implication: Does proving this Lean declaration directly imply the informal claim?
 
@@ -23,10 +23,26 @@ Output ONLY a valid JSON object matching this schema:
   "constructive_assumptions": ["string"],
   "selected_definitions_match": true/false,
   "implication_to_target_explicit": true/false,
-  "relation": "exact" | "strengthening" | "weakening" | "reformulation",
+  "relation": "exact" | "strengthening" | "weakening" | "reformulation" | "mismatch",
   "verdict": "aligned" | "weaker" | "stronger" | "mismatch" | "ambiguous",
   "reasoning": "string (detailed audit verdict justification)"
 }
+
+Relation definitions:
+- exact: the two statements directly express the same proposition.
+- strengthening: the formal statement is strictly stronger than the informal claim.
+- weakening: the formal statement is strictly weaker than the informal claim.
+- reformulation: the statements are equivalent but use materially different formulations.
+- mismatch: the formal statement changes the intended mathematical content and none of the above relations faithfully describes it.
+
+Keep verdict and relation consistent:
+- aligned -> exact or reformulation
+- stronger -> strengthening
+- weaker -> weakening
+- mismatch -> mismatch
+- ambiguous -> use the most plausible relation, but explain the uncertainty
+
+"exact" means exact semantic correspondence; it never means "exactly mismatched".
 """
 
 def format_alignment_review_prompt(

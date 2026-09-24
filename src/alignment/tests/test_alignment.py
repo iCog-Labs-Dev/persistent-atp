@@ -72,6 +72,12 @@ class TestAlignmentReviewer(unittest.TestCase):
 
 
 class TestLLMAlignmentReviewer(unittest.TestCase):
+    def test_prompt_defines_mismatch_relation(self):
+        from alignment.prompts import ALIGNMENT_REVIEWER_SYSTEM_PROMPT
+
+        self.assertIn("mismatch -> mismatch", ALIGNMENT_REVIEWER_SYSTEM_PROMPT)
+        self.assertIn('never means "exactly mismatched"', ALIGNMENT_REVIEWER_SYSTEM_PROMPT)
+
     def test_llm_review_exact_aligned(self):
         from alignment.llm_client import MockLLMClient
         from alignment.reviewer import LLMAlignmentReviewer
@@ -143,6 +149,65 @@ class TestLLMAlignmentReviewer(unittest.TestCase):
         result = reviewer.review(req)
         self.assertEqual(result.verdict, AlignmentVerdict.WEAKER)
         self.assertEqual(result.criteria.relation, "weakening")
+
+    def test_mismatch_and_invalid_relation_handling(self):
+        from alignment.llm_client import MockLLMClient
+        from alignment.reviewer import LLMAlignmentReviewer
+
+        request = AlignmentReviewRequest(
+            proof_id="p1",
+            claim_id="p1/c-1",
+            declaration_id="p1/fd-1",
+            informal_statement="For all n : Nat, n + 0 = n",
+            formal_statement="theorem bad (n : Nat) : n + 1 = n",
+        )
+        mismatch_reviewer = LLMAlignmentReviewer(
+            llm_client=MockLLMClient(
+                default_json={
+                    "relation": "mismatch",
+                    "verdict": "mismatch",
+                    "reasoning": "The formal statement changes the claim.",
+                }
+            )
+        )
+
+        result = mismatch_reviewer.review(request)
+
+        self.assertEqual(result.verdict, AlignmentVerdict.MISMATCH)
+        self.assertEqual(result.criteria.relation, "mismatch")
+        self.assertEqual(result.lifecycle, AlignmentLifecycle.REVIEWED)
+
+        inconsistent_reviewer = LLMAlignmentReviewer(
+            llm_client=MockLLMClient(
+                default_json={
+                    "relation": "exact",
+                    "verdict": "mismatch",
+                    "reasoning": "Contradictory classifications.",
+                }
+            )
+        )
+
+        result = inconsistent_reviewer.review(request)
+
+        self.assertEqual(result.verdict, AlignmentVerdict.MISMATCH)
+        self.assertEqual(result.criteria.relation, "exact")
+        self.assertEqual(result.lifecycle, AlignmentLifecycle.REVIEW_NEEDED)
+
+        invalid_reviewer = LLMAlignmentReviewer(
+            llm_client=MockLLMClient(
+                default_json={
+                    "relation": "exactly-mismatched",
+                    "verdict": "aligned",
+                    "reasoning": "Invalid relation label.",
+                }
+            )
+        )
+
+        result = invalid_reviewer.review(request)
+
+        self.assertEqual(result.verdict, AlignmentVerdict.AMBIGUOUS)
+        self.assertEqual(result.criteria.relation, "mismatch")
+        self.assertEqual(result.lifecycle, AlignmentLifecycle.REVIEW_NEEDED)
 
     def test_worker_with_llm_reviewer_integration(self):
         from alignment.llm_client import MockLLMClient
