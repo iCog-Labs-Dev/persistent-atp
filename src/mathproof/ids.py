@@ -69,6 +69,7 @@ class IdType(StrEnum):
     FORMAL_CHECKPOINT = "fc"
     SPECULATIVE_HYPOTHESIS = "sh"
     ATTEMPT = "at"
+    LEASE = "ls"
 
 
 ID_PREFIXES = frozenset(

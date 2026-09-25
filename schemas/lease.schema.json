@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/lease.schema.json",
+  "title": "Lease",
+  "description": "One scheduler dispatch (Sections 2, 8.4). A lease binds a worker class to one selected move under a fencing token, with a TTL bounding how long a vanished worker can hold the move. The score_snapshot records why this selection was made -- advisory priority only, never a truth value or status change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lease_id",
+    "proof_id",
+    "worker_class",
+    "fencing_token",
+    "base_revision",
+    "selected_move_id",
+    "ttl_seconds",
+    "issued_at",
+    "score_snapshot"
+  ],
+  "properties": {
+    "lease_id": {
+      "type": "string",
+      "pattern": "^[^/]+/ls-[1-9][0-9]*$"
+    },
+    "proof_id": { "type": "string", "minLength": 1 },
+    "worker_class": {
+      "description": "Mirrors commit_gate.vocab.WorkerClass; the explorer role leases as llm-research.",
+      "enum": [
+        "coordinator",
+        "llm-research",
+        "hyperon",
+        "formal-atp",
+        "replayer",
+        "critic",
+        "experiment",
+        "alignment-reviewer",
+        "human",
+        "maintenance"
+      ]
+    },
+    "fencing_token": { "type": "integer", "minimum": 1 },
+    "base_revision": { "type": "integer", "minimum": 0 },
+    "selected_move_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The research-move, formal target or claim this lease dispatches."
+    },
+    "route_id": {
+      "type": ["string", "null"],
+      "description": "Reserved for route-level scheduling (5.11); null until Route objects exist."
+    },
+    "ttl_seconds": { "type": "number", "exclusiveMinimum": 0 },
+    "issued_at": { "type": "number", "minimum": 0 },
+    "expires_at": { "type": ["number", "null"], "minimum": 0 },
+    "policy_name": { "type": "string" },
+    "score_snapshot": { "$ref": "score-vector.schema.json" }
+  }
+}
