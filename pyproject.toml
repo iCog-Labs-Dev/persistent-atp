@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0",
     "neo4j>=5.14",
+    "psycopg[binary]>=3.3.6",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +34,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests"]
+testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests"]
 
 [tool.uv.sources]
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }
