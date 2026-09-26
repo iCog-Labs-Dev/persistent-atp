@@ -1,0 +1,48 @@
+{
+  "packet": {
+    "task_id": "task-7",
+    "proof_id": "p1",
+    "base_revision": 12,
+    "packet_kind": "formal",
+    "content": "Goal: prove a + b = b + a.",
+    "text_budget": null,
+    "formal_limits": {
+      "max_steps": 256,
+      "wall_clock_ms": 30000
+    }
+  },
+  "selection_decisions": [
+    {
+      "source_id": "p1/fs-1",
+      "source_version": "revision-12",
+      "status": "lean-verified",
+      "included": true,
+      "reason": "selected for packet"
+    }
+  ],
+  "manifest": {
+    "task_id": "task-7",
+    "proof_id": "p1",
+    "base_revision": 12,
+    "packet_kind": "formal",
+    "sources": [
+      {
+        "source_id": "p1/fs-1",
+        "source_version": "revision-12",
+        "status": "lean-verified",
+        "included": true,
+        "reason": "selected for packet"
+      }
+    ],
+    "compiler_version": "context/1",
+    "rendering_version": "text/1",
+    "budgets": {
+      "formal_execution": {
+        "max_steps": 256,
+        "wall_clock_ms": 30000
+      }
+    },
+    "packet_digest": "sha256:47470a05c5617f9f77a85d370087810610487bae907263001e50aa3643cc97a2"
+  },
+  "packet_digest": "sha256:47470a05c5617f9f77a85d370087810610487bae907263001e50aa3643cc97a2"
+}

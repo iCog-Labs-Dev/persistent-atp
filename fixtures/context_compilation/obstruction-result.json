@@ -1,0 +1,44 @@
+{
+  "packet": {
+    "task_id": "task-7",
+    "proof_id": "p1",
+    "base_revision": 12,
+    "packet_kind": "obstruction",
+    "content": "Obstruction: a bridge lemma is missing.",
+    "text_budget": {
+      "max_tokens": 900
+    },
+    "formal_limits": null
+  },
+  "selection_decisions": [
+    {
+      "source_id": "p1/obs-1",
+      "source_version": "revision-12",
+      "status": "open",
+      "included": true,
+      "reason": "selected for packet"
+    }
+  ],
+  "manifest": {
+    "task_id": "task-7",
+    "proof_id": "p1",
+    "base_revision": 12,
+    "packet_kind": "obstruction",
+    "sources": [
+      {
+        "source_id": "p1/obs-1",
+        "source_version": "revision-12",
+        "status": "open",
+        "included": true,
+        "reason": "selected for packet"
+      }
+    ],
+    "compiler_version": "context/1",
+    "rendering_version": "text/1",
+    "budgets": {
+      "text_tokens": 900
+    },
+    "packet_digest": "sha256:19fc6f268334ec46451a38db823740fa95948a3a74d62e5283af1f1490ee669e"
+  },
+  "packet_digest": "sha256:19fc6f268334ec46451a38db823740fa95948a3a74d62e5283af1f1490ee669e"
+}

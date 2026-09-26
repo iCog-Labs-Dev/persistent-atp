@@ -1,0 +1,11 @@
+{
+  "task_id": "task-7",
+  "proof_id": "p1",
+  "base_revision": 12,
+  "packet_kind": "obstruction",
+  "worker_class": "coordinator",
+  "text_budget": {
+    "max_tokens": 900
+  },
+  "formal_limits": null
+}
