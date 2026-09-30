@@ -15,10 +15,11 @@ The architecture enforces a strict separation between proof search and proof com
 
 ### Where the Database Integrates
 
-The system relies on two databases, handled behind clear boundaries:
+The system relies on three stores, handled behind clear boundaries:
 
 - **SQL Journal Store**: Handles append-only logging of events and optimistic concurrency control (fencing tokens, base revisions). This is implemented in `commit_gate/store.py` (currently backed by `sqlite3` for local testing, but designed to be replaced with Postgres or similar).
 - **Neo4j Graph Database**: Acts as a read-optimized projection of the journal. The `commit_gate/state.py` module defines a `ReadView` protocol. To integrate Neo4j, implement this protocol to query the live Neo4j database, allowing the gate's validators to read current state without being coupled to the Cypher syntax.
+- **Artifact Store**: Content-addressed, byte-level storage for large objects (Lean traces, prompts, model outputs, source files) that the graph and journal reference only by `sha256:`-prefixed hash, never by value. `validate.py`'s `check_references` already treats such hashes as unscoped, content-addressed identities (see `UNSCOPED_LABELS`). See `src/artifacts/README.md` for the implementation.
 
 ## File Summary
 
