@@ -23,7 +23,7 @@ class TestCommitGate(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", node_id, {"status": "open"}),),
             **overrides,
         )
@@ -34,7 +34,7 @@ class TestCommitGate(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("TacticApplication", "p1/ta1", {"executor_result": "lean-accepted"}),),
             base_revision=0,
         )
@@ -131,7 +131,7 @@ class TestRejectionJournal(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="worker-1",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", node_id, {"status": "open"}),),
             base_revision=base,
             lease_id=lease,
@@ -142,7 +142,7 @@ class TestRejectionJournal(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("TacticApplication", "p1/ta1", {"executor_result": "lean-accepted"}),),
             base_revision=0,
         )
@@ -176,7 +176,7 @@ class TestRejectionJournal(unittest.TestCase):
         stale = Proposal(
             proof_id="p1",
             actor="worker-2",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", "p1/fs9", {"status": "open"}),),
             base_revision=0,
             lease_id="nope",

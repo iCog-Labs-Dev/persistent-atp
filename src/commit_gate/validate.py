@@ -137,9 +137,8 @@ WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
 """The atom labels each worker class may create or overwrite.
 
 Issuing multi-class leases is unsafe without this: an explorer must not close
-formal states, and a critic must not invent declarations. A worker_class
-outside this table (and outside `TRUSTED_WORKER_CLASSES`) is unmanaged -- the
-scheduler never issues it a lease, so its proposals are not policed here.
+formal states, and a critic must not invent declarations. Every non-trusted
+worker class must be present in this table; unknown classes have no authority.
 """
 
 UNIVERSAL_WORKER_AUTHORITY = frozenset({"Attempt"})
@@ -312,8 +311,15 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
     atom's type.
     """
     worker_class = proposal.worker_class
+    if worker_class in TRUSTED_WORKER_CLASSES:
+        return
+
     authority = WORKER_CLASS_AUTHORITY.get(worker_class)
-    if authority is None or worker_class in TRUSTED_WORKER_CLASSES:
+    if authority is None:
+        yield Rejection(
+            Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+            f"unknown worker class {worker_class!r} has no assigned authority",
+        )
         return
     authority = authority | UNIVERSAL_WORKER_AUTHORITY
 

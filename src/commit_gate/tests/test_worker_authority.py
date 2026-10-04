@@ -104,12 +104,9 @@ class TestWorkerAuthority(unittest.TestCase):
             )
             self.assertEqual(self.validate(anything), [])
 
-    def test_unmanaged_worker_class_is_not_policed(self):
-        """Legacy free-form classes get no lease, so no authority check."""
-        legacy = propose("test", UpsertNode("Claim", "p1/c-9", {}))
-        self.assertNotIn(
-            Reason.WORKER_CLASS_OUT_OF_AUTHORITY, self.validate(legacy)
-        )
+    def test_unknown_worker_class_is_rejected(self):
+        unknown = propose("unregistered-worker", UpsertNode("Claim", "p1/c-9", {}))
+        self.assertIn(Reason.WORKER_CLASS_OUT_OF_AUTHORITY, self.validate(unknown))
 
 
 if __name__ == "__main__":
