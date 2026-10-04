@@ -149,6 +149,45 @@ class may create the Attempt that closes its result."""
 UNSCOPED_LABELS = frozenset({"Artifact"})
 """Labels that are content-addressed and therefore carry no proof scope."""
 
+WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
+    WorkerClass.FORMAL_ATP.value: frozenset(
+        {
+            "HAS_TACTIC",
+            "FORMAL_REQUIRES",
+            "CLOSES_STATE",
+            "HAS_ROOT",
+            "HAS_CHECKPOINT",
+            "CHECKPOINT_FRONTIER",
+            "RAN_UNDER",
+            "SEARCHES",
+            "PRODUCED_CERTIFICATE",
+            "CERTIFIES",
+            "CERTIFICATE_ENVIRONMENT",
+            "PROVED_BY",
+            "RAISED_OBSTRUCTION",
+            "AT_STATE",
+            "HAS_TARGET",
+        }
+    ),
+    WorkerClass.REPLAYER.value: frozenset({"REPLAYED_BY", "REPLAY_ENVIRONMENT"}),
+    WorkerClass.LLM_RESEARCH.value: frozenset(
+        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
+    ),
+    WorkerClass.HYPERON.value: frozenset(
+        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
+    ),
+    WorkerClass.CRITIC.value: frozenset({"REVIEWS_CLAIM"}),
+    WorkerClass.ALIGNMENT_REVIEWER.value: frozenset(
+        {"ALIGNS_CLAIM", "ALIGNS_DECLARATION"}
+    ),
+    WorkerClass.EXPERIMENT.value: frozenset(),
+}
+"""The relationships each worker class may assert or remove.
+
+Relationship authority is separate from endpoint validation: compatible node
+labels do not establish that a worker may make the assertion.
+"""
+
 EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
     "HAS_TACTIC": ("FormalState", "TacticApplication"),
     "FORMAL_REQUIRES": ("TacticApplication", "FormalState"),
@@ -306,9 +345,8 @@ def _identities(op: Op) -> Iterator[tuple[str, Any]]:
 def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
     """A worker class writes only the atom types it has authority over.
 
-    Edge ops are not checked here -- their endpoints are label-checked
-    elsewhere, and creating an edge between two existing nodes changes no
-    atom's type.
+    Edge endpoint types are validated separately; this check also limits who
+    may assert or remove each relationship.
     """
     worker_class = proposal.worker_class
     if worker_class in TRUSTED_WORKER_CLASSES:
@@ -322,6 +360,7 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
         )
         return
     authority = authority | UNIVERSAL_WORKER_AUTHORITY
+    edge_authority = WORKER_CLASS_EDGE_AUTHORITY.get(worker_class, frozenset())
 
     for index, op in enumerate(proposal.ops):
         if isinstance(op, (UpsertNode, SetField)) and op.label not in authority:
@@ -329,6 +368,14 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
                 Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
                 f"worker class {worker_class!r} has no authority over "
                 f"{op.label} nodes (authority: {sorted(authority)})",
+                index,
+            )
+        elif isinstance(op, (AddEdge, RemoveEdge)) and op.rel_type not in edge_authority:
+            yield Rejection(
+                Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                f"worker class {worker_class!r} has no authority over "
+                f"{op.rel_type!r} relationships "
+                f"(authority: {sorted(edge_authority)})",
                 index,
             )
 
