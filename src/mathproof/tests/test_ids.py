@@ -24,7 +24,7 @@ class TestReservedNamespace(unittest.TestCase):
     def test_derived_types_cover_remaining_gate_labels(self):
         self.assertEqual(
             {t.value for t in DERIVED_ID_TYPES},
-            {"env", "fc", "sh", "at"},
+            {"env", "fc", "sh", "at", "ls"},
         )
 
     def test_prefixes_are_unique(self):
