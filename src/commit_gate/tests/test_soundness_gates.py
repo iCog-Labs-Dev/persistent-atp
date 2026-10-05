@@ -87,6 +87,14 @@ class TestReplayGate(unittest.TestCase):
         )
         self.assertEqual(replay.op_index, 0)
 
+    def test_direct_verified_claim_creation_needs_evidence(self):
+        proposal = propose(
+            UpsertNode("Claim", "p1/new-claim", {"status": "lean-verified"})
+        )
+        reasons = self.reasons(proposal)
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
+        self.assertIn(Reason.PROMOTION_WITHOUT_ALIGNMENT, reasons)
+
     def test_broken_chain_without_certificate(self):
         self.view.add_node("p1/claim1", "Claim", {"status": "formally-closed"})
         reasons = self.reasons(propose(promote()))

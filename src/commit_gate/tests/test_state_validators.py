@@ -169,6 +169,14 @@ class TestCriticGating(unittest.TestCase):
     def test_promotion_without_a_verdict_is_rejected(self):
         self.assertIn(Reason.CRITIC_VERDICT_REQUIRED, self.promote())
 
+    def test_direct_critic_accepted_creation_needs_verdict(self):
+        proposal = propose(
+            UpsertNode("Claim", "p1/c-new", {"status": "critic-accepted"})
+        )
+        reasons = {f.reason for f in validate_proposal(proposal, self.view)}
+        self.assertIn(Reason.CRITIC_VERDICT_REQUIRED, reasons)
+        self.assertIn(Reason.PROMOTION_WITHOUT_ALIGNMENT, reasons)
+
     def test_promotion_with_attached_favorable_verdict_passes(self):
         self.aligned()
         self.assertEqual(self.promote(*self.critic_attempt("p1/at-1")), [])

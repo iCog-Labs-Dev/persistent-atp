@@ -811,13 +811,11 @@ def check_critic_gating(proposal: Proposal, view: ReadView) -> Iterator[Rejectio
     promote; the scheduler's frontier filters on the promoted status, so a
     claim could otherwise reach it on its own say-so.
     """
-    promotions: list[tuple[int, str]] = [
-        (index, op.node_id)
-        for index, op in enumerate(proposal.ops)
-        if isinstance(op, SetField)
-        and op.label == "Claim"
-        and op.field == "status"
-        and op.value == ClaimStatus.CRITIC_ACCEPTED.value
+    promotions = [
+        (index, claim_id)
+        for index, claim_id, _ in _claim_promotions(
+            proposal, {ClaimStatus.CRITIC_ACCEPTED.value}
+        )
     ]
     if not promotions:
         return
@@ -870,6 +868,24 @@ def _created_fields(proposal: Proposal) -> dict[str, Any]:
     return {
         op.node_id: dict(op.fields) for op in proposal.ops if isinstance(op, UpsertNode)
     }
+
+
+def _claim_promotions(
+    proposal: Proposal, targets: frozenset[str] | set[str]
+) -> Iterator[tuple[int, str, str]]:
+    """Claim creations or status writes that publish a promoted status."""
+    for index, op in enumerate(proposal.ops):
+        if isinstance(op, UpsertNode) and op.label == "Claim":
+            status = op.fields.get("status")
+            if status in targets:
+                yield index, op.node_id, status
+        elif (
+            isinstance(op, SetField)
+            and op.label == "Claim"
+            and op.field == "status"
+            and op.value in targets
+        ):
+            yield index, op.node_id, op.value
 
 
 def _proposed_edges(proposal: Proposal, rel_type: str) -> list[tuple[str, str]]:
@@ -975,16 +991,9 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     """
     created = _created_fields(proposal)
 
-    for index, op in enumerate(proposal.ops):
-        if not (
-            isinstance(op, SetField)
-            and op.label == "Claim"
-            and op.field == "status"
-            and op.value == ClaimStatus.LEAN_VERIFIED.value
-        ):
-            continue
-
-        claim_id = op.node_id
+    for index, claim_id, _ in _claim_promotions(
+        proposal, {ClaimStatus.LEAN_VERIFIED.value}
+    ):
         cert_ids = _edge_targets_after(proposal, view, claim_id, "PROVED_BY")
 
         verified_certs: set[str] = set()
@@ -1055,20 +1064,13 @@ def check_claim_alignment(proposal: Proposal, view: ReadView) -> Iterator[Reject
     """
     created = _created_fields(proposal)
 
-    for index, op in enumerate(proposal.ops):
-        if not (
-            isinstance(op, SetField)
-            and op.label == "Claim"
-            and op.field == "status"
-            and op.value in CLAIM_PROMOTION_TARGETS
-        ):
-            continue
-
-        claim_id = op.node_id
+    for index, claim_id, status in _claim_promotions(
+        proposal, CLAIM_PROMOTION_TARGETS
+    ):
         if not _reviewed_alignments(proposal, view, created, claim_id):
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_ALIGNMENT,
-                f"claim {claim_id!r} promotes to {op.value!r} without an "
+                f"claim {claim_id!r} promotes to {status!r} without an "
                 "alignment that is reviewed and aligned",
                 index,
             )
