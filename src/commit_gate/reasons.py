@@ -51,11 +51,15 @@ class Reason(StrEnum):
     STAGNATION_WITHOUT_OBSTRUCTION = "stagnation-without-obstruction"
     SELF_CERTIFICATION = "self-certification"
     PROMOTION_WITHOUT_REPLAY = "promotion-without-replay"
+    PROMOTION_WITHOUT_VALID_CERTIFICATE = "promotion-without-valid-certificate"
     PROMOTION_WITHOUT_ALIGNMENT = "promotion-without-alignment"
     PROMOTION_WITHOUT_DECLARATION_CHAIN = "promotion-without-declaration-chain"
+    PROMOTION_WITHOUT_ENVIRONMENT_BINDING = "promotion-without-environment-binding"
+    CERTIFICATE_BINDING_INCOMPLETE = "certificate-binding-incomplete"
     ENVIRONMENT_DRIFT = "environment-drift"
     CRITIC_VERDICT_REQUIRED = "critic-verdict-required"
     WORKER_CLASS_OUT_OF_AUTHORITY = "worker-class-out-of-authority"
+    PROVENANCE_ACTOR_MISMATCH = "provenance-actor-mismatch"
 
     # Lost races. The proposal was well formed; the journal moved under it.
     STALE_BASE_REVISION = "stale-base-revision"

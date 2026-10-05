@@ -76,6 +76,13 @@ class TestStateValidators(unittest.TestCase):
         reasons = self.validate(proposal)
         self.assertIn(Reason.IMMUTABLE_FIELD_OVERWRITE, reasons)
 
+    def test_committed_environment_hash_cannot_be_rewritten(self):
+        self.view.add_node("p1/cert1", "Certificate", {"environment_hash": H1})
+        proposal = propose(
+            SetField("Certificate", "p1/cert1", "environment_hash", H2, prior=H1)
+        )
+        self.assertIn(Reason.IMMUTABLE_FIELD_OVERWRITE, self.validate(proposal))
+
     def test_check_stagnation_without_obstruction(self):
         self.view.add_node("p1/run1", "FormalRun", {"status": "searching"})
         proposal = propose(SetField("FormalRun", "p1/run1", "status", "stagnated", prior="searching"))
@@ -248,9 +255,13 @@ class TestEnvironmentBinding(unittest.TestCase):
         self.view.add_node("p1/env1", "Environment", {"environment_hash": H1})
         self.view.add_node("p1/env2", "Environment", {"environment_hash": H2})
         self.view.add_node("p1/fd1", "FormalDeclaration", {"status": "searching"})
-        self.view.add_node("p1/run1", "FormalRun", {"status": "proved-pending-replay"})
+        self.view.add_node(
+            "p1/run1", "FormalRun",
+            {"status": "proved-pending-replay", "environment_hash": H1},
+        )
         self.view.add_edge("PINNED_ENVIRONMENT", "p1/fd1", "p1/env1", "p1/e-pin")
         self.view.add_edge("SEARCHES", "p1/run1", "p1/fd1", "p1/e-search")
+        self.view.add_edge("RAN_UNDER", "p1/run1", "p1/env1", "p1/e-run-env")
 
     def certificate(self, cert_id="p1/cert2", env="p1/env2", status="candidate"):
         fields = {
@@ -264,6 +275,7 @@ class TestEnvironmentBinding(unittest.TestCase):
             UpsertNode("Certificate", cert_id, fields),
             AddEdge("CERTIFICATE_ENVIRONMENT", cert_id, env, f"{cert_id}-env-{env}"),
             AddEdge("PRODUCED_CERTIFICATE", "p1/run1", cert_id, f"{cert_id}-from-run"),
+            AddEdge("CERTIFIES", cert_id, "p1/fd1", f"{cert_id}-certifies"),
         ]
 
     def reasons(self, ops) -> set:
@@ -281,11 +293,25 @@ class TestEnvironmentBinding(unittest.TestCase):
         ops = self.certificate(env="p1/env1")
         self.assertEqual(validate_proposal(propose(*ops), self.view), [])
 
-    def test_c4_no_pinned_declaration_leaves_the_check_silent(self):
+    def test_c4_no_pinned_declaration_is_incomplete(self):
         self.view.remove_edge("p1/e-pin")
-        self.assertNotIn(
-            Reason.ENVIRONMENT_DRIFT, self.reasons(self.certificate())
+        self.assertIn(
+            Reason.CERTIFICATE_BINDING_INCOMPLETE, self.reasons(self.certificate())
         )
+
+    def test_c4_missing_producing_run_is_incomplete(self):
+        ops = [
+            op for op in self.certificate()
+            if not (isinstance(op, AddEdge) and op.rel_type == "PRODUCED_CERTIFICATE")
+        ]
+        self.assertIn(Reason.CERTIFICATE_BINDING_INCOMPLETE, self.reasons(ops))
+
+    def test_c4_missing_certified_declaration_is_incomplete(self):
+        ops = [
+            op for op in self.certificate()
+            if not (isinstance(op, AddEdge) and op.rel_type == "CERTIFIES")
+        ]
+        self.assertIn(Reason.CERTIFICATE_BINDING_INCOMPLETE, self.reasons(ops))
 
     def test_c4_status_flip_to_replay_accepted_on_drifted_cert_is_rejected(self):
         self.view.add_node(
@@ -302,6 +328,8 @@ class TestEnvironmentBinding(unittest.TestCase):
         self.view.add_edge(
             "PRODUCED_CERTIFICATE", "p1/run1", "p1/cert3", "p1/e-pc3"
         )
+        self.view.add_edge("CERTIFIES", "p1/cert3", "p1/fd1", "p1/e-c3-fd")
+        self.view.add_edge("CERTIFICATE_ENVIRONMENT", "p1/cert3", "p1/env2", "p1/e-c3-env")
         proposal = propose(
             SetField("Certificate", "p1/cert3", "status", "replay-accepted",
                      prior="replay-pending"),

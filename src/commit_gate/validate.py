@@ -11,6 +11,7 @@ rather than the first failure.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any, Iterator, Mapping
 
@@ -144,6 +145,11 @@ worker class must be present in this table; unknown classes have no authority.
 UNIVERSAL_WORKER_AUTHORITY = frozenset({"Attempt"})
 """Provenance every worker journals about its own work: any schedulable
 class may create the Attempt that closes its result."""
+
+PROVENANCE_ACTOR_LABELS = frozenset(
+    {"Certificate", "LeanReplay", "Alignment", "Attempt"}
+)
+"""Evidence records whose stated actor must be the leased worker."""
 
 
 UNSCOPED_LABELS = frozenset({"Artifact"})
@@ -362,6 +368,18 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
     edge_authority = WORKER_CLASS_EDGE_AUTHORITY.get(worker_class, frozenset())
 
     for index, op in enumerate(proposal.ops):
+        if (
+            isinstance(op, UpsertNode)
+            and op.label in PROVENANCE_ACTOR_LABELS
+            and "actor" in op.fields
+            and op.fields["actor"] != proposal.actor
+        ):
+            yield Rejection(
+                Reason.PROVENANCE_ACTOR_MISMATCH,
+                f"{op.label} {op.node_id!r} names actor {op.fields['actor']!r}, "
+                f"but the leased proposer is {proposal.actor!r}",
+                index,
+            )
         if isinstance(op, (UpsertNode, SetField)) and op.label not in authority:
             yield Rejection(
                 Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
@@ -949,25 +967,113 @@ def _fields_of(
     return record.fields if record is not None else None
 
 
+def _fields_after(
+    node_id: str, created: dict[str, Any], proposal: Proposal, view: ReadView
+) -> Mapping[str, Any] | None:
+    """Node fields after all field writes in a proposal."""
+    fields = _fields_of(node_id, created, view)
+    if fields is None:
+        return None
+    effective = dict(fields)
+    for op in proposal.ops:
+        if isinstance(op, SetField) and op.node_id == node_id:
+            effective[op.field] = op.value
+    return effective
+
+
 def _reviewed_alignments(
     proposal: Proposal, view: ReadView, created: dict[str, Any], claim_id: str
 ) -> set[str]:
     """Alignments still accepted for this claim after the proposal."""
     accepted = set()
     for alignment_id in _edge_sources_after(proposal, view, claim_id, "ALIGNS_CLAIM"):
-        fields = _fields_of(alignment_id, created, view)
+        fields = _fields_after(alignment_id, created, proposal, view)
         if fields is None:
             continue
-        effective = dict(fields)
-        for op in proposal.ops:
-            if isinstance(op, SetField) and op.node_id == alignment_id:
-                effective[op.field] = op.value
         if (
-            effective.get("lifecycle") == AlignmentLifecycle.REVIEWED.value
-            and effective.get("verdict") == AlignmentVerdict.ALIGNED.value
+            fields.get("lifecycle") == AlignmentLifecycle.REVIEWED.value
+            and fields.get("verdict") == AlignmentVerdict.ALIGNED.value
         ):
             accepted.add(alignment_id)
     return accepted
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _certificate_binding_issue(
+    proposal: Proposal,
+    view: ReadView,
+    created: dict[str, Any],
+    cert_id: str,
+    declaration_id: str,
+) -> tuple[Reason, str] | None:
+    """Validate the certificate's run, declaration and pinned environment."""
+    cert = _fields_after(cert_id, created, proposal, view)
+    if cert is None or not _is_sha256(cert.get("artifact_hash")):
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "missing valid artifact_hash"
+    if not _is_sha256(cert.get("environment_hash")):
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "missing valid environment_hash"
+    if _edge_targets_after(proposal, view, cert_id, "CERTIFIES") != {declaration_id}:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "no unique certified declaration"
+
+    run_id = cert.get("producer_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "missing producer_run_id"
+    run = _fields_after(run_id, created, proposal, view)
+    if run is None or run.get("status") != RunDisposition.PROVED_PENDING_REPLAY.value:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "missing successful producing run"
+    if _edge_sources_after(proposal, view, cert_id, "PRODUCED_CERTIFICATE") != {run_id}:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "producing run is not linked to certificate"
+    if _edge_targets_after(proposal, view, run_id, "SEARCHES") != {declaration_id}:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "run did not search certified declaration"
+
+    pinned = _edge_targets_after(proposal, view, declaration_id, "PINNED_ENVIRONMENT")
+    if len(pinned) != 1:
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "declaration has no unique environment pin"
+    env_id = next(iter(pinned))
+    environment = _fields_after(env_id, created, proposal, view)
+    env_hash = environment.get("environment_hash") if environment else None
+    if not _is_sha256(env_hash):
+        return Reason.CERTIFICATE_BINDING_INCOMPLETE, "pinned environment has no valid hash"
+    if cert.get("environment_hash") != env_hash or run.get("environment_hash") != env_hash:
+        return Reason.ENVIRONMENT_DRIFT, "certificate or run environment hash differs from the pin"
+    for source, relation in (
+        (cert_id, "CERTIFICATE_ENVIRONMENT"),
+        (run_id, "RAN_UNDER"),
+    ):
+        if _edge_targets_after(proposal, view, source, relation) != {env_id}:
+            return Reason.CERTIFICATE_BINDING_INCOMPLETE, f"{relation} does not identify the pin"
+    return None
+
+
+def _promotion_environment_issue(
+    proposal: Proposal,
+    view: ReadView,
+    created: dict[str, Any],
+    cert_id: str,
+    declaration_id: str,
+    replay_id: str,
+) -> str | None:
+    """Why this exact certificate, declaration and replay lack a common pin."""
+    certificate_issue = _certificate_binding_issue(
+        proposal, view, created, cert_id, declaration_id
+    )
+    if certificate_issue is not None:
+        return certificate_issue[1]
+
+    replay = _fields_after(replay_id, created, proposal, view)
+    if replay is None:
+        return "replay record is missing"
+    pinned = _edge_targets_after(proposal, view, declaration_id, "PINNED_ENVIRONMENT")
+    env_id = next(iter(pinned))
+    environment = _fields_after(env_id, created, proposal, view)
+    if replay.get("environment_hash") != environment["environment_hash"]:
+        return "replay environment hash differs from the pin"
+    if _edge_targets_after(proposal, view, replay_id, "REPLAY_ENVIRONMENT") != {env_id}:
+        return "REPLAY_ENVIRONMENT does not identify the pinned environment"
+    return None
 
 
 def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
@@ -980,14 +1086,10 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     by this proposal's actor is self-certification: it never counts as
     evidence, and is reported on its own so the worker sees why.
 
-    The finding itself refuses the proposal, so a self-certified replay
-    poisons every promotion that can still see it — even one carrying other
-    valid replays. Remediation is a retraction of the offending REPLAYED_BY
-    edge in its own committed event; the chain then walks clean.
-
     A lean-verified claim also needs one declaration reached both by that
     replayed certificate's CERTIFIES edge and by a reviewed alignment's
-    ALIGNS_DECLARATION edge.
+    ALIGNS_DECLARATION edge. The certificate, its run, its replay and the
+    declaration must all bind to the same pinned environment.
     """
     created = _created_fields(proposal)
 
@@ -996,15 +1098,15 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     ):
         cert_ids = _edge_targets_after(proposal, view, claim_id, "PROVED_BY")
 
-        verified_certs: set[str] = set()
+        verified_certs: dict[str, set[str]] = defaultdict(set)
         reported_self_certifications: set[str] = set()
         for cert_id in sorted(cert_ids):
-            cert_fields = _fields_of(cert_id, created, view)
+            cert_fields = _fields_after(cert_id, created, proposal, view)
             producer_actor = cert_fields.get("actor") if cert_fields else None
 
             replay_ids = _edge_targets_after(proposal, view, cert_id, "REPLAYED_BY")
             for replay_id in sorted(replay_ids):
-                fields = _fields_of(replay_id, created, view)
+                fields = _fields_after(replay_id, created, proposal, view)
                 if fields is None:
                     continue
                 actor = fields.get("actor")
@@ -1019,16 +1121,39 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                         )
                     continue
                 if (
-                    fields.get("status") == ReplayStatus.VERIFIED.value
+                    isinstance(actor, str)
+                    and bool(actor)
+                    and fields.get("status") == ReplayStatus.VERIFIED.value
                     and fields.get("sorry_detected") is False
                 ):
-                    verified_certs.add(cert_id)
+                    verified_certs[cert_id].add(replay_id)
 
         if not verified_certs:
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_REPLAY,
                 f"claim {claim_id!r} has no independent replay with "
                 "status=verified and sorry_detected=false",
+                index,
+            )
+            continue
+
+        usable_certs = {
+            cert_id: replay_ids
+            for cert_id, replay_ids in verified_certs.items()
+            if (
+                (fields := _fields_after(cert_id, created, proposal, view)) is not None
+                and isinstance(fields.get("actor"), str)
+                and bool(fields.get("actor"))
+                and fields.get("status") == CertificateStatus.REPLAY_ACCEPTED.value
+                and _is_sha256(fields.get("artifact_hash"))
+                and _is_sha256(fields.get("environment_hash"))
+            )
+        }
+        if not usable_certs:
+            yield Rejection(
+                Reason.PROMOTION_WITHOUT_VALID_CERTIFICATE,
+                f"claim {claim_id!r} has no independently replayed certificate "
+                "with replay-accepted status and valid artifact/environment hashes",
                 index,
             )
             continue
@@ -1040,16 +1165,39 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                 proposal, view, alignment_id, "ALIGNS_DECLARATION"
             )
         }
-        if not any(
-            _edge_targets_after(proposal, view, cert_id, "CERTIFIES")
-            & aligned_declarations
-            for cert_id in verified_certs
-        ):
+        matching_paths: list[tuple[str, str, str]] = []
+        for cert_id, replay_ids in sorted(usable_certs.items()):
+            declarations = _edge_targets_after(proposal, view, cert_id, "CERTIFIES")
+            if len(declarations) != 1:
+                continue
+            declaration_id = next(iter(declarations))
+            if declaration_id in aligned_declarations:
+                matching_paths.extend(
+                    (cert_id, declaration_id, replay_id)
+                    for replay_id in sorted(replay_ids)
+                )
+        if not matching_paths:
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN,
                 f"claim {claim_id!r} has no independently replayed certificate "
                 "that certifies a declaration in a reviewed, aligned "
                 "alignment for this claim",
+                index,
+            )
+            continue
+
+        environment_issues = [
+            issue
+            for cert_id, declaration_id, replay_id in matching_paths
+            if (issue := _promotion_environment_issue(
+                proposal, view, created, cert_id, declaration_id, replay_id
+            )) is not None
+        ]
+        if len(environment_issues) == len(matching_paths):
+            yield Rejection(
+                Reason.PROMOTION_WITHOUT_ENVIRONMENT_BINDING,
+                f"claim {claim_id!r} has no replayed certificate bound to its "
+                f"declaration's pinned environment: {environment_issues[0]}",
                 index,
             )
 
@@ -1079,7 +1227,7 @@ def check_claim_alignment(proposal: Proposal, view: ReadView) -> Iterator[Reject
 CERTIFICATE_VALID_STATUSES = frozenset(
     {CertificateStatus.CANDIDATE.value, CertificateStatus.REPLAY_ACCEPTED.value}
 )
-"""Certificate statuses that assert the artifact is usable evidence.
+"""Certificate statuses whose pinned binding must be complete at commit.
 
 Committing a certificate under one of them binds it to the declaration's
 pinned toolchain; under any other environment hash it may only enter the
@@ -1088,68 +1236,39 @@ graph as `stale`.
 
 
 def check_environment_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
-    """A certificate is only valid under its declaration's pinned environment.
+    """Candidate and accepted certificates require a complete pinned binding.
 
-    C4: after a mathlib bump, a re-run produces a different
-    environment_hash. That second certificate is not silently accepted as
-    fresh evidence -- it may only be committed as `stale`. The binding is
-    read through the run that produced the certificate (PRODUCED_CERTIFICATE,
-    then SEARCHES to the declaration, then PINNED_ENVIRONMENT to an
-    Environment); where no pin exists there is nothing to enforce and the
-    check stays silent.
+    Incomplete certificates may be recorded as stale, but cannot enter a
+    status that makes them available as proof evidence.
     """
     created = _created_fields(proposal)
-    produced = _proposed_edges(proposal, "PRODUCED_CERTIFICATE")
-    searches = _proposed_edges(proposal, "SEARCHES")
-    pinned = _proposed_edges(proposal, "PINNED_ENVIRONMENT")
-
-    def committed_env_hash(env_id: str) -> Any:
-        fields = _fields_of(env_id, created, view)
-        return fields.get("environment_hash") if fields else None
 
     for index, op in enumerate(proposal.ops):
         if isinstance(op, UpsertNode) and op.label == "Certificate":
             cert_id, status = op.node_id, op.fields.get("status")
-            env_hash = op.fields.get("environment_hash")
         elif (
             isinstance(op, SetField)
             and op.label == "Certificate"
             and op.field == "status"
         ):
-            cert_id = op.node_id
-            record = view.node(cert_id)
-            if record is None:
-                continue
-            status = op.value
-            env_hash = record.fields.get("environment_hash")
+            cert_id, status = op.node_id, op.value
         else:
             continue
 
-        if status not in CERTIFICATE_VALID_STATUSES or not env_hash:
+        if status not in CERTIFICATE_VALID_STATUSES:
             continue
-
-        run_ids = [edge.src_id for edge in view.edges_to(cert_id, "PRODUCED_CERTIFICATE")]
-        run_ids += [src for src, dst in produced if dst == cert_id]
-
-        pinned_hashes: set[Any] = set()
-        for run_id in run_ids:
-            decl_ids = [edge.dst_id for edge in view.edges_from(run_id, "SEARCHES")]
-            decl_ids += [dst for src, dst in searches if src == run_id]
-            for decl_id in decl_ids:
-                env_ids = [
-                    edge.dst_id for edge in view.edges_from(decl_id, "PINNED_ENVIRONMENT")
-                ]
-                env_ids += [dst for src, dst in pinned if src == decl_id]
-                for env_id in env_ids:
-                    h = committed_env_hash(env_id)
-                    if h is not None:
-                        pinned_hashes.add(h)
-
-        if pinned_hashes and env_hash not in pinned_hashes:
+        declarations = _edge_targets_after(proposal, view, cert_id, "CERTIFIES")
+        if len(declarations) != 1:
             yield Rejection(
-                Reason.ENVIRONMENT_DRIFT,
-                f"certificate {cert_id!r} was produced under {env_hash!r} but "
-                f"its declaration pins {sorted(map(str, pinned_hashes))}; "
-                "commit it as stale instead",
+                Reason.CERTIFICATE_BINDING_INCOMPLETE,
+                f"certificate {cert_id!r} has no unique CERTIFIES declaration",
                 index,
             )
+            continue
+        declaration_id = next(iter(declarations))
+        issue = _certificate_binding_issue(
+            proposal, view, created, cert_id, declaration_id
+        )
+        if issue is not None:
+            reason, detail = issue
+            yield Rejection(reason, f"certificate {cert_id!r}: {detail}", index)

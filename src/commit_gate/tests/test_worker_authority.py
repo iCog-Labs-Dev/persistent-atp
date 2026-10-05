@@ -128,6 +128,16 @@ class TestWorkerAuthority(unittest.TestCase):
             self.validate(propose("critic", removal)),
         )
 
+    def test_replayer_cannot_claim_another_actor_in_replay_record(self):
+        proposal = propose(
+            "replayer",
+            UpsertNode(
+                "LeanReplay", "p1/replay-1",
+                {"actor": "someone-else", "status": "verified", "sorry_detected": False},
+            ),
+        )
+        self.assertIn(Reason.PROVENANCE_ACTOR_MISMATCH, self.validate(proposal))
+
 
 if __name__ == "__main__":
     unittest.main()
