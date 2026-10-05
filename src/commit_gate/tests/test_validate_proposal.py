@@ -288,11 +288,11 @@ class ConcurrencyTokens(unittest.TestCase):
         proposal = replace(propose(state("p17/fs2")), base_revision=None)
         self.assertEqual(reasons_of(proposal), [Reason.MISSING_CONCURRENCY_TOKEN])
 
-    def test_a_structural_op_needs_no_lease(self):
+    def test_a_structural_op_needs_a_lease(self):
         proposal = replace(
             propose(state("p17/fs2")), lease_id=None, fencing_token=None
         )
-        self.assertEqual(reasons_of(proposal), [])
+        self.assertEqual(reasons_of(proposal), [Reason.MISSING_CONCURRENCY_TOKEN])
 
     def test_a_status_op_without_the_lease_is_rejected(self):
         proposal = replace(
@@ -320,7 +320,7 @@ class ConcurrencyTokens(unittest.TestCase):
             for f in validate_proposal(proposal)
             if f.reason is Reason.MISSING_CONCURRENCY_TOKEN
         ]
-        self.assertEqual([f.op_index for f in findings], [1])
+        self.assertEqual([f.op_index for f in findings], [0])
 
 
 class Findings(unittest.TestCase):

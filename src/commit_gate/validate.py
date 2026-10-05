@@ -258,9 +258,9 @@ def check_concurrency_tokens(proposal: Proposal) -> Iterator[Rejection]:
     """The proposal carries the tokens the journal needs to check it.
 
     `base_revision` is required of everyone: without it there is nothing to
-    compare the head against, and stale work commits silently. A status-class
-    op additionally needs the lease, because it changes what committed state
-    means — two holders writing the same status must not both win.
+    compare the head against, and stale work commits silently. Every mutation
+    needs a lease so the gate can bind the proposer to its assigned worker
+    class and reject stale fencing tokens.
     """
     if proposal.base_revision is None:
         yield Rejection(
@@ -270,22 +270,20 @@ def check_concurrency_tokens(proposal: Proposal) -> Iterator[Rejection]:
 
     if proposal.lease_id is not None and proposal.fencing_token is not None:
         return
-    for index, op in enumerate(proposal.ops):
-        if op.op_class == "status":
-            missing = ", ".join(
-                name
-                for name, value in (
-                    ("lease_id", proposal.lease_id),
-                    ("fencing_token", proposal.fencing_token),
-                )
-                if value is None
+    if proposal.ops:
+        missing = ", ".join(
+            name
+            for name, value in (
+                ("lease_id", proposal.lease_id),
+                ("fencing_token", proposal.fencing_token),
             )
-            yield Rejection(
-                Reason.MISSING_CONCURRENCY_TOKEN,
-                f"status-class op requires the write lease; missing {missing}",
-                index,
-            )
-            return
+            if value is None
+        )
+        yield Rejection(
+            Reason.MISSING_CONCURRENCY_TOKEN,
+            f"mutation requires the write lease; missing {missing}",
+            0,
+        )
 
 
 def check_vocabulary(proposal: Proposal) -> Iterator[Rejection]:

@@ -61,6 +61,8 @@ class Reason(StrEnum):
     STALE_BASE_REVISION = "stale-base-revision"
     LEASE_NOT_HELD = "lease-not-held"
     READ_VIEW_OUT_OF_SYNC = "read-view-out-of-sync"
+    LEASE_IDENTITY_MISMATCH = "lease-identity-mismatch"
+    LEASE_EXPIRED = "lease-expired"
     FENCING_TOKEN_SUPERSEDED = "fencing-token-superseded"
     JOURNAL_BUSY = "journal-busy"
 

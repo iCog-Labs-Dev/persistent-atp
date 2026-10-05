@@ -7,7 +7,7 @@ pin the boundaries the frontier relies on.
 
 import unittest
 
-from commit_gate.ops import SetField, UpsertNode
+from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import MemoryView
@@ -107,6 +107,26 @@ class TestWorkerAuthority(unittest.TestCase):
     def test_unknown_worker_class_is_rejected(self):
         unknown = propose("unregistered-worker", UpsertNode("Claim", "p1/c-9", {}))
         self.assertIn(Reason.WORKER_CLASS_OUT_OF_AUTHORITY, self.validate(unknown))
+
+    def test_only_alignment_reviewer_can_assert_alignment_edges(self):
+        self.view.add_node("p1/al-1", "Alignment")
+        self.view.add_node("p1/c-1", "Claim")
+        edge = AddEdge("ALIGNS_CLAIM", "p1/al-1", "p1/c-1", "p1/e-1")
+        self.assertIn(
+            Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+            self.validate(propose("formal-atp", edge)),
+        )
+        self.assertEqual(self.validate(propose("alignment-reviewer", edge)), [])
+
+    def test_edge_removal_uses_the_same_authority(self):
+        self.view.add_node("p1/al-1", "Alignment")
+        self.view.add_node("p1/c-1", "Claim")
+        self.view.add_edge("ALIGNS_CLAIM", "p1/al-1", "p1/c-1", "p1/e-1")
+        removal = RemoveEdge("ALIGNS_CLAIM", "p1/e-1")
+        self.assertIn(
+            Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+            self.validate(propose("critic", removal)),
+        )
 
 
 if __name__ == "__main__":
