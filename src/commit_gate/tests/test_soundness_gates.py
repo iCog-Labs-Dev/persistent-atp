@@ -1,6 +1,7 @@
 import unittest
 
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
+from commit_gate.apply import apply_ops
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import MemoryView
@@ -148,6 +149,44 @@ class TestReplayGate(unittest.TestCase):
         wire(self.view, replay_fields={"sorry_detected": None})
         reasons = self.reasons(propose(promote()))
         self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
+
+    def test_existing_edge_id_cannot_supply_missing_proof(self):
+        wire(self.view)
+        self.view.remove_edge("p1/claim1-proved-p1/cert1")
+        proposal = propose(
+            AddEdge("PROVED_BY", "p1/claim1", "p1/cert1", "p1/alignment1-aligns-p1/claim1"),
+            promote(),
+        )
+        self.assertIn(Reason.EDGE_ID_CONFLICT, self.reasons(proposal))
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons(proposal))
+
+    def test_remove_then_readd_edge_matches_applied_view(self):
+        wire(self.view)
+        edge_id = "p1/claim1-proved-p1/cert1"
+        proposal = propose(
+            RemoveEdge("PROVED_BY", edge_id),
+            AddEdge("PROVED_BY", "p1/claim1", "p1/cert1", edge_id),
+            promote(),
+        )
+        self.assertEqual(self.reasons(proposal), [])
+        apply_ops(self.view, proposal.ops)
+        self.assertEqual(len(self.view.edges_from("p1/claim1", "PROVED_BY")), 1)
+
+    def test_conflicting_replay_upserts_cannot_substitute_binding(self):
+        wire(self.view)
+        self.view.remove_edge("p1/cert1-replayed-p1/replay1")
+        fields = {
+            "actor": REPLAYER, "status": "verified", "sorry_detected": False,
+            "environment_hash": ENVIRONMENT_HASH, "artifact_hash": ARTIFACT_HASH,
+        }
+        proposal = propose(
+            UpsertNode("LeanReplay", "p1/replay2", {**fields, "certificate_id": "p1/other"}),
+            UpsertNode("LeanReplay", "p1/replay2", {**fields, "certificate_id": "p1/cert1"}),
+            AddEdge("REPLAYED_BY", "p1/cert1", "p1/replay2", "p1/replayed2"),
+            AddEdge("REPLAY_ENVIRONMENT", "p1/replay2", "p1/environment1", "p1/replay2-env"),
+            promote(),
+        )
+        self.assertIn(Reason.UPSERT_FIELD_CONFLICT, self.reasons(proposal))
 
 
 class TestSelfCertificationGate(unittest.TestCase):

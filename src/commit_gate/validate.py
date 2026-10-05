@@ -18,7 +18,7 @@ from typing import Any, Iterator, Mapping
 from .ops import UNSET, AddEdge, Op, RemoveEdge, SetField, UpsertNode
 from .proposal import Proposal
 from .reasons import Reason, Rejection
-from .state import ReadView
+from .state import EdgeRecord, NodeRecord, ReadView
 from .transitions import IMMUTABLE_FIELDS, STATUS_TRANSITIONS
 from .vocab import (
     TERMINAL_EXECUTOR_FAILURES,
@@ -621,37 +621,48 @@ def _is_annotation(name: str) -> bool:
 def check_references(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
     """Node targets must exist, edge endpoints must match type definitions, and
     a removal must name an edge that is really there under that rel type."""
-    created_nodes = {op.node_id: op.label for op in proposal.ops if isinstance(op, UpsertNode)}
-    added_edges = {op.edge_id: op.rel_type for op in proposal.ops if isinstance(op, AddEdge)}
-    removed_edges: set[str] = set()
+    current_nodes: dict[str, NodeRecord] = {}
+    current_edges: dict[str, EdgeRecord | None] = {}
+
+    def get_node(node_id: str) -> NodeRecord | None:
+        return current_nodes.get(node_id) or view.node(node_id)
 
     def get_label(node_id: str) -> str | None:
-        if node_id in created_nodes:
-            return created_nodes[node_id]
-        record = view.node(node_id)
+        record = get_node(node_id)
         return record.label if record else None
-
-    def get_rel(edge_id: str) -> str | None:
-        if edge_id in added_edges:
-            return added_edges[edge_id]
-        record = view.edge(edge_id)
-        return record.rel_type if record else None
 
     for index, op in enumerate(proposal.ops):
         if isinstance(op, SetField):
-            if get_label(op.node_id) is None:
+            record = get_node(op.node_id)
+            if record is None:
                 yield Rejection(
                     Reason.UNKNOWN_NODE,
                     f"SetField targets unknown node {op.node_id!r}",
                     index,
                 )
-            elif get_label(op.node_id) != op.label:
+            elif record.label != op.label:
                 yield Rejection(
                     Reason.NODE_ALREADY_EXISTS_WITH_LABEL,
                     f"SetField label {op.label!r} does not match node {op.node_id!r}",
                     index,
                 )
+            else:
+                current_nodes[op.node_id] = NodeRecord(
+                    op.node_id, op.label, {**record.fields, op.field: op.value}
+                )
         elif isinstance(op, AddEdge):
+            existing = current_edges.get(op.edge_id, view.edge(op.edge_id))
+            proposed = EdgeRecord(
+                op.edge_id, op.rel_type, op.src_id, op.dst_id, dict(op.fields or {})
+            )
+            if existing is not None and existing != proposed:
+                yield Rejection(
+                    Reason.EDGE_ID_CONFLICT,
+                    f"edge id {op.edge_id!r} already identifies a different edge",
+                    index,
+                )
+            elif existing is None:
+                current_edges[op.edge_id] = proposed
             src_label = get_label(op.src_id)
             if src_label is None:
                 yield Rejection(Reason.UNKNOWN_NODE, f"source {op.src_id!r} unknown", index)
@@ -676,9 +687,20 @@ def check_references(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
                         index,
                     )
         elif isinstance(op, UpsertNode):
-            record = view.node(op.node_id)
+            record = get_node(op.node_id)
             if record is None:
-                continue  # genuine create — nothing to check against
+                current_nodes[op.node_id] = NodeRecord(
+                    op.node_id, op.label, dict(op.fields)
+                )
+                continue
+            if record.label != op.label:
+                yield Rejection(
+                    Reason.NODE_ALREADY_EXISTS_WITH_LABEL,
+                    f"UpsertNode label {op.label!r} does not match node "
+                    f"{op.node_id!r}, which is {record.label!r}",
+                    index,
+                )
+                continue
 
             for field, proposed in op.fields.items():
                 committed = record.fields.get(field, UNSET)
@@ -703,16 +725,8 @@ def check_references(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
             # backend can raise this later. It has to be caught here or not at
             # all — and an uncaught one leaves the edge live in MORK while the
             # journal says it is gone.
-            if op.edge_id in removed_edges:
-                yield Rejection(
-                    Reason.UNKNOWN_EDGE,
-                    f"edge {op.edge_id!r} is already removed earlier in this proposal",
-                    index,
-                )
-                continue
-            removed_edges.add(op.edge_id)
-
-            actual_rel = get_rel(op.edge_id)
+            existing = current_edges.get(op.edge_id, view.edge(op.edge_id))
+            actual_rel = existing.rel_type if existing else None
             if actual_rel is None:
                 yield Rejection(
                     Reason.UNKNOWN_EDGE,
@@ -728,18 +742,17 @@ def check_references(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
                     f"{op.edge_id!r} is {actual_rel!r}",
                     index,
                 )
+            else:
+                current_edges[op.edge_id] = None
 
 
 def check_prior_values(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
-    """A non-annotation SetField's prior must match the committed state exactly."""
-    for index, op in enumerate(proposal.ops):
+    """A SetField prior must match the state at that point in the proposal."""
+    for index, op, record in _field_writes_with_prior_state(proposal, view):
         if not isinstance(op, SetField) or op.prior is UNSET:
             continue
-            
-        record = view.node(op.node_id)
         if record is None:
             continue  # Caught by check_references
-            
         current = record.fields.get(op.field)
         if current != op.prior:
             yield Rejection(
@@ -751,22 +764,15 @@ def check_prior_values(proposal: Proposal, view: ReadView) -> Iterator[Rejection
 
 def check_status_transitions(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
     """Status changes must be valid according to the transitions table."""
-    for index, op in enumerate(proposal.ops):
-        if not isinstance(op, SetField):
-            continue
-            
+    for index, op, record in _field_writes_with_prior_state(proposal, view):
         table = STATUS_TRANSITIONS.get((op.label, op.field))
         if table is None:
             continue
-            
-        record = view.node(op.node_id)
         if record is None:
             continue
-            
         current = record.fields.get(op.field)
         if current is None:
             continue  # Schema enforcement issue, not a transition issue
-            
         allowed = table.get(current, frozenset())
         if op.value not in allowed:
             yield Rejection(
@@ -774,6 +780,25 @@ def check_status_transitions(proposal: Proposal, view: ReadView) -> Iterator[Rej
                 f"cannot transition {op.label}.{op.field} from {current!r} to {op.value!r}",
                 index,
             )
+
+
+def _field_writes_with_prior_state(
+    proposal: Proposal, view: ReadView
+) -> Iterator[tuple[int, SetField, NodeRecord | None]]:
+    """Walk field writes over the same node order that apply_ops uses."""
+    state: dict[str, NodeRecord] = {}
+    for index, op in enumerate(proposal.ops):
+        if isinstance(op, UpsertNode):
+            record = state.get(op.node_id) or view.node(op.node_id)
+            if record is None:
+                state[op.node_id] = NodeRecord(op.node_id, op.label, dict(op.fields))
+        elif isinstance(op, SetField):
+            record = state.get(op.node_id) or view.node(op.node_id)
+            yield index, op, record
+            if record is not None:
+                state[op.node_id] = NodeRecord(
+                    op.node_id, record.label, {**record.fields, op.field: op.value}
+                )
 
 
 def check_immutability(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
@@ -919,42 +944,58 @@ def _edge_targets_after(
     proposal: Proposal, view: ReadView, src_id: str, rel_type: str
 ) -> set[str]:
     """Targets of an edge type after this proposal's additions and removals."""
-    removed = {op.edge_id for op in proposal.ops if isinstance(op, RemoveEdge)}
-    targets = {
+    return {
         edge.dst_id
-        for edge in view.edges_from(src_id, rel_type)
-        if edge.edge_id not in removed
+        for edge in _edges_after(proposal, view, rel_type, src_id=src_id)
     }
-    targets.update(
-        op.dst_id
-        for op in proposal.ops
-        if isinstance(op, AddEdge)
-        and op.rel_type == rel_type
-        and op.src_id == src_id
-        and op.edge_id not in removed
-    )
-    return targets
 
 
 def _edge_sources_after(
     proposal: Proposal, view: ReadView, dst_id: str, rel_type: str
 ) -> set[str]:
     """Sources of an edge type after this proposal's additions and removals."""
-    removed = {op.edge_id for op in proposal.ops if isinstance(op, RemoveEdge)}
-    sources = {
+    return {
         edge.src_id
-        for edge in view.edges_to(dst_id, rel_type)
-        if edge.edge_id not in removed
+        for edge in _edges_after(proposal, view, rel_type, dst_id=dst_id)
     }
-    sources.update(
-        op.src_id
-        for op in proposal.ops
-        if isinstance(op, AddEdge)
-        and op.rel_type == rel_type
-        and op.dst_id == dst_id
-        and op.edge_id not in removed
+
+
+def _edges_after(
+    proposal: Proposal,
+    view: ReadView,
+    rel_type: str,
+    *,
+    src_id: str | None = None,
+    dst_id: str | None = None,
+) -> tuple[EdgeRecord, ...]:
+    """Project touched edges in op order, using the same ID semantics as apply_ops."""
+    if src_id is not None:
+        initial = view.edges_from(src_id, rel_type)
+    elif dst_id is not None:
+        initial = view.edges_to(dst_id, rel_type)
+    else:
+        raise ValueError("an edge query needs an endpoint")
+    edges = {edge.edge_id: edge for edge in initial}
+    touched: set[str] = set()
+    for op in proposal.ops:
+        if isinstance(op, (AddEdge, RemoveEdge)) and op.edge_id not in touched and op.edge_id not in edges:
+            existing = view.edge(op.edge_id)
+            if existing is not None:
+                edges[op.edge_id] = existing
+        if isinstance(op, RemoveEdge):
+            edges.pop(op.edge_id, None)
+            touched.add(op.edge_id)
+        elif isinstance(op, AddEdge) and op.edge_id not in edges:
+            edges[op.edge_id] = EdgeRecord(
+                op.edge_id, op.rel_type, op.src_id, op.dst_id, dict(op.fields or {})
+            )
+            touched.add(op.edge_id)
+    return tuple(
+        edge for edge in edges.values()
+        if edge.rel_type == rel_type
+        and (src_id is None or edge.src_id == src_id)
+        and (dst_id is None or edge.dst_id == dst_id)
     )
-    return sources
 
 
 def _fields_of(

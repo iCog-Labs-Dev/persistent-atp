@@ -33,6 +33,27 @@ class TestStateValidators(unittest.TestCase):
         reasons = self.validate(proposal)
         self.assertIn(Reason.UNKNOWN_NODE, reasons)
 
+    def test_existing_node_cannot_be_upserted_under_another_label(self):
+        self.view.add_node("p1/c1", "Claim", {"status": "conjectural"})
+        proposal = propose(UpsertNode("Certificate", "p1/c1", {}))
+        self.assertIn(Reason.NODE_ALREADY_EXISTS_WITH_LABEL, self.validate(proposal))
+
+    def test_duplicate_upsert_cannot_change_label_used_for_edge_validation(self):
+        self.view.add_node("p1/c1", "Claim", {"status": "conjectural"})
+        proposal = propose(
+            UpsertNode("Claim", "p1/x", {"status": "conjectural"}),
+            UpsertNode("Certificate", "p1/x", {}),
+            AddEdge("PROVED_BY", "p1/c1", "p1/x", "p1/e1"),
+        )
+        self.assertIn(Reason.NODE_ALREADY_EXISTS_WITH_LABEL, self.validate(proposal))
+
+    def test_set_field_must_follow_creation_in_op_order(self):
+        proposal = propose(
+            SetField("Claim", "p1/new", "status", "provisional", prior=None),
+            UpsertNode("Claim", "p1/new", {"status": "conjectural"}),
+        )
+        self.assertIn(Reason.UNKNOWN_NODE, self.validate(proposal))
+
     def test_check_references_label_mismatch(self):
         self.view.add_node("p1/fs1", "FormalState", {})
         proposal = propose(SetField("Claim", "p1/fs1", "status", "provisional", prior="open"))
@@ -69,6 +90,22 @@ class TestStateValidators(unittest.TestCase):
         self.view.add_node("p1/fs1", "FormalState", {"status": "formally-closed"})
         proposal = propose(SetField("FormalState", "p1/fs1", "status", "lean-verified", prior="formally-closed"))
         self.assertEqual(self.validate(proposal), [])
+
+    def test_status_transitions_follow_operation_order(self):
+        self.view.add_node("p1/c1", "Claim", {"status": "formally-closed"})
+        proposal = propose(
+            SetField("Claim", "p1/c1", "status", "tainted", prior="formally-closed"),
+            SetField("Claim", "p1/c1", "status", "lean-verified", prior="tainted"),
+        )
+        self.assertIn(Reason.ILLEGAL_STATUS_TRANSITION, self.validate(proposal))
+
+    def test_prior_values_follow_operation_order(self):
+        self.view.add_node("p1/c1", "Claim", {"status": "formally-closed"})
+        proposal = propose(
+            SetField("Claim", "p1/c1", "status", "tainted", prior="formally-closed"),
+            SetField("Claim", "p1/c1", "status", "stale", prior="formally-closed"),
+        )
+        self.assertIn(Reason.PRIOR_VALUE_MISMATCH, self.validate(proposal))
 
     def test_check_immutability(self):
         self.view.add_node("p1/fs1", "FormalState", {"goal_text": "A"})
