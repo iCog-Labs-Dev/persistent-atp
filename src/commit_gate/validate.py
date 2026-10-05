@@ -56,6 +56,7 @@ __all__ = [
     "check_stagnation_obstruction",
     "check_critic_gating",
     "check_claim_replay_evidence",
+    "check_replay_binding",
     "check_claim_alignment",
     "check_environment_binding",
 ]
@@ -253,6 +254,7 @@ def validate_proposal(proposal: Proposal, view: ReadView | None = None) -> list[
         findings.extend(check_immutability(proposal, view))
         findings.extend(check_stagnation_obstruction(proposal, view))
         findings.extend(check_critic_gating(proposal, view))
+        findings.extend(check_replay_binding(proposal, view))
         findings.extend(check_claim_replay_evidence(proposal, view))
         findings.extend(check_claim_alignment(proposal, view))
         findings.extend(check_environment_binding(proposal, view))
@@ -1186,6 +1188,30 @@ def _promotion_environment_issue(
     return None
 
 
+def check_replay_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
+    """A REPLAYED_BY assertion must name the replay's one checked certificate."""
+    created = _created_fields(proposal, view)
+    for index, op in enumerate(proposal.ops):
+        if not isinstance(op, AddEdge) or op.rel_type != "REPLAYED_BY":
+            continue
+        cert = _fields_after(op.src_id, created, proposal, view)
+        replay = _fields_after(op.dst_id, created, proposal, view)
+        sources = _edge_sources_after(proposal, view, op.dst_id, "REPLAYED_BY")
+        if (
+            cert is None or replay is None
+            or replay.get("certificate_id") != op.src_id
+            or not _is_sha256(replay.get("artifact_hash"))
+            or replay.get("artifact_hash") != cert.get("artifact_hash")
+            or sources != {op.src_id}
+        ):
+            yield Rejection(
+                Reason.REPLAY_BINDING_MISMATCH,
+                f"REPLAYED_BY edge {op.edge_id!r} does not bind one certificate "
+                "to a replay of its artifact",
+                index,
+            )
+
+
 def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
     """A claim reaches lean-verified only over an independent verified replay.
 
@@ -1241,8 +1267,6 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                         and fields.get("artifact_hash") != cert_fields.get("artifact_hash")
                     )
                     or not _is_sha256(fields.get("artifact_hash"))
-                    or _edge_sources_after(proposal, view, replay_id, "REPLAYED_BY")
-                    != {cert_id}
                 ):
                     continue
                 actor = fields.get("actor")

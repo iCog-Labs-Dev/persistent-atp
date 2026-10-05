@@ -441,7 +441,7 @@ class TestCertificatePromotion(unittest.TestCase):
                 reasons = {f.reason for f in validate_proposal(propose(promote()), view)}
                 self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
 
-    def test_replay_cannot_be_reused_by_another_certificate(self):
+    def test_existing_invalid_second_link_does_not_poison_valid_replay(self):
         self.view.add_node(
             "p1/cert2", "Certificate",
             {
@@ -452,7 +452,31 @@ class TestCertificatePromotion(unittest.TestCase):
             },
         )
         self.view.add_edge("REPLAYED_BY", "p1/cert2", "p1/replay1", "p1/reused-replay")
-        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons())
+        self.assertEqual(self.reasons(), set())
+
+    def test_replay_link_to_another_certificate_is_rejected_at_creation(self):
+        self.view.add_node(
+            "p1/cert2", "Certificate",
+            {
+                "actor": PRODUCER, "status": "replay-pending",
+                "artifact_hash": ARTIFACT_HASH,
+                "environment_hash": ENVIRONMENT_HASH,
+                "producer_run_id": "p1/run1",
+            },
+        )
+        proposal = propose(
+            AddEdge("REPLAYED_BY", "p1/cert2", "p1/replay1", "p1/reused-replay")
+        )
+        reasons = {f.reason for f in validate_proposal(proposal, self.view)}
+        self.assertIn(Reason.REPLAY_BINDING_MISMATCH, reasons)
+
+    def test_replay_link_requires_matching_artifact_hash(self):
+        self.view.set_field("p1/replay1", "artifact_hash", "sha256:" + "bb" * 32)
+        proposal = propose(
+            AddEdge("REPLAYED_BY", "p1/cert1", "p1/replay1", "p1/extra-replay")
+        )
+        reasons = {f.reason for f in validate_proposal(proposal, self.view)}
+        self.assertIn(Reason.REPLAY_BINDING_MISMATCH, reasons)
 
 
 class TestEstablishedEvidence(unittest.TestCase):

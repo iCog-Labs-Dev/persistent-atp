@@ -51,6 +51,7 @@ class Reason(StrEnum):
 
     STAGNATION_WITHOUT_OBSTRUCTION = "stagnation-without-obstruction"
     SELF_CERTIFICATION = "self-certification"
+    REPLAY_BINDING_MISMATCH = "replay-binding-mismatch"
     PROMOTION_WITHOUT_REPLAY = "promotion-without-replay"
     PROMOTION_WITHOUT_VALID_CERTIFICATE = "promotion-without-valid-certificate"
     PROMOTION_WITHOUT_ALIGNMENT = "promotion-without-alignment"
