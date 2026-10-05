@@ -235,6 +235,52 @@ class TestCriticGating(unittest.TestCase):
         self.aligned()
         self.assertEqual(self.promote(), [])
 
+    def test_same_proposal_removal_of_review_cannot_promote(self):
+        self.view.add_node(
+            "p1/at-9", "Attempt", {"worker_class": "critic", "status": "supported"}
+        )
+        self.view.add_edge("REVIEWS_CLAIM", "p1/at-9", "p1/c-1", "p1/e-rev")
+        self.aligned()
+        self.assertIn(
+            Reason.CRITIC_VERDICT_REQUIRED,
+            self.promote(RemoveEdge("REVIEWS_CLAIM", "p1/e-rev")),
+        )
+
+    def test_existing_critic_accepted_claim_keeps_verdict(self):
+        self.view.set_field("p1/c-1", "status", "critic-accepted")
+        self.view.add_node(
+            "p1/at-9", "Attempt", {"worker_class": "critic", "status": "supported"}
+        )
+        self.view.add_edge("REVIEWS_CLAIM", "p1/at-9", "p1/c-1", "p1/e-rev")
+        self.aligned()
+        proposal = propose(RemoveEdge("REVIEWS_CLAIM", "p1/e-rev"))
+        reasons = {f.reason for f in validate_proposal(proposal, self.view)}
+        self.assertIn(Reason.CRITIC_VERDICT_REQUIRED, reasons)
+
+    def test_idempotent_claim_upsert_does_not_hide_critic_status(self):
+        self.view.set_field("p1/c-1", "status", "critic-accepted")
+        self.view.add_node(
+            "p1/at-9", "Attempt", {"worker_class": "critic", "status": "supported"}
+        )
+        self.view.add_edge("REVIEWS_CLAIM", "p1/at-9", "p1/c-1", "p1/e-rev")
+        proposal = propose(
+            UpsertNode("Claim", "p1/c-1", {}),
+            RemoveEdge("REVIEWS_CLAIM", "p1/e-rev"),
+        )
+        reasons = {f.reason for f in validate_proposal(proposal, self.view)}
+        self.assertIn(Reason.CRITIC_VERDICT_REQUIRED, reasons)
+
+    def test_attempt_verdict_changed_during_promotion_is_not_favorable(self):
+        self.view.add_node(
+            "p1/at-9", "Attempt", {"worker_class": "critic", "status": "supported"}
+        )
+        self.view.add_edge("REVIEWS_CLAIM", "p1/at-9", "p1/c-1", "p1/e-rev")
+        self.aligned()
+        self.assertIn(
+            Reason.CRITIC_VERDICT_REQUIRED,
+            self.promote(SetField("Attempt", "p1/at-9", "status", "refuted", prior="supported")),
+        )
+
     def test_a_pending_critique_is_not_a_verdict(self):
         reasons = self.promote(*self.critic_attempt("p1/at-1", status="pending"))
         self.assertIn(Reason.CRITIC_VERDICT_REQUIRED, reasons)

@@ -860,38 +860,23 @@ def check_critic_gating(proposal: Proposal, view: ReadView) -> Iterator[Rejectio
             proposal, {ClaimStatus.CRITIC_ACCEPTED.value}
         )
     ]
-    if not promotions:
-        return
-
-    proposed_attempts: dict[str, tuple[str | None, str | None]] = {}
-    proposed_reviews: dict[str, set[str]] = defaultdict(set)
-    for op in proposal.ops:
-        if isinstance(op, UpsertNode) and op.label == "Attempt":
-            fields = dict(op.fields or {})
-            proposed_attempts[op.node_id] = (
-                fields.get("worker_class"),
-                fields.get("status"),
-            )
-        elif isinstance(op, AddEdge) and op.rel_type == "REVIEWS_CLAIM":
-            proposed_reviews[op.dst_id].add(op.src_id)
-
+    created = _created_fields(proposal, view)
+    promoted = {claim_id for _, claim_id in promotions}
+    promotions.extend(
+        (index, claim_id)
+        for claim_id, index in _affected_claims(proposal, view).items()
+        if claim_id not in promoted
+        and (_fields_after(claim_id, created, proposal, view) or {}).get("status")
+        == ClaimStatus.CRITIC_ACCEPTED.value
+    )
     for index, claim_id in promotions:
-        verdicts: list[tuple[str | None, str | None]] = []
-        for attempt_id in proposed_reviews.get(claim_id, ()):
-            if attempt_id in proposed_attempts:
-                verdicts.append(proposed_attempts[attempt_id])
-        for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):
-            record = view.node(edge.src_id)
-            if record is not None and record.label == "Attempt":
-                fields = dict(record.fields)
-                verdicts.append(
-                    (fields.get("worker_class"), fields.get("status"))
-                )
-
         if any(
-            worker_class == WorkerClass.CRITIC.value
-            and status in FAVORABLE_CRITIC_VERDICTS
-            for worker_class, status in verdicts
+            fields.get("worker_class") == WorkerClass.CRITIC.value
+            and fields.get("status") in FAVORABLE_CRITIC_VERDICTS
+            for attempt_id in _edge_sources_after(
+                proposal, view, claim_id, "REVIEWS_CLAIM"
+            )
+            if (fields := _fields_after(attempt_id, created, proposal, view)) is not None
         ):
             continue
 
