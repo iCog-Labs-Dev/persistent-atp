@@ -1084,7 +1084,8 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     status=verified with sorry_detected=false. A replay that does not state
     the flag is not evidence. A replay run by the certificate's producer or
     by this proposal's actor is self-certification: it never counts as
-    evidence, and is reported on its own so the worker sees why.
+    evidence. It is reported when no independent replay is available; an
+    unrelated self-certified replay cannot veto a complete valid path.
 
     A lean-verified claim also needs one declaration reached both by that
     replayed certificate's CERTIFIES edge and by a reviewed alignment's
@@ -1099,7 +1100,7 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
         cert_ids = _edge_targets_after(proposal, view, claim_id, "PROVED_BY")
 
         verified_certs: dict[str, set[str]] = defaultdict(set)
-        reported_self_certifications: set[str] = set()
+        self_certifications: dict[str, str] = {}
         for cert_id in sorted(cert_ids):
             cert_fields = _fields_after(cert_id, created, proposal, view)
             producer_actor = cert_fields.get("actor") if cert_fields else None
@@ -1111,14 +1112,7 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                     continue
                 actor = fields.get("actor")
                 if actor is not None and actor in (producer_actor, proposal.actor):
-                    if replay_id not in reported_self_certifications:
-                        reported_self_certifications.add(replay_id)
-                        yield Rejection(
-                            Reason.SELF_CERTIFICATION,
-                            f"replay {replay_id!r} was run by {actor!r}, who also "
-                            f"produced the certificate or submits this proposal",
-                            index,
-                        )
+                    self_certifications[replay_id] = actor
                     continue
                 if (
                     isinstance(actor, str)
@@ -1129,6 +1123,13 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                     verified_certs[cert_id].add(replay_id)
 
         if not verified_certs:
+            for replay_id, actor in sorted(self_certifications.items()):
+                yield Rejection(
+                    Reason.SELF_CERTIFICATION,
+                    f"replay {replay_id!r} was run by {actor!r}, who also "
+                    f"produced the certificate or submits this proposal",
+                    index,
+                )
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_REPLAY,
                 f"claim {claim_id!r} has no independent replay with "

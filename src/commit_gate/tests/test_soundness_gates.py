@@ -169,7 +169,7 @@ class TestSelfCertificationGate(unittest.TestCase):
         self.assertIn(Reason.SELF_CERTIFICATION, reasons)
         self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
 
-    def test_self_certified_replay_poisons_an_independent_one(self):
+    def test_self_certified_replay_does_not_block_an_independent_one(self):
         wire(self.view, replay_fields={"actor": PRODUCER})
         self.view.add_node(
             "p1/replay2",
@@ -187,7 +187,7 @@ class TestSelfCertificationGate(unittest.TestCase):
         )
 
         reasons = self.reasons(propose(promote()))
-        self.assertEqual(reasons, [Reason.SELF_CERTIFICATION])
+        self.assertEqual(reasons, [])
 
 
 class TestAlignmentGate(unittest.TestCase):
