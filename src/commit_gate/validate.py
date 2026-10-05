@@ -877,11 +877,9 @@ def check_critic_gating(proposal: Proposal, view: ReadView) -> Iterator[Rejectio
 
     for index, claim_id in promotions:
         verdicts: list[tuple[str | None, str | None]] = []
-        # Verdicts proposed alongside the promotion...
         for attempt_id in proposed_reviews.get(claim_id, ()):
             if attempt_id in proposed_attempts:
                 verdicts.append(proposed_attempts[attempt_id])
-        # ...and verdicts already committed against this claim.
         for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):
             record = view.node(edge.src_id)
             if record is not None and record.label == "Attempt":
@@ -906,11 +904,92 @@ def check_critic_gating(proposal: Proposal, view: ReadView) -> Iterator[Rejectio
         )
 
 
-def _created_fields(proposal: Proposal) -> dict[str, Any]:
-    """Fields of every node this proposal creates, by id."""
-    return {
-        op.node_id: dict(op.fields) for op in proposal.ops if isinstance(op, UpsertNode)
+def _created_fields(proposal: Proposal, view: ReadView) -> dict[str, Any]:
+    """Fields of genuinely new nodes, matching the first applied upsert."""
+    created: dict[str, Any] = {}
+    for op in proposal.ops:
+        if (
+            isinstance(op, UpsertNode)
+            and op.node_id not in created
+            and view.node(op.node_id) is None
+        ):
+            created[op.node_id] = dict(op.fields)
+    return created
+
+
+EVIDENCE_RELATIONS = frozenset(
+    {
+        "PROVED_BY", "REPLAYED_BY", "CERTIFIES", "PRODUCED_CERTIFICATE",
+        "SEARCHES", "PINNED_ENVIRONMENT", "CERTIFICATE_ENVIRONMENT",
+        "RAN_UNDER", "REPLAY_ENVIRONMENT", "ALIGNS_CLAIM",
+        "ALIGNS_DECLARATION", "REVIEWS_CLAIM",
     }
+)
+
+
+def _affected_claims(proposal: Proposal, view: ReadView) -> dict[str, int]:
+    """Find claims whose evidence can change, including paths severed by a removal."""
+    seeds: list[tuple[int, str]] = []
+    created = {
+        op.node_id: op.label for op in proposal.ops if isinstance(op, UpsertNode)
+    }
+    for index, op in enumerate(proposal.ops):
+        if isinstance(op, SetField) and op.label in {
+            "Attempt", "Alignment", "Certificate", "LeanReplay", "FormalRun",
+            "FormalDeclaration", "Environment",
+        }:
+            seeds.append((index, op.node_id))
+        elif isinstance(op, AddEdge) and op.rel_type in EVIDENCE_RELATIONS:
+            seeds.extend(((index, op.src_id), (index, op.dst_id)))
+        elif isinstance(op, RemoveEdge) and op.rel_type in EVIDENCE_RELATIONS:
+            edge = view.edge(op.edge_id)
+            if edge is not None:
+                seeds.extend(((index, edge.src_id), (index, edge.dst_id)))
+
+    claims: dict[str, int] = {}
+    visited: set[str] = set()
+    queue = list(seeds)
+    while queue:
+        index, node_id = queue.pop()
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        record = view.node(node_id)
+        label = created.get(node_id, record.label if record else None)
+        if label == "Claim":
+            claims[node_id] = index
+            continue
+        # Each step follows a possible evidence path toward a claim. Include
+        # both committed and resulting edges so removals retain their owners.
+        links: tuple[tuple[str, str], ...] = {
+            "LeanReplay": (("in", "REPLAYED_BY"),),
+            "Certificate": (("in", "PROVED_BY"),),
+            "FormalRun": (("out", "PRODUCED_CERTIFICATE"),),
+            "FormalDeclaration": (
+                ("in", "CERTIFIES"), ("in", "ALIGNS_DECLARATION"),
+                ("in", "SEARCHES"),
+            ),
+            "Alignment": (("out", "ALIGNS_CLAIM"),),
+            "Attempt": (("out", "REVIEWS_CLAIM"),),
+            "Environment": (
+                ("in", "PINNED_ENVIRONMENT"),
+                ("in", "CERTIFICATE_ENVIRONMENT"), ("in", "RAN_UNDER"),
+                ("in", "REPLAY_ENVIRONMENT"),
+            ),
+        }.get(label, ())
+        for direction, rel_type in links:
+            old = (
+                view.edges_to(node_id, rel_type)
+                if direction == "in"
+                else view.edges_from(node_id, rel_type)
+            )
+            new = _edges_after(
+                proposal, view, rel_type,
+                **({"dst_id": node_id} if direction == "in" else {"src_id": node_id}),
+            )
+            for edge in (*old, *new):
+                queue.append((index, edge.src_id if direction == "in" else edge.dst_id))
+    return claims
 
 
 def _claim_promotions(
@@ -1133,11 +1212,24 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     ALIGNS_DECLARATION edge. The certificate, its run, its replay and the
     declaration must all bind to the same pinned environment.
     """
-    created = _created_fields(proposal)
+    created = _created_fields(proposal, view)
 
-    for index, claim_id, _ in _claim_promotions(
-        proposal, {ClaimStatus.LEAN_VERIFIED.value}
-    ):
+    promotions = [
+        (index, claim_id, True)
+        for index, claim_id, _ in _claim_promotions(
+            proposal, {ClaimStatus.LEAN_VERIFIED.value}
+        )
+    ]
+    promoted = {claim_id for _, claim_id, _ in promotions}
+    promotions.extend(
+        (index, claim_id, False)
+        for claim_id, index in _affected_claims(proposal, view).items()
+        if claim_id not in promoted
+        and (_fields_after(claim_id, created, proposal, view) or {}).get("status")
+        == ClaimStatus.LEAN_VERIFIED.value
+    )
+
+    for index, claim_id, is_promotion in promotions:
         cert_ids = _edge_targets_after(proposal, view, claim_id, "PROVED_BY")
 
         verified_certs: dict[str, set[str]] = defaultdict(set)
@@ -1164,7 +1256,9 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                 ):
                     continue
                 actor = fields.get("actor")
-                if actor is not None and actor in (producer_actor, proposal.actor):
+                if actor is not None and (
+                    actor == producer_actor or (is_promotion and actor == proposal.actor)
+                ):
                     self_certifications[replay_id] = actor
                     continue
                 if (
@@ -1264,11 +1358,19 @@ def check_claim_alignment(proposal: Proposal, view: ReadView) -> Iterator[Reject
     lifecycle is reviewed and whose verdict is aligned. Draft, unreviewed,
     superseded or disagreeing alignments do not qualify.
     """
-    created = _created_fields(proposal)
+    created = _created_fields(proposal, view)
 
-    for index, claim_id, status in _claim_promotions(
-        proposal, CLAIM_PROMOTION_TARGETS
-    ):
+    promotions = list(_claim_promotions(proposal, CLAIM_PROMOTION_TARGETS))
+    promoted = {claim_id for _, claim_id, _ in promotions}
+    promotions.extend(
+        (index, claim_id, status)
+        for claim_id, index in _affected_claims(proposal, view).items()
+        if claim_id not in promoted
+        if (status := (_fields_after(claim_id, created, proposal, view) or {}).get("status"))
+        in CLAIM_PROMOTION_TARGETS
+    )
+
+    for index, claim_id, status in promotions:
         if not _reviewed_alignments(proposal, view, created, claim_id):
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_ALIGNMENT,
@@ -1295,7 +1397,7 @@ def check_environment_binding(proposal: Proposal, view: ReadView) -> Iterator[Re
     Incomplete certificates may be recorded as stale, but cannot enter a
     status that makes them available as proof evidence.
     """
-    created = _created_fields(proposal)
+    created = _created_fields(proposal, view)
 
     for index, op in enumerate(proposal.ops):
         if isinstance(op, UpsertNode) and op.label == "Certificate":

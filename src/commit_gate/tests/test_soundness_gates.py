@@ -455,6 +455,61 @@ class TestCertificatePromotion(unittest.TestCase):
         self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons())
 
 
+class TestEstablishedEvidence(unittest.TestCase):
+    def setUp(self):
+        self.view = MemoryView()
+        wire(self.view, claim_status="lean-verified")
+
+    def reasons(self, *ops) -> set[Reason]:
+        return {f.reason for f in validate_proposal(propose(*ops), self.view)}
+
+    def test_removing_sole_replay_requires_downgrade(self):
+        remove = RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1")
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons(remove))
+        self.assertEqual(
+            self.reasons(
+                remove,
+                SetField("Claim", "p1/claim1", "status", "stale", prior="lean-verified"),
+            ),
+            set(),
+        )
+
+    def test_idempotent_claim_upsert_does_not_hide_verified_status(self):
+        reasons = self.reasons(
+            UpsertNode("Claim", "p1/claim1", {}),
+            RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1"),
+        )
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
+
+    def test_replacing_replay_in_same_proposal_preserves_verification(self):
+        self.view.add_node(
+            "p1/replay2", "LeanReplay",
+            {
+                "actor": "replayer-gamma", "status": "verified",
+                "sorry_detected": False, "environment_hash": ENVIRONMENT_HASH,
+                "certificate_id": "p1/cert1", "artifact_hash": ARTIFACT_HASH,
+            },
+        )
+        self.assertEqual(
+            self.reasons(
+                RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1"),
+                AddEdge("REPLAYED_BY", "p1/cert1", "p1/replay2", "p1/replayed2"),
+                AddEdge("REPLAY_ENVIRONMENT", "p1/replay2", "p1/environment1", "p1/replay2-env"),
+            ),
+            set(),
+        )
+
+    def test_removing_alignment_or_pin_requires_downgrade(self):
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_ALIGNMENT,
+            self.reasons(RemoveEdge("ALIGNS_CLAIM", "p1/alignment1-aligns-p1/claim1")),
+        )
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_ENVIRONMENT_BINDING,
+            self.reasons(RemoveEdge("PINNED_ENVIRONMENT", "p1/declaration1-pinned-p1/environment1")),
+        )
+
+
 class TestSoundnessGatesHappyPath(unittest.TestCase):
     def setUp(self):
         self.view = MemoryView()
