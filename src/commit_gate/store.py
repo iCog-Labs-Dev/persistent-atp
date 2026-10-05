@@ -228,6 +228,10 @@ class JournalStore:
         a link that verifies.
         """
         proof_id = payload_dict["proof_id"]
+        if not payload_dict.get("ops"):
+            raise ConcurrencyError(
+                Reason.EMPTY_PROPOSAL, "proposal carries no graph mutations"
+            )
         base_revision = payload_dict.get("base_revision")
         lease_id = payload_dict.get("lease_id")
         fencing_token = payload_dict.get("fencing_token")

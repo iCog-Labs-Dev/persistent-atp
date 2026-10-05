@@ -10,12 +10,22 @@ from commit_gate.store import ConcurrencyError, HashChainError, JournalStore
 
 def payload(**overrides):
     """A minimal well-formed event payload, as `Proposal.to_dict` produces."""
-    base = {"proof_id": "p1", "actor": "test", "worker_class": "coordinator"}
+    base = {
+        "proof_id": "p1", "actor": "test", "worker_class": "coordinator",
+        "ops": [{"kind": "test-event"}],
+    }
     base.update(overrides)
     return base
 
 
 class TestJournalStore(unittest.TestCase):
+    def test_empty_event_does_not_advance_revision(self):
+        store = JournalStore()
+        with self.assertRaises(ConcurrencyError) as caught:
+            store.append(payload(ops=[]))
+        self.assertEqual(caught.exception.reason, Reason.EMPTY_PROPOSAL)
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+
     def test_head_on_empty_journal(self):
         store = JournalStore()
         self.assertEqual(store.head("p1"), (0, GENESIS_HASH))

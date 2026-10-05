@@ -54,6 +54,19 @@ class TestCommitGate(unittest.TestCase):
         self.assertIsNotNone(result.event_hash)
         self.assertEqual(result.revision, 1)
 
+    def test_empty_proposal_cannot_advance_revision(self):
+        for lease_id, fencing_token in ((None, None), ("lease-1", 1)):
+            with self.subTest(lease_id=lease_id):
+                proposal = Proposal(
+                    proof_id="p1", actor="test", worker_class="coordinator",
+                    ops=(), base_revision=0,
+                    lease_id=lease_id, fencing_token=fencing_token,
+                )
+                result = self.gate.commit(proposal)
+                self.assertFalse(result.accepted)
+                self.assertIn(Reason.EMPTY_PROPOSAL, [r.reason for r in result.rejections])
+                self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
+
     def test_gate_rejects_invalid_proposal(self):
         result = self.gate.commit(self._invalid())
         self.assertFalse(result.accepted)

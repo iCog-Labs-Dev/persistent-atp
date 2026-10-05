@@ -74,6 +74,7 @@ class Reason(StrEnum):
     # Missing concurrency control. A proposal that names no base revision
     # cannot be checked against the journal at all, so it is never committed.
     MISSING_CONCURRENCY_TOKEN = "missing-concurrency-token"
+    EMPTY_PROPOSAL = "empty-proposal"
 
 
 @dataclass(frozen=True, slots=True)

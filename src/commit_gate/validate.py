@@ -268,6 +268,11 @@ def check_concurrency_tokens(proposal: Proposal) -> Iterator[Rejection]:
     needs a lease so the gate can bind the proposer to its assigned worker
     class and reject stale fencing tokens.
     """
+    if not proposal.ops:
+        yield Rejection(
+            Reason.EMPTY_PROPOSAL,
+            "proposal carries no graph mutations",
+        )
     if proposal.base_revision is None:
         yield Rejection(
             Reason.MISSING_CONCURRENCY_TOKEN,
