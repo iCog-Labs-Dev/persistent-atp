@@ -1151,6 +1151,18 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                 fields = _fields_after(replay_id, created, proposal, view)
                 if fields is None:
                     continue
+                if (
+                    fields.get("certificate_id") != cert_id
+                    or (
+                        cert_fields is not None
+                        and _is_sha256(cert_fields.get("artifact_hash"))
+                        and fields.get("artifact_hash") != cert_fields.get("artifact_hash")
+                    )
+                    or not _is_sha256(fields.get("artifact_hash"))
+                    or _edge_sources_after(proposal, view, replay_id, "REPLAYED_BY")
+                    != {cert_id}
+                ):
+                    continue
                 actor = fields.get("actor")
                 if actor is not None and actor in (producer_actor, proposal.actor):
                     self_certifications[replay_id] = actor

@@ -71,6 +71,8 @@ def wire(
             "status": "verified",
             "sorry_detected": False,
             "environment_hash": ENVIRONMENT_HASH,
+            "certificate_id": cert_id,
+            "artifact_hash": ARTIFACT_HASH,
             **(replay_fields or {}),
         },
     )
@@ -216,6 +218,7 @@ class TestSelfCertificationGate(unittest.TestCase):
             {
                 "actor": "replayer-gamma", "status": "verified",
                 "sorry_detected": False, "environment_hash": ENVIRONMENT_HASH,
+                "certificate_id": "p1/cert1", "artifact_hash": ARTIFACT_HASH,
             },
         )
         self.view.add_edge(
@@ -341,6 +344,7 @@ class TestDeclarationChain(unittest.TestCase):
             {
                 "actor": REPLAYER, "status": "verified",
                 "sorry_detected": False, "environment_hash": ENVIRONMENT_HASH,
+                "certificate_id": "p1/cert2", "artifact_hash": ARTIFACT_HASH,
             },
         )
         self.view.add_edge("PROVED_BY", "p1/claim1", "p1/cert2", "p1/proved2")
@@ -426,6 +430,30 @@ class TestCertificatePromotion(unittest.TestCase):
         self.view.remove_edge("p1/replay1-under-p1/environment1")
         self.assertIn(Reason.PROMOTION_WITHOUT_ENVIRONMENT_BINDING, self.reasons())
 
+    def test_replay_must_name_the_certificate_and_artifact_it_checked(self):
+        for field, value in (
+            ("certificate_id", "p1/other-certificate"),
+            ("artifact_hash", "sha256:" + "bb" * 32),
+        ):
+            with self.subTest(field=field):
+                view = MemoryView()
+                wire(view, replay_fields={field: value})
+                reasons = {f.reason for f in validate_proposal(propose(promote()), view)}
+                self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, reasons)
+
+    def test_replay_cannot_be_reused_by_another_certificate(self):
+        self.view.add_node(
+            "p1/cert2", "Certificate",
+            {
+                "actor": PRODUCER, "status": "replay-accepted",
+                "artifact_hash": ARTIFACT_HASH,
+                "environment_hash": ENVIRONMENT_HASH,
+                "producer_run_id": "p1/run1",
+            },
+        )
+        self.view.add_edge("REPLAYED_BY", "p1/cert2", "p1/replay1", "p1/reused-replay")
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons())
+
 
 class TestSoundnessGatesHappyPath(unittest.TestCase):
     def setUp(self):
@@ -465,6 +493,8 @@ class TestSoundnessGatesHappyPath(unittest.TestCase):
                     "status": "verified",
                     "sorry_detected": False,
                     "environment_hash": ENVIRONMENT_HASH,
+                    "certificate_id": "p1/cert1",
+                    "artifact_hash": ARTIFACT_HASH,
                     "replayed_at": "2026-08-24T00:00:00Z",
                 },
             ),
