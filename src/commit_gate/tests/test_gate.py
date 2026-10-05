@@ -1,12 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from commit_gate.canon import GENESIS_HASH
 from commit_gate.gate import CommitGate
-from commit_gate.ops import UpsertNode
+from commit_gate.ops import RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
+from commit_gate.tests.test_soundness_gates import wire
 
 
 class TestCommitGate(unittest.TestCase):
@@ -78,6 +80,63 @@ class TestCommitGate(unittest.TestCase):
                 (2, second.event_hash, first.event_hash),
             ],
         )
+
+    def test_projected_revision_is_not_applied_twice(self):
+        first = self._valid()
+        self.assertTrue(self.gate.commit(first).accepted)
+        self.view.apply_journal_event(self.store, "p1", 1)
+        second = self._valid(node_id="p1/fs2", base_revision=1)
+        self.assertTrue(self.gate.commit(second).accepted)
+
+    def test_read_view_ahead_of_journal_is_rejected(self):
+        class AheadView(MemoryView):
+            def snapshot(self, proof_id):
+                _, snapshot = super().snapshot(proof_id)
+                return 1, snapshot
+
+        result = CommitGate(AheadView(), self.store).commit(self._valid())
+        self.assertEqual(
+            [r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC]
+        )
+
+    def test_snapshot_failure_is_a_typed_rejection(self):
+        class UnavailableView(MemoryView):
+            def snapshot(self, proof_id):
+                raise OSError("projection unavailable")
+
+        result = CommitGate(UnavailableView(), self.store).commit(self._valid())
+        self.assertEqual([r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC])
+        self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
+
+    def test_read_failures_after_snapshot_are_typed_rejections(self):
+        class ReadThroughView(MemoryView):
+            def snapshot(self, proof_id):
+                return 0, self
+
+        promotion = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/claim1", "status", "lean-verified", prior="formally-closed"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        edge_removal = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(RemoveEdge("HAS_TACTIC", "p1/e1"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        for method, proposal in (
+            ("node", self._valid()),
+            ("edge", edge_removal),
+            ("edges_from", promotion),
+            ("edges_to", promotion),
+        ):
+            with self.subTest(method=method):
+                view = ReadThroughView()
+                if method.startswith("edges_"):
+                    wire(view)
+                with patch.object(ReadThroughView, method, side_effect=OSError("projection read unavailable")):
+                    result = CommitGate(view, self.store).commit(proposal)
+                self.assertEqual([r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC])
+                self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
 
     def test_stale_base_revision_is_a_rejection_not_an_exception(self):
         self.gate.commit(self._valid("p1/fs1"))

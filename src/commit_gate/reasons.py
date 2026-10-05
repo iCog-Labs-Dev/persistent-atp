@@ -52,6 +52,7 @@ class Reason(StrEnum):
     SELF_CERTIFICATION = "self-certification"
     PROMOTION_WITHOUT_REPLAY = "promotion-without-replay"
     PROMOTION_WITHOUT_ALIGNMENT = "promotion-without-alignment"
+    PROMOTION_WITHOUT_DECLARATION_CHAIN = "promotion-without-declaration-chain"
     ENVIRONMENT_DRIFT = "environment-drift"
     CRITIC_VERDICT_REQUIRED = "critic-verdict-required"
     WORKER_CLASS_OUT_OF_AUTHORITY = "worker-class-out-of-authority"
@@ -59,6 +60,7 @@ class Reason(StrEnum):
     # Lost races. The proposal was well formed; the journal moved under it.
     STALE_BASE_REVISION = "stale-base-revision"
     LEASE_NOT_HELD = "lease-not-held"
+    READ_VIEW_OUT_OF_SYNC = "read-view-out-of-sync"
     FENCING_TOKEN_SUPERSEDED = "fencing-token-superseded"
     JOURNAL_BUSY = "journal-busy"
 

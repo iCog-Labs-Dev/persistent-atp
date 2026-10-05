@@ -167,6 +167,7 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
             "RAISED_OBSTRUCTION",
             "AT_STATE",
             "HAS_TARGET",
+            "HAS_ARTIFACT",
         }
     ),
     WorkerClass.REPLAYER.value: frozenset({"REPLAYED_BY", "REPLAY_ENVIRONMENT"}),
@@ -882,6 +883,48 @@ def _proposed_edges(proposal: Proposal, rel_type: str) -> list[tuple[str, str]]:
     ]
 
 
+def _edge_targets_after(
+    proposal: Proposal, view: ReadView, src_id: str, rel_type: str
+) -> set[str]:
+    """Targets of an edge type after this proposal's additions and removals."""
+    removed = {op.edge_id for op in proposal.ops if isinstance(op, RemoveEdge)}
+    targets = {
+        edge.dst_id
+        for edge in view.edges_from(src_id, rel_type)
+        if edge.edge_id not in removed
+    }
+    targets.update(
+        op.dst_id
+        for op in proposal.ops
+        if isinstance(op, AddEdge)
+        and op.rel_type == rel_type
+        and op.src_id == src_id
+        and op.edge_id not in removed
+    )
+    return targets
+
+
+def _edge_sources_after(
+    proposal: Proposal, view: ReadView, dst_id: str, rel_type: str
+) -> set[str]:
+    """Sources of an edge type after this proposal's additions and removals."""
+    removed = {op.edge_id for op in proposal.ops if isinstance(op, RemoveEdge)}
+    sources = {
+        edge.src_id
+        for edge in view.edges_to(dst_id, rel_type)
+        if edge.edge_id not in removed
+    }
+    sources.update(
+        op.src_id
+        for op in proposal.ops
+        if isinstance(op, AddEdge)
+        and op.rel_type == rel_type
+        and op.dst_id == dst_id
+        and op.edge_id not in removed
+    )
+    return sources
+
+
 def _fields_of(
     node_id: str, created: dict[str, Any], view: ReadView
 ) -> Mapping[str, Any] | None:
@@ -890,6 +933,27 @@ def _fields_of(
         return created[node_id]
     record = view.node(node_id)
     return record.fields if record is not None else None
+
+
+def _reviewed_alignments(
+    proposal: Proposal, view: ReadView, created: dict[str, Any], claim_id: str
+) -> set[str]:
+    """Alignments still accepted for this claim after the proposal."""
+    accepted = set()
+    for alignment_id in _edge_sources_after(proposal, view, claim_id, "ALIGNS_CLAIM"):
+        fields = _fields_of(alignment_id, created, view)
+        if fields is None:
+            continue
+        effective = dict(fields)
+        for op in proposal.ops:
+            if isinstance(op, SetField) and op.node_id == alignment_id:
+                effective[op.field] = op.value
+        if (
+            effective.get("lifecycle") == AlignmentLifecycle.REVIEWED.value
+            and effective.get("verdict") == AlignmentVerdict.ALIGNED.value
+        ):
+            accepted.add(alignment_id)
+    return accepted
 
 
 def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
@@ -906,10 +970,12 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
     poisons every promotion that can still see it — even one carrying other
     valid replays. Remediation is a retraction of the offending REPLAYED_BY
     edge in its own committed event; the chain then walks clean.
+
+    A lean-verified claim also needs one declaration reached both by that
+    replayed certificate's CERTIFIES edge and by a reviewed alignment's
+    ALIGNS_DECLARATION edge.
     """
     created = _created_fields(proposal)
-    proved = _proposed_edges(proposal, "PROVED_BY")
-    replayed = _proposed_edges(proposal, "REPLAYED_BY")
 
     for index, op in enumerate(proposal.ops):
         if not (
@@ -921,47 +987,62 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
             continue
 
         claim_id = op.node_id
-        cert_ids = [edge.dst_id for edge in view.edges_from(claim_id, "PROVED_BY")]
-        cert_ids += [dst for src, dst in proved if src == claim_id]
+        cert_ids = _edge_targets_after(proposal, view, claim_id, "PROVED_BY")
 
-        verified = False
-        seen_replays: set[str] = set()
-        for cert_id in cert_ids:
+        verified_certs: set[str] = set()
+        reported_self_certifications: set[str] = set()
+        for cert_id in sorted(cert_ids):
             cert_fields = _fields_of(cert_id, created, view)
             producer_actor = cert_fields.get("actor") if cert_fields else None
 
-            replay_ids = [
-                edge.dst_id for edge in view.edges_from(cert_id, "REPLAYED_BY")
-            ]
-            replay_ids += [dst for src, dst in replayed if src == cert_id]
-            for replay_id in replay_ids:
-                if replay_id in seen_replays:
-                    continue
-                seen_replays.add(replay_id)
-
+            replay_ids = _edge_targets_after(proposal, view, cert_id, "REPLAYED_BY")
+            for replay_id in sorted(replay_ids):
                 fields = _fields_of(replay_id, created, view)
                 if fields is None:
                     continue
                 actor = fields.get("actor")
                 if actor is not None and actor in (producer_actor, proposal.actor):
-                    yield Rejection(
-                        Reason.SELF_CERTIFICATION,
-                        f"replay {replay_id!r} was run by {actor!r}, who also "
-                        f"produced the certificate or submits this proposal",
-                        index,
-                    )
+                    if replay_id not in reported_self_certifications:
+                        reported_self_certifications.add(replay_id)
+                        yield Rejection(
+                            Reason.SELF_CERTIFICATION,
+                            f"replay {replay_id!r} was run by {actor!r}, who also "
+                            f"produced the certificate or submits this proposal",
+                            index,
+                        )
                     continue
                 if (
                     fields.get("status") == ReplayStatus.VERIFIED.value
                     and fields.get("sorry_detected") is False
                 ):
-                    verified = True
+                    verified_certs.add(cert_id)
 
-        if not verified:
+        if not verified_certs:
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_REPLAY,
                 f"claim {claim_id!r} has no independent replay with "
                 "status=verified and sorry_detected=false",
+                index,
+            )
+            continue
+
+        aligned_declarations = {
+            declaration_id
+            for alignment_id in _reviewed_alignments(proposal, view, created, claim_id)
+            for declaration_id in _edge_targets_after(
+                proposal, view, alignment_id, "ALIGNS_DECLARATION"
+            )
+        }
+        if not any(
+            _edge_targets_after(proposal, view, cert_id, "CERTIFIES")
+            & aligned_declarations
+            for cert_id in verified_certs
+        ):
+            yield Rejection(
+                Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN,
+                f"claim {claim_id!r} has no independently replayed certificate "
+                "that certifies a declaration in a reviewed, aligned "
+                "alignment for this claim",
                 index,
             )
 
@@ -975,7 +1056,6 @@ def check_claim_alignment(proposal: Proposal, view: ReadView) -> Iterator[Reject
     superseded or disagreeing alignments do not qualify.
     """
     created = _created_fields(proposal)
-    aligns = _proposed_edges(proposal, "ALIGNS_CLAIM")
 
     for index, op in enumerate(proposal.ops):
         if not (
@@ -987,18 +1067,7 @@ def check_claim_alignment(proposal: Proposal, view: ReadView) -> Iterator[Reject
             continue
 
         claim_id = op.node_id
-        alignment_ids = [
-            edge.src_id for edge in view.edges_to(claim_id, "ALIGNS_CLAIM")
-        ]
-        alignment_ids += [src for src, dst in aligns if dst == claim_id]
-
-        aligned = any(
-            (fields := _fields_of(alignment_id, created, view)) is not None
-            and fields.get("lifecycle") == AlignmentLifecycle.REVIEWED.value
-            and fields.get("verdict") == AlignmentVerdict.ALIGNED.value
-            for alignment_id in set(alignment_ids)
-        )
-        if not aligned:
+        if not _reviewed_alignments(proposal, view, created, claim_id):
             yield Rejection(
                 Reason.PROMOTION_WITHOUT_ALIGNMENT,
                 f"claim {claim_id!r} promotes to {op.value!r} without an "

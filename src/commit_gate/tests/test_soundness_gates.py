@@ -1,6 +1,6 @@
 import unittest
 
-from commit_gate.ops import AddEdge, SetField, UpsertNode
+from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import MemoryView
@@ -32,6 +32,7 @@ def wire(
     cert_id="p1/cert1",
     replay_id="p1/replay1",
     alignment_id="p1/alignment1",
+    declaration_id="p1/declaration1",
     claim_status="formally-closed",
     cert_fields=None,
     replay_fields=None,
@@ -56,10 +57,16 @@ def wire(
         "Alignment",
         {"lifecycle": "reviewed", "verdict": "aligned", **(alignment_fields or {})},
     )
+    view.add_node(declaration_id, "FormalDeclaration")
     view.add_edge("PROVED_BY", claim_id, cert_id, f"{claim_id}-proved-{cert_id}")
     view.add_edge("REPLAYED_BY", cert_id, replay_id, f"{cert_id}-replayed-{replay_id}")
+    view.add_edge("CERTIFIES", cert_id, declaration_id, f"{cert_id}-certifies-{declaration_id}")
     view.add_edge(
         "ALIGNS_CLAIM", alignment_id, claim_id, f"{alignment_id}-aligns-{claim_id}"
+    )
+    view.add_edge(
+        "ALIGNS_DECLARATION", alignment_id, declaration_id,
+        f"{alignment_id}-aligns-{declaration_id}",
     )
 
 
@@ -187,6 +194,102 @@ class TestAlignmentGate(unittest.TestCase):
         self.assertIn(Reason.PROMOTION_WITHOUT_ALIGNMENT, reasons)
 
 
+class TestDeclarationChain(unittest.TestCase):
+    def setUp(self):
+        self.view = MemoryView()
+        wire(self.view)
+
+    def reasons(self, *ops) -> list[Reason]:
+        return [f.reason for f in validate_proposal(propose(*ops), self.view)]
+
+    def test_certificate_without_declaration_link(self):
+        self.view.remove_edge("p1/cert1-certifies-p1/declaration1")
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN, self.reasons(promote())
+        )
+
+    def test_alignment_without_declaration_link(self):
+        self.view.remove_edge("p1/alignment1-aligns-p1/declaration1")
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN, self.reasons(promote())
+        )
+
+    def test_alignment_to_other_declaration(self):
+        self.view.add_node("p1/declaration2", "FormalDeclaration")
+        self.view.remove_edge("p1/alignment1-aligns-p1/declaration1")
+        self.view.add_edge(
+            "ALIGNS_DECLARATION", "p1/alignment1", "p1/declaration2", "p1/other"
+        )
+        findings = validate_proposal(propose(promote()), self.view)
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN,
+            [finding.reason for finding in findings],
+        )
+        self.assertEqual(
+            next(
+                finding.op_index
+                for finding in findings
+                if finding.reason == Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN
+            ),
+            0,
+        )
+
+    def test_declaration_must_belong_to_replayed_certificate(self):
+        self.view.add_node("p1/cert2", "Certificate", {"actor": PRODUCER})
+        self.view.add_edge("PROVED_BY", "p1/claim1", "p1/cert2", "p1/proved2")
+        self.view.remove_edge("p1/cert1-certifies-p1/declaration1")
+        self.view.add_edge(
+            "CERTIFIES", "p1/cert2", "p1/declaration1", "p1/certifies2"
+        )
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN, self.reasons(promote())
+        )
+        self.assertNotIn(Reason.PROMOTION_WITHOUT_REPLAY, self.reasons(promote()))
+
+    def test_matching_replayed_certificate_among_other_evidence(self):
+        self.view.add_node("p1/declaration2", "FormalDeclaration")
+        self.view.add_node("p1/cert2", "Certificate", {"actor": PRODUCER})
+        self.view.add_node(
+            "p1/replay2", "LeanReplay",
+            {"actor": REPLAYER, "status": "verified", "sorry_detected": False},
+        )
+        self.view.add_edge("PROVED_BY", "p1/claim1", "p1/cert2", "p1/proved2")
+        self.view.add_edge("REPLAYED_BY", "p1/cert2", "p1/replay2", "p1/replayed2")
+        self.view.remove_edge("p1/cert1-certifies-p1/declaration1")
+        self.view.add_edge("CERTIFIES", "p1/cert1", "p1/declaration2", "p1/other")
+        self.view.add_edge("CERTIFIES", "p1/cert2", "p1/declaration1", "p1/certifies2")
+        self.assertEqual(self.reasons(promote()), [])
+
+    def test_removing_declaration_link_in_promotion(self):
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN,
+            self.reasons(
+                RemoveEdge("CERTIFIES", "p1/cert1-certifies-p1/declaration1"),
+                promote(),
+            ),
+        )
+
+    def test_superseding_alignment_in_promotion(self):
+        self.assertIn(
+            Reason.PROMOTION_WITHOUT_DECLARATION_CHAIN,
+            self.reasons(
+                SetField(
+                    "Alignment", "p1/alignment1", "lifecycle", "superseded",
+                    prior="reviewed",
+                ),
+                promote(),
+            ),
+        )
+
+    def test_earlier_promotion_needs_only_reviewed_alignment(self):
+        self.view.remove_edge("p1/cert1-certifies-p1/declaration1")
+        self.view.set_field("p1/claim1", "status", "provisional")
+        self.assertEqual(
+            self.reasons(promote(to="formally-closed", prior="provisional")),
+            [],
+        )
+
+
 class TestSoundnessGatesHappyPath(unittest.TestCase):
     def setUp(self):
         self.view = MemoryView()
@@ -220,9 +323,12 @@ class TestSoundnessGatesHappyPath(unittest.TestCase):
                 "p1/alignment1",
                 {"lifecycle": "reviewed", "verdict": "aligned", "actor": "reviewer"},
             ),
+            UpsertNode("FormalDeclaration", "p1/declaration1", {}),
             AddEdge("PROVED_BY", "p1/claim1", "p1/cert1", "p1/e1"),
             AddEdge("REPLAYED_BY", "p1/cert1", "p1/replay1", "p1/e2"),
             AddEdge("ALIGNS_CLAIM", "p1/alignment1", "p1/claim1", "p1/e3"),
+            AddEdge("CERTIFIES", "p1/cert1", "p1/declaration1", "p1/e4"),
+            AddEdge("ALIGNS_DECLARATION", "p1/alignment1", "p1/declaration1", "p1/e5"),
             promote(),
         )
         self.view.add_node("p1/claim1", "Claim", {"status": "formally-closed"})

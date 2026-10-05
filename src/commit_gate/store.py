@@ -245,6 +245,24 @@ class JournalStore:
         ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def read_events_between(
+        self, proof_id: str, after_revision: int, through_revision: int
+    ) -> Sequence[dict[str, Any]]:
+        """Events needed to bring a projection through a specific journal head."""
+        rows = self._conn.execute(
+            "SELECT revision, payload FROM journal WHERE proof_id = ? AND revision > ? "
+            "AND revision <= ? ORDER BY revision",
+            (proof_id, after_revision, through_revision),
+        ).fetchall()
+        expected = list(range(after_revision + 1, through_revision + 1))
+        if [row["revision"] for row in rows] != expected:
+            raise ConcurrencyError(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"journal cannot supply revisions {after_revision + 1}..{through_revision} "
+                f"for proof {proof_id!r}",
+            )
+        return [json.loads(row["payload"]) for row in rows]
+
     def record_rejection(
         self,
         proof_id: str,
