@@ -13,15 +13,23 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from commit_gate.gate import CommitGate, CommitResult
+from commit_gate.ops import AddEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.state import ReadView
+from commit_gate.store import JournalStore
+from commit_gate.vocab import (
+    FormalStateStatus,
+    ReplayStatus,
+    RunDisposition,
+    WorkerClass,
+)
 from .context_compiler import compile_context, compile_formal_request
-from .dispatch import Dispatcher, result_to_proposal
+from .dispatch import Dispatcher, _next_serial, result_to_proposal
 from .ids import IdType
 from .routing import RoutingDecision, evaluate_run
 from .scheduler import GlobalScheduler, Lease
 
-__all__ = ["CycleDigest", "run_cycle", "category_of"]
+__all__ = ["CycleDigest", "run_cycle", "category_of", "handle_replay_and_closure"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +74,7 @@ def run_cycle(
     ttl_seconds: float = 600.0,
     maintenance: Callable[[Any, CommitResult], None] | None = None,
     search_policy: str = "gnn-pln-best-first-v1",
+    auto_replay: bool = False,
 ) -> CycleDigest:
     """Lease the best move, run it under its worker class, commit the result."""
     lease = scheduler.lease_next(proof_id, worker_class, ttl_seconds=ttl_seconds)
@@ -96,6 +105,19 @@ def run_cycle(
         proof_id=proof_id,
         maintenance=maintenance,
     )
+
+    if auto_replay and routing is not None and routing.action == "hold-for-replay":
+        formal_adapter = (adapters or {}).get("formal-atp")
+        if formal_adapter is not None:
+            handle_replay_and_closure(
+                routing.run_id,
+                proof_id,
+                view,
+                gate,
+                formal_adapter,
+                scheduler._store,
+                maintenance=maintenance,
+            )
 
     return CycleDigest(
         lease_issued=True,
@@ -215,3 +237,117 @@ def _next_run(view: ReadView) -> int:
     from .dispatch import _next_serial
 
     return _next_serial(view, "fr")
+
+
+def handle_replay_and_closure(
+    run_id: str,
+    proof_id: str,
+    view: ReadView,
+    gate: CommitGate,
+    adapter: Any,
+    store: JournalStore,
+    *,
+    maintenance: Callable[[Any, CommitResult], None] | None = None,
+) -> CommitResult | None:
+    """If run_id has disposition proved-pending-replay:
+    1. Verify certificate via adapter.formal_replay(cert, env).
+    2. Build proposal:
+       - UpsertNode("LeanReplay", ...)
+       - AddEdge("REPLAYED_BY", ...)
+       - SetField("FormalState", root_state_id, "status", "formally-closed", prior=root_status)
+    3. Commit through gate under an administrative lease.
+    """
+    run = view.node(run_id)
+    if run is None or run.label != "FormalRun":
+        return None
+    if run.fields.get("status") != RunDisposition.PROVED_PENDING_REPLAY.value:
+        return None
+
+    cert_edges = list(view.edges_from(run_id, "PRODUCED_CERTIFICATE"))
+    if not cert_edges:
+        return None
+    cert_id = cert_edges[0].dst_id
+    cert_node = view.node(cert_id)
+    if cert_node is None:
+        return None
+
+    cert_payload = dict(cert_node.fields)
+    cert_payload.setdefault("certificate_id", cert_id)
+
+    env_hash = cert_payload.get("environment_hash")
+    if not env_hash:
+        env_hash = run.fields.get("environment_hash")
+    if not env_hash:
+        env_hash = "sha256:" + "00" * 32
+
+    replay_result = adapter.formal_replay(cert_payload, env_hash)
+    if (
+        replay_result.get("status") != ReplayStatus.VERIFIED.value
+        or replay_result.get("sorry_detected", False)
+    ):
+        return None
+
+    root_edges = list(view.edges_from(run_id, "HAS_ROOT"))
+    if not root_edges:
+        return None
+    root_state_id = root_edges[0].dst_id
+    root_state = view.node(root_state_id)
+    if root_state is None:
+        return None
+    root_status = root_state.fields.get("status", "open")
+
+    serial = _next_serial(view, IdType.LEAN_REPLAY.value)
+    replay_id = f"{proof_id}/{IdType.LEAN_REPLAY.value}-{serial}"
+
+    ops = [
+        UpsertNode(
+            "LeanReplay",
+            replay_id,
+            {
+                "actor": "replayer",
+                "status": ReplayStatus.VERIFIED.value,
+                "sorry_detected": False,
+            },
+        ),
+        AddEdge(
+            "REPLAYED_BY",
+            cert_id,
+            replay_id,
+            f"{cert_id}-replayed-{serial}",
+        ),
+        SetField(
+            "FormalState",
+            root_state_id,
+            "status",
+            FormalStateStatus.FORMALLY_CLOSED.value,
+            prior=root_status,
+        ),
+    ]
+
+    lease_row = store.issue_lease(
+        proof_id,
+        None,
+        worker_class=WorkerClass.COORDINATOR.value,
+        selected_move_id=run_id,
+        ttl_seconds=300.0,
+    )
+    if lease_row is None:
+        return None
+
+    proposal = Proposal(
+        proof_id=proof_id,
+        actor=WorkerClass.COORDINATOR.value,
+        worker_class=WorkerClass.COORDINATOR.value,
+        ops=tuple(ops),
+        base_revision=lease_row.base_revision,
+        lease_id=lease_row.lease_id,
+        fencing_token=lease_row.fencing_token,
+    )
+
+    try:
+        commit_result = gate.commit(proposal)
+        if commit_result.accepted and maintenance is not None:
+            maintenance(proposal, commit_result)
+        return commit_result
+    finally:
+        store.release_lease(proof_id, lease_row.lease_id)
