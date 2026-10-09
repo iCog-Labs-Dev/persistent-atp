@@ -181,6 +181,76 @@ class TestFormalCycle(Harness):
         )
         self.assertEqual(digest.worker_class, "formal-atp")
 
+    def test_formal_replay_and_closure_closes_formal_state(self):
+        from mathproof.formal_atp import FakeFormalATP
+        from mathproof.cycle import handle_replay_and_closure
+
+        plan_result = {
+            "run_id": "p1/fr-1",
+            "disposition": "proved-pending-replay",
+            "root_state_id": "p1/fs-1",
+            "states": [
+                {
+                    "state_id": "p1/fs-1",
+                    "kind": "or",
+                    "goal_text": "True",
+                    "exact_state_hash": "sha256:" + "11" * 32,
+                    "semantic_signature": "sha256:" + "22" * 32,
+                    "status": "open",
+                },
+            ],
+            "tactic_edges": [
+                {
+                    "tactic_id": "p1/ta-1",
+                    "source_state_id": "p1/fs-1",
+                    "tactic_label": "trivial",
+                    "executor_result": "lean-accepted",
+                    "subgoal_count": 0,
+                    "produced_goal_ids": [],
+                }
+            ],
+            "certificate": {
+                "artifact_hash": "sha256:" + "55" * 32,
+                "status": "candidate",
+            },
+            "checkpoint": None,
+            "obstructions": [],
+            "artifacts": [],
+        }
+        adapter = FakeFormalATP(plan={"p1/fr-1": [plan_result]})
+
+        digest = self.cycle(
+            ScriptedDispatcher({}),
+            worker_class="formal-atp",
+            adapters={"formal-atp": adapter},
+        )
+        self.assertTrue(digest.accepted, digest.rejections)
+        self.assertIsNotNone(digest.routing)
+        self.assertEqual(digest.routing.action, "hold-for-replay")
+
+        commit = handle_replay_and_closure(
+            "p1/fr-1",
+            "p1",
+            self.view,
+            self.gate,
+            adapter,
+            self.store,
+            maintenance=lambda proposal, commit: apply_ops(self.view, proposal.ops),
+        )
+        self.assertIsNotNone(commit)
+        self.assertTrue(commit.accepted, commit.rejections)
+        state = self.view.node("p1/fs-1")
+        self.assertEqual(state.fields["status"], "formally-closed")
+        replays = [
+            node_id
+            for node_id in self.view.nodes
+            if node_id.rsplit("/", 1)[-1].startswith("lr-")
+        ]
+        self.assertEqual(len(replays), 1)
+        replay_node = self.view.node(replays[0])
+        self.assertEqual(replay_node.fields["status"], "verified")
+        self.assertFalse(replay_node.fields["sorry_detected"])
+
 
 class TestEmptyFrontier(Harness):
     def test_no_eligible_moves_routes_to_audit(self):
