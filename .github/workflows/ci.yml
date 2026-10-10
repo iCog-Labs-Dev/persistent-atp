@@ -8,11 +8,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       fail-fast: false
       matrix:
-        # The floor is 3.11: the vocab modules use enum.StrEnum.
         python-version: ["3.11", "3.13"]
+    env:
+      ARTIFACT_TEST_DB_URL: postgresql://postgres:postgres@localhost:5432/test_db
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +45,11 @@ jobs:
         run: |
           uv pip install --system -r requirements.txt
           uv pip install --system pytest jsonschema
+
+      - name: Apply artifact store schema
+        run: uv run python -c "from artifacts.schema import apply_schema; apply_schema()"
+        env:
+          ARTIFACT_DB_URL: postgresql://postgres:postgres@localhost:5432/test_db
 
       - name: Test
         run: uv run pytest -q
