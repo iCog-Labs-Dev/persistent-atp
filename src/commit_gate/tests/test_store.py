@@ -10,12 +10,22 @@ from commit_gate.store import ConcurrencyError, HashChainError, JournalStore
 
 def payload(**overrides):
     """A minimal well-formed event payload, as `Proposal.to_dict` produces."""
-    base = {"proof_id": "p1", "actor": "test", "worker_class": "test"}
+    base = {
+        "proof_id": "p1", "actor": "test", "worker_class": "coordinator",
+        "ops": [{"kind": "test-event"}],
+    }
     base.update(overrides)
     return base
 
 
 class TestJournalStore(unittest.TestCase):
+    def test_empty_event_does_not_advance_revision(self):
+        store = JournalStore()
+        with self.assertRaises(ConcurrencyError) as caught:
+            store.append(payload(ops=[]))
+        self.assertEqual(caught.exception.reason, Reason.EMPTY_PROPOSAL)
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+
     def test_head_on_empty_journal(self):
         store = JournalStore()
         self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
@@ -65,7 +75,9 @@ class TestJournalStore(unittest.TestCase):
 
     def test_lease_fencing(self):
         store = JournalStore()
-        token = store.acquire_lease("p1", "lease1")
+        token = store.acquire_lease(
+            "p1", "lease1", actor="test", worker_class="coordinator"
+        )
 
         store.append(payload(lease_id="lease1", fencing_token=token))
 
@@ -73,10 +85,55 @@ class TestJournalStore(unittest.TestCase):
             store.append(payload(lease_id="lease1", fencing_token=0))
         self.assertEqual(caught.exception.reason, Reason.FENCING_TOKEN_SUPERSEDED)
 
+    def test_expired_lease_cannot_append_and_reacquire_is_audited(self):
+        now = [1_000_000_000_000]
+        store = JournalStore(clock_ns=lambda: now[0])
+        token = store.acquire_lease(
+            "p1", "lease1", actor="test", worker_class="coordinator", ttl_seconds=1
+        )
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+        now[0] += 1_000_000_000
+        with self.assertRaises(ConcurrencyError) as caught:
+            store.append(payload(base_revision=0, lease_id="lease1", fencing_token=token))
+        self.assertEqual(caught.exception.reason, Reason.LEASE_EXPIRED)
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+
+        renewed = store.acquire_lease(
+            "p1", "lease2", actor="test", worker_class="coordinator", ttl_seconds=1
+        )
+        self.assertGreater(renewed, token)
+        events = store._conn.execute(
+            "SELECT fencing_token, event_type FROM lease_audit ORDER BY seq"
+        ).fetchall()
+        self.assertEqual(
+            [(row["fencing_token"], row["event_type"]) for row in events],
+            [(token, "acquired"), (renewed, "acquired")],
+        )
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+        self.assertEqual(
+            store.append(payload(base_revision=0, lease_id="lease2", fencing_token=renewed))[0],
+            1,
+        )
+
+    def test_legacy_lease_without_expiry_is_unusable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.db")
+            with sqlite3.connect(path) as conn:
+                conn.execute(
+                    "CREATE TABLE leases (proof_id TEXT PRIMARY KEY, lease_id TEXT, fencing_token INTEGER, actor TEXT, worker_class TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO leases VALUES ('p1', 'old', 1, 'test', 'coordinator')"
+                )
+            store = JournalStore(path)
+            with self.assertRaises(ConcurrencyError) as caught:
+                store.append(payload(base_revision=0, lease_id="old", fencing_token=1))
+            self.assertEqual(caught.exception.reason, Reason.LEASE_EXPIRED)
+
     def test_reacquiring_the_lease_locks_out_the_old_holder(self):
         store = JournalStore()
-        old = store.acquire_lease("p1", "lease1")
-        new = store.acquire_lease("p1", "lease2")
+        old = store.acquire_lease("p1", "lease1", actor="test", worker_class="coordinator")
+        new = store.acquire_lease("p1", "lease2", actor="test", worker_class="coordinator")
         self.assertGreater(new, old)
 
         with self.assertRaises(ConcurrencyError) as caught:

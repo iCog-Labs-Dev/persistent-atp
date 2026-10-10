@@ -40,6 +40,7 @@ class Reason(StrEnum):
 
     UNKNOWN_NODE = "unknown-node"
     UNKNOWN_EDGE = "unknown-edge"
+    EDGE_ID_CONFLICT = "edge-id-conflict"
     NODE_ALREADY_EXISTS_WITH_LABEL = "node-already-exists-with-label"
     UPSERT_FIELD_CONFLICT = "upsert-field-conflict"          
     EDGE_ENDPOINT_TYPE_INVALID = "edge-endpoint-type-invalid"
@@ -50,21 +51,31 @@ class Reason(StrEnum):
 
     STAGNATION_WITHOUT_OBSTRUCTION = "stagnation-without-obstruction"
     SELF_CERTIFICATION = "self-certification"
+    REPLAY_BINDING_MISMATCH = "replay-binding-mismatch"
     PROMOTION_WITHOUT_REPLAY = "promotion-without-replay"
+    PROMOTION_WITHOUT_VALID_CERTIFICATE = "promotion-without-valid-certificate"
     PROMOTION_WITHOUT_ALIGNMENT = "promotion-without-alignment"
+    PROMOTION_WITHOUT_DECLARATION_CHAIN = "promotion-without-declaration-chain"
+    PROMOTION_WITHOUT_ENVIRONMENT_BINDING = "promotion-without-environment-binding"
+    CERTIFICATE_BINDING_INCOMPLETE = "certificate-binding-incomplete"
     ENVIRONMENT_DRIFT = "environment-drift"
     CRITIC_VERDICT_REQUIRED = "critic-verdict-required"
     WORKER_CLASS_OUT_OF_AUTHORITY = "worker-class-out-of-authority"
+    PROVENANCE_ACTOR_MISMATCH = "provenance-actor-mismatch"
 
     # Lost races. The proposal was well formed; the journal moved under it.
     STALE_BASE_REVISION = "stale-base-revision"
     LEASE_NOT_HELD = "lease-not-held"
+    READ_VIEW_OUT_OF_SYNC = "read-view-out-of-sync"
+    LEASE_IDENTITY_MISMATCH = "lease-identity-mismatch"
+    LEASE_EXPIRED = "lease-expired"
     FENCING_TOKEN_SUPERSEDED = "fencing-token-superseded"
     JOURNAL_BUSY = "journal-busy"
 
     # Missing concurrency control. A proposal that names no base revision
     # cannot be checked against the journal at all, so it is never committed.
     MISSING_CONCURRENCY_TOKEN = "missing-concurrency-token"
+    EMPTY_PROPOSAL = "empty-proposal"
 
 
 @dataclass(frozen=True, slots=True)

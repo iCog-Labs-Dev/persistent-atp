@@ -24,6 +24,7 @@ def _assert_safe_to_truncate(db_url: str) -> None:
 _assert_safe_to_truncate(_TEST_DB_URL)
 
 
+@unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")
 class TestSchema(unittest.TestCase):
     def test_apply_schema_creates_table(self):
         with psycopg.connect(_TEST_DB_URL) as conn:

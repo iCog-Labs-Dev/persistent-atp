@@ -292,11 +292,16 @@ class TestAlignmentCommitGateIntegration(unittest.TestCase):
         from commit_gate.ops import UpsertNode
         from commit_gate.proposal import Proposal
 
+        init_token = self.store.acquire_lease(
+            "p1", "lease-init-1", actor="coordinator", worker_class="coordinator"
+        )
         init_proposal = Proposal(
             proof_id="p1",
             actor="coordinator",
             worker_class="coordinator",
             base_revision=0,
+            lease_id="lease-init-1",
+            fencing_token=init_token,
             ops=(
                 UpsertNode("Claim", "p1/c-1", {"status": "provisional"}),
                 UpsertNode("FormalDeclaration", "p1/fd-1", {"exact_hash": "sha256:abc"}),
@@ -310,7 +315,12 @@ class TestAlignmentCommitGateIntegration(unittest.TestCase):
         from commit_gate.apply import apply_ops
 
         # Acquire lease from the store
-        token = self.store.acquire_lease("p1", "lease-align-1")
+        token = self.store.acquire_lease(
+            "p1",
+            "lease-align-1",
+            actor="alignment-reviewer-agent",
+            worker_class="alignment-reviewer",
+        )
 
         req = AlignmentReviewRequest(
             proof_id="p1",
@@ -351,4 +361,3 @@ class TestAlignmentCommitGateIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

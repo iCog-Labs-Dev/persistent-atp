@@ -36,3 +36,11 @@ use — see `schema.py` — so the store itself never creates its own table.
 2. Apply the schema once: `uv run python -m artifacts.schema`
 3. Use `ArtifactStore()` as normal — it assumes the table already exists
    and fails clearly (`SchemaNotAppliedError`) if step 2 was skipped.
+
+## Tests
+
+`uv run pytest -q` runs the service-free tests without a database. The
+artifact tests that create, truncate, or drop tables are skipped unless
+`ARTIFACT_TEST_DB_URL` is set. Point it at a dedicated Postgres test database
+whose name contains `test` to run those tests locally. CI sets this variable
+and starts its own Postgres service, so the full suite runs there.

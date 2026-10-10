@@ -1,12 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from commit_gate.canon import GENESIS_HASH
 from commit_gate.gate import CommitGate
-from commit_gate.ops import UpsertNode
+from commit_gate.ops import RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
+from commit_gate.tests.test_soundness_gates import wire
 
 
 class TestCommitGate(unittest.TestCase):
@@ -14,16 +16,21 @@ class TestCommitGate(unittest.TestCase):
         self.view = MemoryView()
         self.store = JournalStore()
         self.gate = CommitGate(self.view, self.store)
+        self.store.acquire_lease(
+            "p1", "lease-1", actor="test", worker_class="coordinator"
+        )
 
     @staticmethod
     def _valid(node_id="p1/fs1", **overrides):
         # `base_revision` is mandatory (`check_concurrency_tokens`); default to
         # the empty journal's head so single-commit tests need not name it.
         overrides.setdefault("base_revision", 0)
+        overrides.setdefault("lease_id", "lease-1")
+        overrides.setdefault("fencing_token", 1)
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", node_id, {"status": "open"}),),
             **overrides,
         )
@@ -34,9 +41,11 @@ class TestCommitGate(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("TacticApplication", "p1/ta1", {"executor_result": "lean-accepted"}),),
             base_revision=0,
+            lease_id="lease-1",
+            fencing_token=1,
         )
 
     def test_gate_accepts_valid_proposal(self):
@@ -44,6 +53,19 @@ class TestCommitGate(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertIsNotNone(result.event_hash)
         self.assertEqual(result.revision, 1)
+
+    def test_empty_proposal_cannot_advance_revision(self):
+        for lease_id, fencing_token in ((None, None), ("lease-1", 1)):
+            with self.subTest(lease_id=lease_id):
+                proposal = Proposal(
+                    proof_id="p1", actor="test", worker_class="coordinator",
+                    ops=(), base_revision=0,
+                    lease_id=lease_id, fencing_token=fencing_token,
+                )
+                result = self.gate.commit(proposal)
+                self.assertFalse(result.accepted)
+                self.assertIn(Reason.EMPTY_PROPOSAL, [r.reason for r in result.rejections])
+                self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
 
     def test_gate_rejects_invalid_proposal(self):
         result = self.gate.commit(self._invalid())
@@ -79,6 +101,132 @@ class TestCommitGate(unittest.TestCase):
             ],
         )
 
+    def test_promotion_uses_unprojected_journal_events(self):
+        wire(self.view)
+        removal = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        self.assertTrue(self.gate.commit(removal).accepted)
+        promotion = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/claim1", "status", "lean-verified", prior="formally-closed"),),
+            base_revision=1, lease_id="lease-1", fencing_token=1,
+        )
+        result = self.gate.commit(promotion)
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, [r.reason for r in result.rejections])
+        self.assertEqual(self.store.head("p1")[0], 1)
+
+    def test_unprojected_creation_is_visible_to_following_validation(self):
+        first = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(UpsertNode("Claim", "p1/c1", {"status": "conjectural"}),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        self.assertTrue(self.gate.commit(first).accepted)
+        second = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/c1", "status", "provisional", prior="conjectural"),),
+            base_revision=1, lease_id="lease-1", fencing_token=1,
+        )
+        self.assertTrue(self.gate.commit(second).accepted)
+        self.assertEqual(self.store.head("p1")[0], 2)
+
+    def test_projected_revision_is_not_applied_twice(self):
+        first = self._valid()
+        self.assertTrue(self.gate.commit(first).accepted)
+        self.view.apply_journal_event(self.store, "p1", 1)
+        second = self._valid(node_id="p1/fs2", base_revision=1)
+        self.assertTrue(self.gate.commit(second).accepted)
+
+    def test_read_view_ahead_of_journal_is_rejected(self):
+        class AheadView(MemoryView):
+            def snapshot(self, proof_id):
+                _, snapshot = super().snapshot(proof_id)
+                return 1, snapshot
+
+        result = CommitGate(AheadView(), self.store).commit(self._valid())
+        self.assertEqual(
+            [r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC]
+        )
+
+    def test_failed_projection_cannot_hide_unapplied_evidence(self):
+        wire(self.view)
+        removal = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        self.assertTrue(self.gate.commit(removal).accepted)
+        with self.assertRaises(ValueError):
+            self.view.apply_journal_event(self.store, "p1", 2)
+        self.assertEqual(self.view.snapshot("p1")[0], 0)
+        promotion = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/claim1", "status", "lean-verified", prior="formally-closed"),),
+            base_revision=1, lease_id="lease-1", fencing_token=1,
+        )
+        result = self.gate.commit(promotion)
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, [r.reason for r in result.rejections])
+
+    def test_projection_reads_the_committed_event(self):
+        wire(self.view)
+        removal = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(RemoveEdge("REPLAYED_BY", "p1/cert1-replayed-p1/replay1"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        self.assertTrue(self.gate.commit(removal).accepted)
+        self.view.apply_journal_event(self.store, "p1", 1)
+        self.assertIsNone(self.view.edge("p1/cert1-replayed-p1/replay1"))
+        promotion = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/claim1", "status", "lean-verified", prior="formally-closed"),),
+            base_revision=1, lease_id="lease-1", fencing_token=1,
+        )
+        result = self.gate.commit(promotion)
+        self.assertIn(Reason.PROMOTION_WITHOUT_REPLAY, [r.reason for r in result.rejections])
+
+    def test_snapshot_failure_is_a_typed_rejection(self):
+        class UnavailableView(MemoryView):
+            def snapshot(self, proof_id):
+                raise OSError("projection unavailable")
+
+        result = CommitGate(UnavailableView(), self.store).commit(self._valid())
+        self.assertEqual([r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC])
+        self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
+
+    def test_read_failures_after_snapshot_are_typed_rejections(self):
+        class ReadThroughView(MemoryView):
+            def snapshot(self, proof_id):
+                return 0, self
+
+        promotion = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(SetField("Claim", "p1/claim1", "status", "lean-verified", prior="formally-closed"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        edge_removal = Proposal(
+            proof_id="p1", actor="test", worker_class="coordinator",
+            ops=(RemoveEdge("HAS_TACTIC", "p1/e1"),),
+            base_revision=0, lease_id="lease-1", fencing_token=1,
+        )
+        for method, proposal in (
+            ("node", self._valid()),
+            ("edge", edge_removal),
+            ("edges_from", promotion),
+            ("edges_to", promotion),
+        ):
+            with self.subTest(method=method):
+                view = ReadThroughView()
+                if method.startswith("edges_"):
+                    wire(view)
+                with patch.object(ReadThroughView, method, side_effect=OSError("projection read unavailable")):
+                    result = CommitGate(view, self.store).commit(proposal)
+                self.assertEqual([r.reason for r in result.rejections], [Reason.READ_VIEW_OUT_OF_SYNC])
+                self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
+
     def test_stale_base_revision_is_a_rejection_not_an_exception(self):
         self.gate.commit(self._valid("p1/fs1"))
 
@@ -108,6 +256,61 @@ class TestCommitGate(unittest.TestCase):
         )
         self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
 
+    def test_structural_mutation_without_lease_is_refused(self):
+        result = self.gate.commit(self._valid(lease_id=None, fencing_token=None))
+        self.assertEqual(
+            [r.reason for r in result.rejections],
+            [Reason.MISSING_CONCURRENCY_TOKEN],
+        )
+
+    def test_expired_lease_is_a_typed_rejection(self):
+        now = [1_000_000_000_000]
+        store = JournalStore(clock_ns=lambda: now[0])
+        store.acquire_lease(
+            "p1", "lease-1", actor="test", worker_class="coordinator", ttl_seconds=1
+        )
+        now[0] += 1_000_000_000
+        result = CommitGate(MemoryView(), store).commit(self._valid())
+        self.assertEqual([r.reason for r in result.rejections], [Reason.LEASE_EXPIRED])
+        self.assertEqual(store.head("p1"), (0, GENESIS_HASH))
+
+    def test_claimed_trusted_class_cannot_use_another_class_lease(self):
+        token = self.store.acquire_lease(
+            "p1", "atp-lease", actor="atp-worker", worker_class="formal-atp"
+        )
+        forged = Proposal(
+            proof_id="p1",
+            actor="atp-worker",
+            worker_class="coordinator",
+            ops=(UpsertNode("Claim", "p1/c1", {"status": "conjectural"}),),
+            base_revision=0,
+            lease_id="atp-lease",
+            fencing_token=token,
+        )
+        result = self.gate.commit(forged)
+        self.assertEqual(
+            [r.reason for r in result.rejections],
+            [Reason.LEASE_IDENTITY_MISMATCH],
+        )
+        self.assertEqual(self.store.head("p1"), (0, GENESIS_HASH))
+
+    def test_claimed_actor_cannot_use_another_actors_lease(self):
+        original = self._valid()
+        forged = Proposal(
+            proof_id=original.proof_id,
+            actor="other-worker",
+            worker_class=original.worker_class,
+            ops=original.ops,
+            base_revision=original.base_revision,
+            lease_id=original.lease_id,
+            fencing_token=original.fencing_token,
+        )
+        result = self.gate.commit(forged)
+        self.assertEqual(
+            [r.reason for r in result.rejections],
+            [Reason.LEASE_IDENTITY_MISMATCH],
+        )
+
     def test_the_gate_leaves_a_verifiable_chain(self):
         self.gate.commit(self._valid("p1/fs1"))
         self.gate.commit(self._valid("p1/fs2", base_revision=1))
@@ -131,7 +334,7 @@ class TestRejectionJournal(unittest.TestCase):
         return Proposal(
             proof_id="p1",
             actor="worker-1",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", node_id, {"status": "open"}),),
             base_revision=base,
             lease_id=lease,
@@ -139,20 +342,29 @@ class TestRejectionJournal(unittest.TestCase):
         )
 
     def _invalid(self):
+        token = self.store.acquire_lease(
+            "p1", "lease-invalid", actor="test", worker_class="coordinator"
+        )
         return Proposal(
             proof_id="p1",
             actor="test",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("TacticApplication", "p1/ta1", {"executor_result": "lean-accepted"}),),
             base_revision=0,
+            lease_id="lease-invalid",
+            fencing_token=token,
         )
 
     def test_superseded_fencing_token_is_rejected_not_merged(self):
-        token_a = self.store.acquire_lease("p1", "lease-a")
+        token_a = self.store.acquire_lease(
+            "p1", "lease-a", actor="worker-1", worker_class="coordinator"
+        )
         first = self.gate.commit(self._proposal(token_a))
         self.assertTrue(first.accepted)
 
-        self.store.acquire_lease("p1", "lease-a")
+        self.store.acquire_lease(
+            "p1", "lease-a", actor="worker-1", worker_class="coordinator"
+        )
 
         stale = self._proposal(token_a, node_id="p1/fs2", base=1)
         result = self.gate.commit(stale)
@@ -176,7 +388,7 @@ class TestRejectionJournal(unittest.TestCase):
         stale = Proposal(
             proof_id="p1",
             actor="worker-2",
-            worker_class="test",
+            worker_class="coordinator",
             ops=(UpsertNode("FormalState", "p1/fs9", {"status": "open"}),),
             base_revision=0,
             lease_id="nope",
@@ -188,7 +400,9 @@ class TestRejectionJournal(unittest.TestCase):
         self.assertEqual(trail_after[0], trail[0])
 
     def test_accepted_commits_write_no_rejection_rows(self):
-        token = self.store.acquire_lease("p1", "lease-a")
+        token = self.store.acquire_lease(
+            "p1", "lease-a", actor="worker-1", worker_class="coordinator"
+        )
         self.gate.commit(self._proposal(token))
         self.assertEqual(self.store.read_rejections("p1"), [])
         self.assertEqual(self.store.verify_chain("p1"), 1)

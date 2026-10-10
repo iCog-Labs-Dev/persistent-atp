@@ -42,6 +42,7 @@ class TestArtifactStoreUnavailable(unittest.TestCase):
         with self.assertRaises(ArtifactStoreUnavailable):
             ArtifactStore(bad_url)
 
+@unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")
 class TestArtifactStorePut(unittest.TestCase):
     def setUp(self):
         apply_schema(_TEST_DB_URL)
@@ -85,6 +86,7 @@ class TestArtifactStorePut(unittest.TestCase):
             self.store.put("not bytes")
 
 
+@unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")
 class TestArtifactStoreGet(unittest.TestCase):
     def setUp(self):
         apply_schema(_TEST_DB_URL)
@@ -120,6 +122,7 @@ class TestArtifactStoreGet(unittest.TestCase):
             self.store.get("not-a-hash")
 
 
+@unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")
 class TestArtifactStoreExists(unittest.TestCase):
     def setUp(self):
         apply_schema(_TEST_DB_URL)

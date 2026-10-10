@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .proposal import Proposal
-from .reasons import Rejection
-from .state import ReadView
+from .reasons import Reason, Rejection
+from .state import JournalOverlayView, ReadView
 from .store import ConcurrencyError, JournalStore
 from .validate import validate_proposal
 
@@ -43,9 +43,10 @@ class CommitResult:
 class CommitGate:
     """Validates proposals and journals the ones that hold.
 
-    `view` answers questions about committed state; `store` is the journal.
-    The gate holds no snapshot of the head — the append reads it under the
-    write lock, so there is nothing here that can go stale.
+    `view` provides a revisioned snapshot of projected state; `store` is the
+    journal. Before validation, the gate overlays journal events the snapshot
+    has not yet applied. Append compares the same revision under the write
+    lock, rejecting a proposal if the head moved meanwhile.
     """
 
     def __init__(self, view: ReadView, store: JournalStore):
@@ -53,8 +54,62 @@ class CommitGate:
         self._store = store
 
     def validate(self, proposal: Proposal) -> list[Rejection]:
-        """Every rule violation in `proposal`, or an empty list."""
-        return validate_proposal(proposal, self._view)
+        """Validate against the exact journal revision this proposal names."""
+        try:
+            snapshot_method = getattr(self._view, "snapshot", None)
+        except Exception as exc:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"read view could not provide a snapshot: {exc}",
+            )]
+        if snapshot_method is None:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                "read view cannot provide a revisioned snapshot",
+            )]
+        try:
+            view_revision, snapshot = snapshot_method(proposal.proof_id)
+        except Exception as exc:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"read view could not provide a snapshot: {exc}",
+            )]
+        head_revision, _ = self._store.head(proposal.proof_id)
+        if proposal.base_revision is not None and proposal.base_revision != head_revision:
+            return [Rejection(
+                Reason.STALE_BASE_REVISION,
+                f"proposal is based on revision {proposal.base_revision}, "
+                f"head is {head_revision}",
+            )]
+        if not isinstance(view_revision, int) or not 0 <= view_revision <= head_revision:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"read view revision {view_revision!r} is ahead of journal "
+                f"head {head_revision}",
+            )]
+        try:
+            events = self._store.read_events_between(
+                proposal.proof_id, view_revision, head_revision
+            )
+            ops = tuple(
+                op for event in events for op in Proposal.from_dict(event).ops
+            )
+        except ConcurrencyError as exc:
+            return [Rejection(exc.reason, exc.detail)]
+        except (KeyError, TypeError, ValueError) as exc:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"journal events cannot be replayed for validation: {exc}",
+            )]
+        try:
+            return validate_proposal(
+                proposal, JournalOverlayView(snapshot, head_revision, ops)
+            )
+        except Exception as exc:
+            return [Rejection(
+                Reason.READ_VIEW_OUT_OF_SYNC,
+                f"read view failed during validation: {exc}",
+            )]
 
     def commit(self, proposal: Proposal) -> CommitResult:
         """Validate `proposal` and, if it holds, append it to the journal.
