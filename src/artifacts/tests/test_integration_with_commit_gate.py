@@ -39,6 +39,7 @@ def _assert_safe_to_truncate(db_url: str) -> None:
 _assert_safe_to_truncate(_TEST_DB_URL)
 
 
+@unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")
 class TestArtifactReferencedFromAProposal(unittest.TestCase):
     def setUp(self):
         apply_schema(_TEST_DB_URL)
