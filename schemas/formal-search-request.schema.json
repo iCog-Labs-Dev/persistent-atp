@@ -15,7 +15,8 @@
     "fencing_token",
     "lean_source_artifact",
     "environment_id",
-    "environment_hash"
+    "environment_hash",
+    "goal_text"
   ],
   "properties": {
     "proof_id": { "type": "string", "minLength": 1 },
@@ -47,6 +48,11 @@
     "environment_hash": {
       "$ref": "#/$defs/sha256",
       "description": "Digest of the pinned toolchain (Section 13.2). Results are only valid under this hash."
+    },
+    "goal_text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The exact current Lean goal the ATP should search."
     },
     "corpus_manifest": {
       "type": "object",
