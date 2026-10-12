@@ -9,6 +9,7 @@
   "lean_source_artifact": "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
   "environment_id": "lean-4.9.0-mathlib-pinned",
   "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "goal_text": "forall (p q : Prop), Or p q -> Or q p",
   "corpus_manifest": {
     "premise_corpus_artifact": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
     "retrieval_policy": "premise-relevance-top-64"
