@@ -128,17 +128,38 @@ class LLMAlignmentReviewer:
                 reasoning=f"LLM review failed: {exc}",
             )
 
-        # Parse verdict
         raw_verdict = str(data.get("verdict", "ambiguous")).lower()
         try:
             verdict = AlignmentVerdict(raw_verdict)
+            lifecycle = AlignmentLifecycle.REVIEWED
         except ValueError:
             verdict = AlignmentVerdict.AMBIGUOUS
+            lifecycle = AlignmentLifecycle.REVIEW_NEEDED
 
-        # Parse relation
-        raw_relation = str(data.get("relation", "exact")).lower()
-        if raw_relation not in ("exact", "strengthening", "weakening", "reformulation"):
-            raw_relation = "exact"
+        raw_relation = str(data.get("relation", "mismatch")).lower()
+        valid_relations = {
+            "exact",
+            "strengthening",
+            "weakening",
+            "reformulation",
+            "mismatch",
+        }
+        if raw_relation not in valid_relations:
+            raw_relation = "mismatch"
+            verdict = AlignmentVerdict.AMBIGUOUS
+            lifecycle = AlignmentLifecycle.REVIEW_NEEDED
+
+        expected_relations = {
+            AlignmentVerdict.ALIGNED: {"exact", "reformulation"},
+            AlignmentVerdict.STRONGER: {"strengthening"},
+            AlignmentVerdict.WEAKER: {"weakening"},
+            AlignmentVerdict.MISMATCH: {"mismatch"},
+        }
+        if (
+            verdict in expected_relations
+            and raw_relation not in expected_relations[verdict]
+        ):
+            lifecycle = AlignmentLifecycle.REVIEW_NEEDED
 
         criteria = AlignmentCriteria(
             quantifier_correspondence=str(data.get("quantifier_correspondence", "")),
@@ -157,7 +178,7 @@ class LLMAlignmentReviewer:
 
         return AlignmentReviewResult(
             verdict=verdict,
-            lifecycle=AlignmentLifecycle.REVIEWED,
+            lifecycle=lifecycle,
             criteria=criteria,
             reviewer=self.reviewer_id,
             reasoning=str(data.get("reasoning", "")),

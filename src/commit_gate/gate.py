@@ -1,22 +1,53 @@
 """The commit gate.
 
 The gate is the only writer of committed state. A worker submits an inert
-`Proposal`; the gate validates it against committed state and, if it holds,
-appends it to the journal itself. Nothing else may write to the journal.
+`Proposal`; the gate validates it and appends it to the journal itself.
+
+Accepting a proposal writes twice, in this order: the journal records what
+happened, then the graph is updated to match. The journal is the record of truth
+and the graph is a view replay can rebuild, so a crash in between leaves the
+graph merely behind. The reverse order would leave a change in the graph that no
+journal entry justifies.
+
+No transaction spans both — the journal is SQLite, the graph may be MORK, which
+cannot roll back. In its place: one writer at a time, that fixed order, and ops
+that survive being applied twice, so an interrupted commit is finished by
+replaying it rather than undone. How far the graph has been projected is
+recorded in the graph itself (see `WriteView`), and `commit` replays the
+difference before it validates anything.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 
+from .apply import apply_ops
 from .proposal import Proposal
 from .reasons import Reason, Rejection
-from .state import JournalOverlayView, ReadView
+from .state import JournalOverlayView, ProjectionView, ReadView
 from .store import ConcurrencyError, JournalStore
 from .validate import validate_proposal
 
-__all__ = ["CommitResult", "CommitGate"]
+__all__ = ["CommitResult", "CommitGate", "ProjectionError"]
+
+
+class ProjectionError(RuntimeError):
+    """The journal accepted a proposal but the graph could not be updated.
+
+    The commit stands, identified by `revision` and `event_hash`; only the graph
+    is behind, and replay brings it level. Raised rather than returned as a
+    rejection, so a worker never retries a proposal that in fact committed.
+    """
+
+    def __init__(self, revision: int, event_hash: str, cause: BaseException):
+        super().__init__(
+            f"revision {revision} is journalled but not projected: {cause}"
+        )
+        self.revision = revision
+        self.event_hash = event_hash
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,17 +72,78 @@ class CommitResult:
 
 
 class CommitGate:
-    """Validates proposals and journals the ones that hold.
+    """Validates proposals, journals the ones that hold, and projects them.
 
     `view` provides a revisioned snapshot of projected state; `store` is the
     journal. Before validation, the gate overlays journal events the snapshot
     has not yet applied. Append compares the same revision under the write
     lock, rejecting a proposal if the head moved meanwhile.
+
+    A `ProjectionView` such as `MorkView` is also updated after the durable
+    journal append. Other read views remain independently projected and are
+    brought current for validation by the journal overlay.
     """
 
     def __init__(self, view: ReadView, store: JournalStore):
         self._view = view
         self._store = store
+        self._projection = view if isinstance(view, ProjectionView) else None
+        # Reentrant: `commit` calls `validate`, which takes it again.
+        self._lock = threading.RLock()
+
+    @property
+    def projects(self) -> bool:
+        """Whether accepted proposals are written through to the graph."""
+        return self._projection is not None
+
+    @property
+    def view(self) -> ReadView:
+        """The committed state, for inspection. Do not write through this."""
+        return self._view
+
+    @property
+    def store(self) -> JournalStore:
+        """The journal, for inspection. Do not append through this."""
+        return self._store
+
+    def catch_up(self, proof_id: str | None = None) -> dict[str, int]:
+        """Replay journalled events the graph has not been told about.
+
+        Returns the events replayed per proof, covering every proof when
+        `proof_id` is omitted. `commit` does this on demand, but calling it at
+        startup surfaces a stalled projection while someone is watching.
+        """
+        if self._projection is None:
+            return {}
+        with self._lock:
+            proofs = [proof_id] if proof_id is not None else list(self._store.proof_ids())
+            return {
+                proof: replayed
+                for proof in proofs
+                if (replayed := self._catch_up_locked(proof))
+            }
+
+    def _catch_up_locked(self, proof_id: str) -> int:
+        """Bring the graph level with the journal for one proof."""
+        if self._projection is None:
+            return 0
+        mark = self._projection.projected_revision(proof_id)
+        if mark == self._store.head(proof_id)[0]:
+            return 0
+
+        replayed = 0
+        for revision, payload in self._store.read_events_after(proof_id, mark):
+            try:
+                event = Proposal.from_dict(payload)
+                if event.proof_id != proof_id or not event.ops:
+                    raise ValueError("journal event has the wrong proof or no operations")
+                apply_ops(self._projection, event.ops)
+            except Exception as exc:
+                raise ProjectionError(revision, "", exc) from exc
+            # Marked per event: an interrupted replay resumes rather than restarts.
+            self._projection.record_projected(proof_id, revision)
+            replayed += 1
+        return replayed
 
     def validate(self, proposal: Proposal) -> list[Rejection]:
         """Validate against the exact journal revision this proposal names."""
@@ -112,43 +204,65 @@ class CommitGate:
             )]
 
     def commit(self, proposal: Proposal) -> CommitResult:
-        """Validate `proposal` and, if it holds, append it to the journal.
-        
-        A lost race is reported as a rejection rather than raised: the proposer
-        gets a code it can act on, and nothing has been written. Refused
-        proposals are recorded in the rejection audit log (best-effort: if the
-        journal is too busy even for that, the rejection still reaches the
-        proposer -- only the audit copy is lost).
+        """Validate `proposal` and, if it holds, journal and project it.
+
+        A lost race is a rejection, not an exception: the proposer gets a code it
+        can act on, nothing has been committed, and the refusal is audited.
+
+        Holds the gate's lock throughout, which the graph depends on: changing a
+        field means reading its current value and then replacing it, and a second
+        writer in between would leave both values behind.
+
+        Raises `ProjectionError` if the journal accepted the proposal but the
+        graph write failed. The commit stands; see that exception.
         """
-        rejections = self.validate(proposal)
-        if rejections:
-            self._audit(proposal, rejections)
-            return CommitResult(
-                accepted=False,
-                rejections=tuple(rejections),
-                event_hash=None,
-                revision=None,
-            )
+        with self._lock:
+            if self._projection is not None:
+                # Two integers in the normal case; does work only after a crash.
+                self._catch_up_locked(proposal.proof_id)
 
-        try:
-            revision, event_hash = self._store.append(proposal.to_dict())
-        except ConcurrencyError as exc:
-            self._audit(
-                proposal, (Rejection(exc.reason, exc.detail),)
-            )
-            return CommitResult(
-                accepted=False,
-                rejections=(Rejection(exc.reason, exc.detail),),
-                event_hash=None,
-                revision=None,
-            )
+            rejections = self.validate(proposal)
+            if rejections:
+                self._audit(proposal, rejections)
+                return CommitResult(
+                    accepted=False,
+                    rejections=tuple(rejections),
+                    event_hash=None,
+                    revision=None,
+                )
 
-        return CommitResult(
-            accepted=True,
-            rejections=(),
-            event_hash=event_hash,
-            revision=revision,
-        )
+            try:
+                revision, event_hash = self._store.append(proposal.to_dict())
+            except ConcurrencyError as exc:
+                rejection = Rejection(exc.reason, exc.detail)
+                self._audit(proposal, (rejection,))
+                return CommitResult(
+                    accepted=False,
+                    rejections=(rejection,),
+                    event_hash=None,
+                    revision=None,
+                )
+
+            if self._projection is not None:
+                try:
+                    (payload,) = self._store.read_events_between(
+                        proposal.proof_id, revision - 1, revision
+                    )
+                    event = Proposal.from_dict(payload)
+                    if event.proof_id != proposal.proof_id or not event.ops:
+                        raise ValueError(
+                            "journal event has the wrong proof or no operations"
+                        )
+                    apply_ops(self._projection, event.ops)
+                except Exception as exc:
+                    raise ProjectionError(revision, event_hash, exc) from exc
+                self._projection.record_projected(proposal.proof_id, revision)
+            return CommitResult(
+                accepted=True,
+                rejections=(),
+                event_hash=event_hash,
+                revision=revision,
+            )
 
     def _audit(self, proposal: Proposal, rejections) -> None:
         """Copy refused proposals into the rejection log; never blocks the answer."""

@@ -10,7 +10,7 @@ from __future__ import annotations
 __all__ = [
     "ArtifactStoreError",
     "ArtifactStoreUnavailable",
-    "SchemaNotAppliedError",    
+    "SchemaNotAppliedError",
     "ArtifactNotFoundError",
     "ArtifactQueryError",
 ]
