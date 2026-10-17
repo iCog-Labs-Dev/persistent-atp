@@ -3,7 +3,7 @@
 python-dotenv>=1.0
 neo4j>=5.14
 psycopg[binary]>=3.0
+jsonschema>=4.0
 
 # Dev dependencies
 pytest>=8.0
-jsonschema>=4.0

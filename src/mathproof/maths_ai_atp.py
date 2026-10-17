@@ -28,17 +28,19 @@ missing request fields  invalid-request
 ``formal_search_resume`` hands the same goal back to the reasoner -- its
 Thompson-sampler state persists across calls, so a resumed run continues the
 search rather than restarting it blind. ``formal_replay`` delegates to an
-injected verdict function; independent Lean replay of certificates remains
-Phase 1 scope.
+injected verdict function; :mod:`mathproof.replay` provides the real one
+(``lean_replay_fn`` over Pantograph), while the default remains the Phase 0
+stub so test suites stay deterministic without a Lean backend.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Callable, Mapping
 
-from commit_gate.vocab import RunDisposition
+from commit_gate.vocab import ExecutorResult, NON_KERNEL_TACTICS, RunDisposition
 from mathproof.formal_atp import (
     FormalATPAdapter,
     ReplayFn,
@@ -49,6 +51,8 @@ from mathproof.formal_atp import (
     missing_request_fields,
     stub_replay,
 )
+from mathproof.schemas import validate as validate_schema
+from mathproof.soundness import validate_formal_search_result
 
 __all__ = ["MathsAIFormalATP", "default_reasoner_factory"]
 
@@ -113,12 +117,67 @@ def _node_annotations(node: Any) -> dict[str, float]:
     return annotations
 
 
+def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
+    """Construct complete Lean-only witnesses for solved nodes in an AND/OR graph.
+
+    An edge witnesses its source only when Lean accepted it and every child
+    has a witness of its own. Cycles and references to absent goals fail shut.
+    The selected trace is built here so the reasoner's preferred, potentially
+    heuristic trace cannot be used as a certificate artifact.
+    """
+    outgoing: dict[int, list[Any]] = {}
+    for edge in graph.edges.values():
+        if (
+            edge.status == "solved"
+            and str(edge.tactic.tactic_name) not in NON_KERNEL_TACTICS
+            and edge.source_id in graph.nodes
+            and graph.nodes[edge.source_id].status == "solved"
+        ):
+            outgoing.setdefault(edge.source_id, []).append(edge)
+
+    witnesses: dict[int, tuple[dict[str, Any], frozenset[int]]] = {}
+
+    def trace_for(
+        node_id: int, visiting: frozenset[int]
+    ) -> tuple[dict[str, Any], frozenset[int]] | None:
+        if node_id in visiting or node_id not in graph.nodes:
+            return None
+        cached = witnesses.get(node_id)
+        if cached is not None and cached[1].isdisjoint(visiting):
+            return cached
+        path = visiting | {node_id}
+        for edge in outgoing.get(node_id, ()):
+            children = [trace_for(child, path) for child in edge.child_ids]
+            if any(child is None for child in children):
+                continue
+            child_witnesses = [child for child in children if child is not None]
+            trace = {
+                "goal": str(graph.nodes[node_id].goal.expression),
+                "tactic": str(edge.tactic.tactic_name),
+                "arguments": [str(arg) for arg in (edge.tactic.arguments or [])],
+                "subgoals": [child[0] for child in child_witnesses],
+            }
+            used = frozenset({node_id}).union(*(child[1] for child in child_witnesses))
+            witness = (trace, used)
+            witnesses[node_id] = witness
+            return witness
+        return None
+
+    traces: dict[int, dict[str, Any]] = {}
+    for node_id in graph.nodes:
+        witness = trace_for(node_id, frozenset())
+        if witness is not None:
+            traces[node_id] = witness[0]
+    return traces
+
+
 def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict[str, Any]:
     run_id = request["run_id"]
     proof_id = request["proof_id"]
     env_hash = request["environment_hash"]
 
     state_ids = {node_id: f"{proof_id}/fs-{node_id + 1}" for node_id in graph.nodes}
+    kernel_traces = _kernel_proof_traces(graph)
 
     parent_edges = {}
     multi_child = set()
@@ -130,6 +189,11 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
 
     states = []
     for node_id, node in graph.nodes.items():
+        if node.status == "solved" and node_id not in kernel_traces:
+            # Heuristic closure only: the state stays open for a resumed run.
+            status = "open"
+        else:
+            status = _STATE_STATUS.get(node.status, "open")
         states.append(
             build_state(
                 proof_id,
@@ -137,30 +201,45 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
                 _goal_text(node.goal),
                 env_hash,
                 kind="and" if node_id in multi_child else "or",
-                status=_STATE_STATUS.get(node.status, "open"),
+                status=status,
                 annotations=_node_annotations(node),
             )
         )
 
     tactic_edges = []
     for serial, edge in enumerate(graph.edges.values(), start=1):
-        rejected = edge.status == "dead"
+        tactic_name = str(edge.tactic.tactic_name)
+        if tactic_name in NON_KERNEL_TACTICS:
+            executor_result = ExecutorResult.EMPTY_OUTPUT.value
+        elif edge.status == "dead":
+            executor_result = ExecutorResult.LEAN_REJECTED.value
+        else:
+            executor_result = ExecutorResult.LEAN_ACCEPTED.value
+        diagnostic = None
+        if executor_result == ExecutorResult.LEAN_REJECTED.value:
+            diagnostic = _digest("diagnostic", serial, tactic_name, getattr(edge, "note", None) or "")
         tactic_edges.append(
             build_tactic_edge(
                 proof_id,
                 serial,
                 state_ids[edge.source_id],
-                "lean-rejected" if rejected else "lean-accepted",
+                executor_result,
                 len(edge.child_ids),
                 [state_ids[cid] for cid in edge.child_ids],
-                tactic_label=str(edge.tactic.tactic_name),
+                tactic_label=tactic_name,
                 tactic_args=[str(a) for a in (edge.tactic.arguments or [])],
                 model_provenance={"search_policy_name": "maths-ai-hybrid"},
                 annotations={"gnn_tactic_prior": float(edge.tactic.probability)},
+                **({"diagnostic_artifact": diagnostic} if diagnostic else {}),
             )
         )
 
     frontier_ids = [state_ids[node.id] for node in graph.frontier()]
+    for node_id, node in graph.nodes.items():
+        if node.status == "solved" and node_id not in kernel_traces:
+            state_id = state_ids[node_id]
+            if state_id not in frontier_ids:
+                frontier_ids.append(state_id)
 
     result: dict[str, Any] = {
         "run_id": run_id,
@@ -179,8 +258,8 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
     if request.get("formal_declaration_id"):
         result["declaration_id"] = request["formal_declaration_id"]
 
-    if graph.is_solved():
-        trace = graph.proof_trace()
+    if graph.is_solved() and graph.root_id in kernel_traces:
+        trace = kernel_traces[graph.root_id]
         certificate_hash = _digest("certificate", run_id, trace)
         result.update(
             root_state_id=state_ids[graph.root_id],
@@ -258,12 +337,36 @@ class MathsAIFormalATP(FormalATPAdapter):
                     hypotheses=list(request.get("hypotheses") or []),
                 )
             )
+            wall_ms = int((time.monotonic() - started) * 1000)
+            result = _convert_graph(graph, request, wall_ms)
+            schema_errors = validate_schema("formal-search-result", result)
+            findings = (
+                validate_formal_search_result(
+                    result,
+                    pinned_environment_hash=request["environment_hash"],
+                )
+                if not schema_errors else ()
+            )
+            identity_errors = [
+                f"{key}: result does not match request"
+                for key, expected in (
+                    ("run_id", run_id),
+                    ("proof_id", request["proof_id"]),
+                    ("declaration_id", request["formal_declaration_id"]),
+                )
+                if result.get(key) != expected
+            ]
+            if schema_errors or findings or identity_errors:
+                diagnostic = {
+                    "schema": schema_errors,
+                    "soundness": [finding.to_dict() for finding in findings],
+                    "identity": identity_errors,
+                }
+                result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
+                result["artifacts"][0]["note"] = json.dumps(diagnostic, sort_keys=True)
         except Exception as exc:
             result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
             result["artifacts"][0]["note"] = f"{type(exc).__name__}: {exc}"
-            return result
-        wall_ms = int((time.monotonic() - started) * 1000)
-        result = _convert_graph(graph, request, wall_ms)
         self._latest[run_id] = result
         self._requests[run_id] = request
         return result

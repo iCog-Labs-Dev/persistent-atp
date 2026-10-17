@@ -12,12 +12,12 @@ dependencies = [
     "python-dotenv>=1.0",
     "neo4j>=5.14",
     "psycopg[binary]>=3.3.6",
+    "jsonschema>=4.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "jsonschema>=4.0",
 ]
 # The production backend is not on PyPI and lives in a private repository,
 # so plain pip cannot resolve it — [tool.uv.sources] below applies to uv

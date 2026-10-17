@@ -1314,6 +1314,7 @@ name = "persistent-atp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "neo4j" },
     { name = "psycopg", extra = ["binary"] },
     { name = "python-dotenv" },
@@ -1321,7 +1322,6 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "pytest" },
 ]
 real-atp = [
@@ -1330,7 +1330,7 @@ real-atp = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "jsonschema", specifier = ">=4.0" },
     { name = "mathematics-ai-atp", marker = "extra == 'real-atp'", git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" },
     { name = "neo4j", specifier = ">=5.14" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
