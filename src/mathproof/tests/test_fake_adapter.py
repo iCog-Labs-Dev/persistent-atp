@@ -23,6 +23,7 @@ REQUEST = {
     "lean_source_artifact": "sha256:" + "b2" * 32,
     "environment_id": "lean-pinned",
     "environment_hash": "sha256:" + "c3" * 32,
+    "goal_text": "forall (p q : Prop), Or p q -> Or q p",
 }
 
 
@@ -97,6 +98,15 @@ class TestFakeFormalATP(unittest.TestCase):
         broken = {k: v for k, v in REQUEST.items() if k != "fencing_token"}
         result = atp.formal_search_start(broken)
         self.assertEqual(result["disposition"], "invalid-request")
+
+    def test_request_missing_goal_text_is_invalid_request(self):
+        atp = FakeFormalATP({"p1/fr-1": ["proved-pending-replay"]})
+        broken = {key: value for key, value in REQUEST.items() if key != "goal_text"}
+
+        result = atp.formal_search_start(broken)
+
+        self.assertEqual(result["disposition"], "invalid-request")
+        self.assertIn("goal_text", result["artifacts"][0]["note"])
 
     def test_unscripted_run_is_invalid_request(self):
         atp = FakeFormalATP()

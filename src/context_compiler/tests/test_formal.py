@@ -155,6 +155,7 @@ class FormalCompilerTests(unittest.TestCase):
                          {"policy_name": "gnn-pln-best-first-v1", "deny_sorry": True,
                           "max_tactic_steps": 40})
         self.assertEqual(req["budget"], {"max_steps": 500, "wall_clock_ms": 60000})
+        self.assertEqual(req["goal_text"], "P n")
 
     def test_schema_request_validates(self):
         if validate_schema is None:
@@ -166,6 +167,26 @@ class FormalCompilerTests(unittest.TestCase):
         minimal = compile_formal(request, bundle, reader, minimal_task, access)
         self.assertEqual(
             validate_schema("formal-search-request", minimal.payload.to_schema_dict()), [])
+
+    def test_selected_root_requires_goal_text(self):
+        extra = {
+            ROOT: {
+                "state_id": ROOT,
+                "status": "open",
+                "kind": "goal",
+                "context_digest": h("ctx"),
+                "environment_hash": h("lake"),
+                "serialization_version": 1,
+                "exact_state_hash": h("root"),
+                "semantic_signature": h("sem-root"),
+            }
+        }
+
+        with self.assertRaisesRegex(
+            ContextValidationError,
+            "root state goal_text must be a non-empty string",
+        ):
+            compile_formal(*make(extra))
 
     def test_optional_schema_sections_omitted_when_unset(self):
         request, bundle, reader, task, access = make()
@@ -365,8 +386,14 @@ class FormalCompilerTests(unittest.TestCase):
                       "toolchain": "t", "_type": "environment"},
             DECL: {"declaration_id": DECL, "status": "searching", "lean_type": "T",
                    "lean_value": "v", "claim_id": f"{P}/c-1", "environment_id": "env-2"},
-             ROOT: {"state_id": ROOT, "status": "open", "exact_state_hash": h("root"),
-                   "semantic_signature": h("sem-root"), "environment_hash": h("x")},
+            ROOT: {
+                "state_id": ROOT,
+                "status": "open",
+                "goal_text": "P n",
+                "exact_state_hash": h("root"),
+                "semantic_signature": h("sem-root"),
+                "environment_hash": h("x"),
+            },
         }
         out = compile_formal(*make(extra))
         self.assertEqual(out.payload.environment["environment_id"], "env-2")

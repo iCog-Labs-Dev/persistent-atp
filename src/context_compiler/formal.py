@@ -347,6 +347,7 @@ class FormalRequestPayload:
             "lean_source_artifact": self.lean_source_artifact,
             "environment_id": self.environment["environment_id"],
             "environment_hash": self.environment["environment_hash"],
+            "goal_text": self.root_state["goal_text"],
         }
         if self.corpus_manifest:
             request["corpus_manifest"] = dict(self.corpus_manifest)
@@ -565,6 +566,10 @@ def compile_formal(
     if root is None or root.ref.source_type != STATE_TYPE:
         raise ContextValidationError("root state is not a formal-state in the bundle")
 
+    goal_text = _require_str(
+        "root state goal_text",
+        root.body.get("goal_text"),
+    )
     environments = [s for s in sources.values() if s.ref.source_type == ENVIRONMENT_TYPE]
     named_env = declaration.body.get("environment_id")
     if isinstance(named_env, str):
@@ -731,12 +736,12 @@ def compile_formal(
     root_state: dict[str, Any] = {
         "state_id": root.ref.source_id,
         "status": root.status,
+        "goal_text": goal_text,
         "exact_state_hash": root_body["exact_state_hash"],
         "semantic_signature": root_body["semantic_signature"],
         "source_hash": root.ref.content_hash,
     }
     for optional_key in (
-        "goal_text",
         "kind",
         "context_digest",
         "environment_id",
