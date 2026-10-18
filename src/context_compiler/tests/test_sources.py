@@ -1,10 +1,11 @@
 import unittest
 
 from commit_gate.state import MemoryView
+from commit_gate.validate import EDGE_ENDPOINTS
 from context_compiler.contracts import CompileRequest, PacketKind, TextBudget
 from context_compiler.errors import ContextValidationError
 from context_compiler.snapshot import ProofSnapshot, StaleSnapshotError
-from context_compiler.sources import RetrievalPlan, collect_sources
+from context_compiler.sources import DEFAULT_RELATIONS, RetrievalPlan, collect_sources
 from shared.vocab import WorkerClass
 
 H1 = "sha256:" + "1" * 64
@@ -53,7 +54,7 @@ class TestCollection(unittest.TestCase):
         view = chain_view(3)
         out = run(view, RetrievalPlan(kernel_id="p1/c0"))
         ids = [s.source_id for s in out.bundle.sources]
-        self.assertEqual(ids, ["p1/c0", "p1/c1", "p1/c2"])
+        self.assertEqual(ids, ["p1/c1", "p1/c2"])
         self.assertEqual(out.kernel.kernel_id, "p1/c0")
         self.assertEqual(out.kernel.statement, "stmt p1/c0")
         self.assertTrue(all(s.source_version == "5" for s in out.bundle.sources))
@@ -65,7 +66,11 @@ class TestCollection(unittest.TestCase):
         view.add_node("p1/fs1", "FormalState", {"status": "open", "goal_text": "g"})
         claim(view, "p1/c0")
         view.add_edge("HAS_TARGET", "p1/proof", "p1/c0", "p1/e0")
-        out = run(view, RetrievalPlan(kernel_id="p1/c0", seed_ids=("p1/fs1",)))
+        out = run(
+            view,
+            RetrievalPlan(kernel_id="p1/c0", seed_ids=("p1/fs1",)),
+            req=request(PacketKind.FORMAL),
+        )
         body = out.fetch("p1/fs1")
         self.assertEqual((body["status"], body["goal_text"]), ("open", "g"))
         self.assertEqual(body["state_id"], "p1/fs1")  # identity key added
@@ -97,14 +102,14 @@ class TestCollection(unittest.TestCase):
 class TestBoundsAndDuplicates(unittest.TestCase):
     def test_depth_limit_stops_and_is_reported(self):
         out = run(chain_view(6), RetrievalPlan(kernel_id="p1/c0", max_depth=2))
-        self.assertEqual([s.source_id for s in out.bundle.sources], ["p1/c0", "p1/c1", "p1/c2"])
+        self.assertEqual([s.source_id for s in out.bundle.sources], ["p1/c1", "p1/c2"])
         self.assertFalse(out.is_complete)
         self.assertEqual(out.truncations[0].reason, "max-depth")
         self.assertIn("p1/c3", out.truncations[0].unexpanded)
 
     def test_node_limit_stops_and_is_reported(self):
         out = run(chain_view(6), RetrievalPlan(kernel_id="p1/c0", max_nodes=2, max_depth=10))
-        self.assertEqual(len(out.bundle.sources), 2)
+        self.assertEqual(len(out.bundle.sources), 1)
         self.assertEqual(out.truncations[0].reason, "max-nodes")
 
     def test_cycle_terminates_and_each_node_appears_once(self):
@@ -112,7 +117,7 @@ class TestBoundsAndDuplicates(unittest.TestCase):
         view.add_edge("DEPENDS_ON", "p1/c2", "p1/c0", "p1/back")
         out = run(view, RetrievalPlan(kernel_id="p1/c0", max_depth=9))
         ids = [s.source_id for s in out.bundle.sources]
-        self.assertEqual(sorted(ids), ["p1/c0", "p1/c1", "p1/c2"])
+        self.assertEqual(sorted(ids), ["p1/c1", "p1/c2"])
         self.assertTrue(out.is_complete)
 
     def test_diamond_reaches_shared_node_once(self):
@@ -124,6 +129,7 @@ class TestBoundsAndDuplicates(unittest.TestCase):
         out = run(view, RetrievalPlan(kernel_id="p1/a", max_depth=5))
         ids = [s.source_id for s in out.bundle.sources]
         self.assertEqual(ids.count("p1/d"), 1)
+        self.assertNotIn("p1/a", ids)
 
     def test_relations_outside_the_allowlist_are_not_followed(self):
         view = MemoryView()
@@ -131,7 +137,7 @@ class TestBoundsAndDuplicates(unittest.TestCase):
         claim(view, "p1/c1")
         view.add_edge("CITES", "p1/c0", "p1/c1", "p1/x")  # not an allowlisted relation
         out = run(view, RetrievalPlan(kernel_id="p1/c0"))
-        self.assertEqual([s.source_id for s in out.bundle.sources], ["p1/c0"])
+        self.assertIsNone(out.bundle)
 
 
 class TestMissingAndIncomplete(unittest.TestCase):
@@ -180,7 +186,12 @@ class TestDiagnostics(unittest.TestCase):
 
     def test_diagnostic_is_resolved_from_the_artifact_interface(self):
         arts = FakeArtifacts({H1: b"unsolved goals"})
-        out = run(self._view(), RetrievalPlan(kernel_id="p1/c0"), arts)
+        out = run(
+            self._view(),
+            RetrievalPlan(kernel_id="p1/c0"),
+            arts,
+            request(PacketKind.OBSTRUCTION),
+        )
         body = out.fetch(H1)
         self.assertEqual(body["text"], "unsolved goals")
         self.assertEqual(body["artifact_hash"], H1)
@@ -189,14 +200,23 @@ class TestDiagnostics(unittest.TestCase):
         self.assertEqual((ref.source_type, ref.content_hash), ("diagnostic", H1))
 
     def test_absent_artifact_is_reported_missing(self):
-        out = run(self._view(), RetrievalPlan(kernel_id="p1/c0"))
+        out = run(
+            self._view(),
+            RetrievalPlan(kernel_id="p1/c0"),
+            req=request(PacketKind.OBSTRUCTION),
+        )
         self.assertEqual(
             [(m.source_id, m.reason, m.referenced_by) for m in out.missing],
             [(H1, "artifact-not-found", "p1/at1")],
         )
 
     def test_non_utf8_artifact_is_reported_missing(self):
-        out = run(self._view(), RetrievalPlan(kernel_id="p1/c0"), FakeArtifacts({H1: b"\xff\xfe"}))
+        out = run(
+            self._view(),
+            RetrievalPlan(kernel_id="p1/c0"),
+            FakeArtifacts({H1: b"\xff\xfe"}),
+            request(PacketKind.OBSTRUCTION),
+        )
         self.assertEqual(out.missing[0].reason, "artifact-not-utf8")
 
     def test_artifact_infrastructure_errors_propagate(self):
@@ -205,10 +225,20 @@ class TestDiagnostics(unittest.TestCase):
                 raise ConnectionError("store down")
 
         with self.assertRaises(ConnectionError):
-            run(self._view(), RetrievalPlan(kernel_id="p1/c0"), Down())
+            run(
+                self._view(),
+                RetrievalPlan(kernel_id="p1/c0"),
+                Down(),
+                request(PacketKind.OBSTRUCTION),
+            )
 
 
 class TestGuards(unittest.TestCase):
+    def test_default_relations_exist_in_committed_graph_schema(self):
+        for packet_kind, relations in DEFAULT_RELATIONS.items():
+            with self.subTest(packet_kind=packet_kind):
+                self.assertEqual(set(relations) - set(EDGE_ENDPOINTS), set())
+
     def test_stale_snapshot_is_refused(self):
         with self.assertRaises(StaleSnapshotError):
             run(chain_view(1), RetrievalPlan(kernel_id="p1/c0"), req=request(revision=6))
