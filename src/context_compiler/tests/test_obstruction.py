@@ -16,15 +16,18 @@ from context_compiler.contracts import (
     SourceBundle,
     SourceRef,
     TextBudget,
+    TheoremKernel,
 )
 from context_compiler.errors import ContextValidationError
 from context_compiler.obstruction import (
     CharHeuristicTokenCounter,
     MappingArtifactReader,
+    ObstructionTask,
     SuspectedCause,
     compile_obstruction,
 )
 from shared.vocab import (
+    ClaimStatus,
     EvidenceKind,
     ExecutorResult,
     FormalStateStatus,
@@ -40,6 +43,12 @@ ENV_HASH = "sha256:" + "c3" * 32
 DIAG_1 = "sha256:" + "73" * 32
 DIAG_2 = "sha256:" + "74" * 32
 SEM_10 = "sha256:" + "6a" * 32
+KERNEL = TheoremKernel(
+    kernel_id="p1/c-1",
+    statement="For every n, the sum of the first n natural numbers is n(n+1)/2.",
+    assumptions=("n is a natural number", "the proof is constructive"),
+    status=ClaimStatus.PROVISIONAL,
+)
 
 HYP_10 = "IH : \u03a3 k=1..n k = n(n+1)/2"
 TARGET_10 = (
@@ -219,18 +228,23 @@ def make_request(**overrides) -> CompileRequest:
     return CompileRequest(**values)
 
 
+def make_task() -> ObstructionTask:
+    return ObstructionTask(KERNEL, VERSION)
+
+
 def scenario(**overrides) -> SimpleNamespace:
     bundle, artifacts = make_bundle(default_entries())
     return SimpleNamespace(
         request=make_request(**overrides),
         bundle=bundle,
         reader=MappingArtifactReader(artifacts),
+        task=make_task(),
     )
 
 
 def compile_default(**overrides) -> object:
     case = scenario(**overrides)
-    return compile_obstruction(case.request, case.bundle, case.reader)
+    return compile_obstruction(case.request, case.bundle, case.reader, case.task)
 
 
 def test_compiles_payload_packet_and_manifest():
@@ -252,6 +266,42 @@ def test_compiles_payload_packet_and_manifest():
     assert compilation.packet_digest.startswith("sha256:")
 
 
+def test_theorem_kernel_is_rendered_as_mandatory_context():
+    compilation = compile_default()
+    content = compilation.packet.content
+
+    assert "THEOREM KERNEL (canonical, mandatory)" in content
+    assert KERNEL.statement in content
+    assert "n is a natural number" in content
+    assert "the proof is constructive" in content
+    assert content.index("THEOREM KERNEL") < content.index("OBSERVED FAILURES")
+
+
+def test_manifest_records_theorem_kernel_provenance():
+    compilation = compile_default()
+    decision = compilation.result.selection_decisions[0]
+
+    assert decision.source_id == KERNEL.kernel_id
+    assert decision.source_version == VERSION
+    assert decision.status == KERNEL.status.value
+    assert decision.included is True
+    assert decision.reason == "theorem kernel"
+    assert compilation.manifest["sources"][0] == {
+        "source_id": KERNEL.kernel_id,
+        "source_version": VERSION,
+        "status": KERNEL.status.value,
+        "included": True,
+        "reason": "theorem kernel",
+    }
+
+
+def test_obstruction_task_requires_a_kernel_and_version():
+    with pytest.raises(ContextValidationError, match="kernel must be"):
+        ObstructionTask(object(), VERSION)  # type: ignore[arg-type]
+    with pytest.raises(ContextValidationError, match="kernel_version"):
+        ObstructionTask(KERNEL, "")
+
+
 def test_repeat_compilation_is_deterministic():
     first = compile_default()
     second = compile_default()
@@ -264,7 +314,7 @@ def test_repeat_compilation_is_deterministic():
 def test_selection_keeps_a_small_set_and_dedupes():
     case = scenario()
     compilation = compile_obstruction(
-        case.request, case.bundle, case.reader, max_failed_states=4
+        case.request, case.bundle, case.reader, case.task, max_failed_states=4
     )
 
     selected = compilation.payload.selected_state_ids
@@ -274,7 +324,7 @@ def test_selection_keeps_a_small_set_and_dedupes():
     assert len(selected) == 3
 
     capped = compile_obstruction(
-        case.request, case.bundle, case.reader, max_failed_states=2
+        case.request, case.bundle, case.reader, case.task, max_failed_states=2
     )
     assert capped.payload.selected_state_ids == ("p1/fs-10", "p1/fs-11")
 
@@ -290,7 +340,11 @@ def test_closed_and_tainted_states_require_recorded_obstruction_names():
     bundle, artifacts = make_bundle(entries)
     request = make_request()
     compilation = compile_obstruction(
-        request, bundle, MappingArtifactReader(artifacts), max_failed_states=4
+        request,
+        bundle,
+        MappingArtifactReader(artifacts),
+        make_task(),
+        max_failed_states=4,
     )
 
     assert compilation.payload.selected_state_ids == ("p1/fs-10", "p1/fs-11")
@@ -312,7 +366,11 @@ def test_closed_and_tainted_states_require_recorded_obstruction_names():
 
     bundle, artifacts = make_bundle(entries)
     named = compile_obstruction(
-        request, bundle, MappingArtifactReader(artifacts), max_failed_states=4
+        request,
+        bundle,
+        MappingArtifactReader(artifacts),
+        make_task(),
+        max_failed_states=4,
     )
 
     assert set(named.payload.selected_state_ids) == {
@@ -379,6 +437,7 @@ def test_research_questions_include_supplied_and_derived():
         case.request,
         case.bundle,
         case.reader,
+        case.task,
         research_questions=(supplied,),
     )
     questions = compilation.payload.research_questions
@@ -403,7 +462,11 @@ def test_supplied_suspected_cause_is_kept_and_labelled():
         source_ids=("p1/obs-2",),
     )
     compilation = compile_obstruction(
-        case.request, case.bundle, case.reader, suspected_causes=(cause,)
+        case.request,
+        case.bundle,
+        case.reader,
+        case.task,
+        suspected_causes=(cause,),
     )
 
     assert compilation.payload.suspected[0] is cause
@@ -412,13 +475,15 @@ def test_supplied_suspected_cause_is_kept_and_labelled():
     assert "critic-review" in rendered
 
 
-def test_manifest_records_every_bundle_source():
+def test_manifest_records_kernel_and_every_bundle_source():
     compilation = compile_default()
     decisions = compilation.result.selection_decisions
-
-    assert {decision.source_id for decision in decisions} == {
+    expected_ids = {
         source.source_id for source in compilation.payload.source_artifacts
     }
+    expected_ids.add(KERNEL.kernel_id)
+
+    assert {decision.source_id for decision in decisions} == expected_ids
     assert compilation.manifest["sources"] == [
         {
             "source_id": decision.source_id,
@@ -482,41 +547,47 @@ def test_to_dict_carries_the_full_payload():
 def test_budget_is_respected_and_cheapest_sections_drop_first():
     counter = CharHeuristicTokenCounter()
     case = scenario()
-    full = compile_obstruction(case.request, case.bundle, case.reader)
+    full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     assert counter.count(full.packet.content) <= 1200
 
-    budget = max(counter.count(full.packet.content) // 3, 40)
+    budget = 700
     case = scenario(text_budget=TextBudget(budget))
-    clipped = compile_obstruction(case.request, case.bundle, case.reader)
+    clipped = compile_obstruction(
+        case.request, case.bundle, case.reader, case.task
+    )
 
     assert counter.count(clipped.packet.content) <= budget
     assert clipped.manifest["budgets"] == {"text_tokens": budget}
     assert "SOURCE ARTIFACTS" not in clipped.packet.content
+    assert KERNEL.statement in clipped.packet.content
+    assert all(
+        assumption in clipped.packet.content for assumption in KERNEL.assumptions
+    )
     assert "OBSERVED FAILURES" in clipped.packet.content
     reasons = {decision.reason for decision in clipped.result.selection_decisions}
     assert "excluded: omitted to fit text budget" in reasons
 
 
-def test_tiny_budget_still_renders_a_packet():
-    counter = CharHeuristicTokenCounter()
+def test_tiny_budget_cannot_truncate_the_mandatory_kernel():
     case = scenario(text_budget=TextBudget(60))
-    compilation = compile_obstruction(case.request, case.bundle, case.reader)
-
-    assert counter.count(compilation.packet.content) <= 60
-    assert compilation.packet.content.endswith("\u2026")
+    with pytest.raises(
+        ContextValidationError,
+        match="mandatory obstruction sections exceed the text budget",
+    ):
+        compile_obstruction(case.request, case.bundle, case.reader, case.task)
 
 
 def test_packet_kind_must_be_obstruction():
     case = scenario(packet_kind=PacketKind.RESEARCH)
     with pytest.raises(ContextValidationError, match="packet_kind"):
-        compile_obstruction(case.request, case.bundle, case.reader)
+        compile_obstruction(case.request, case.bundle, case.reader, case.task)
 
 
 def test_missing_source_artifact_is_reported():
     case = scenario()
     reader = MappingArtifactReader({})
     with pytest.raises(ContextValidationError, match="missing source artifact"):
-        compile_obstruction(case.request, case.bundle, reader)
+        compile_obstruction(case.request, case.bundle, reader, case.task)
 
 
 def test_unknown_source_type_is_rejected():
@@ -524,7 +595,9 @@ def test_unknown_source_type_is_rejected():
     entries.append(("claim", "p1/c-1", {"claim_id": "p1/c-1"}))
     bundle, artifacts = make_bundle(entries)
     with pytest.raises(ContextValidationError, match="unknown source_type"):
-        compile_obstruction(make_request(), bundle, MappingArtifactReader(artifacts))
+        compile_obstruction(
+            make_request(), bundle, MappingArtifactReader(artifacts), make_task()
+        )
 
 
 def test_malformed_state_body_is_rejected():
@@ -536,7 +609,9 @@ def test_malformed_state_body_is_rejected():
     )
     bundle, artifacts = make_bundle(entries)
     with pytest.raises(ContextValidationError, match="status"):
-        compile_obstruction(make_request(), bundle, MappingArtifactReader(artifacts))
+        compile_obstruction(
+            make_request(), bundle, MappingArtifactReader(artifacts), make_task()
+        )
 
 
 def test_malformed_vocabulary_value_is_a_validation_error():
@@ -548,7 +623,9 @@ def test_malformed_vocabulary_value_is_a_validation_error():
     )
     bundle, artifacts = make_bundle(entries)
     with pytest.raises(ContextValidationError, match="status"):
-        compile_obstruction(make_request(), bundle, MappingArtifactReader(artifacts))
+        compile_obstruction(
+            make_request(), bundle, MappingArtifactReader(artifacts), make_task()
+        )
 
 
 def test_identity_is_required_without_a_recorded_obstruction_or_run():
@@ -558,13 +635,14 @@ def test_identity_is_required_without_a_recorded_obstruction_or_run():
     bundle, artifacts = make_bundle(entries)
     with pytest.raises(ContextValidationError, match="formal_run_id"):
         compile_obstruction(
-            make_request(), bundle, MappingArtifactReader(artifacts)
+            make_request(), bundle, MappingArtifactReader(artifacts), make_task()
         )
 
     compilation = compile_obstruction(
         make_request(),
         bundle,
         MappingArtifactReader(artifacts),
+        make_task(),
         formal_run_id="p1/fr-9",
         environment_hash=ENV_HASH,
     )
@@ -584,6 +662,7 @@ def test_bundle_without_failed_states_is_reported():
             make_request(),
             bundle,
             MappingArtifactReader(artifacts),
+            make_task(),
             formal_run_id="p1/fr-9",
             environment_hash=ENV_HASH,
         )
@@ -603,7 +682,7 @@ def test_diagnostic_hash_must_match_the_source_reference():
     )
     with pytest.raises(ContextValidationError, match="artifact_hash"):
         compile_obstruction(
-            make_request(), mismatched, MappingArtifactReader(artifacts)
+            make_request(), mismatched, MappingArtifactReader(artifacts), make_task()
         )
 
 
@@ -611,5 +690,9 @@ def test_max_failed_states_must_be_positive():
     case = scenario()
     with pytest.raises(ContextValidationError, match="max_failed_states"):
         compile_obstruction(
-            case.request, case.bundle, case.reader, max_failed_states=0
+            case.request,
+            case.bundle,
+            case.reader,
+            case.task,
+            max_failed_states=0,
         )
