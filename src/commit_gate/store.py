@@ -4,7 +4,8 @@ The journal is the durability authority: an event is committed when it is here.
 Every mutation runs inside one `BEGIN IMMEDIATE` transaction, so reading the
 head and inserting its successor cannot interleave with another writer.
 
-Only the commit gate may call the mutating methods.
+Only the commit gate appends proof events. The trusted scheduler changes lease
+and lease-audit records without advancing the proof journal revision.
 """
 
 from __future__ import annotations
@@ -21,7 +22,10 @@ from .canon import GENESIS_HASH, canonical_json, chain_hash
 from .reasons import Reason
 from .vocab import WorkerClass
 
-__all__ = ["JournalStore", "ConcurrencyError", "HashChainError", "LeaseRow", "LeaseCandidate"]
+__all__ = [
+    "JournalStore", "ConcurrencyError", "HashChainError", "LeaseRow",
+    "LeaseCandidate", "RoutedLeaseCandidate",
+]
 
 
 class ConcurrencyError(Exception):
@@ -73,6 +77,17 @@ class LeaseCandidate:
 
     move_id: str
     score_snapshot: dict[str, float]
+    conflict_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedLeaseCandidate:
+    """A ranked move with the worker identity selected by trusted routing."""
+
+    move_id: str
+    score_snapshot: dict[str, float]
+    actor: str
+    worker_class: str
     conflict_ids: tuple[str, ...] = ()
 
 
@@ -364,7 +379,27 @@ class JournalStore:
         describes committed state when the reservation is made.
         """
         worker_class = self._validate_holder(actor, worker_class, ttl_seconds)
+        return self.claim_best_routed(
+            proof_id,
+            [RoutedLeaseCandidate(
+                candidate.move_id, candidate.score_snapshot, actor, worker_class,
+                candidate.conflict_ids,
+            ) for candidate in candidates],
+            base_revision=base_revision,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def claim_best_routed(
+        self, proof_id: str, candidates: Sequence[RoutedLeaseCandidate], *,
+        base_revision: int, ttl_seconds: float = 600.0,
+    ) -> LeaseRow | None:
+        """Atomically reserve the first free move from ranked, routed choices.
+
+        The trusted scheduler provides each move's class and actual actor.
+        Routing and busy-target selection stay outside the proof hash chain.
+        """
         for candidate in candidates:
+            self._validate_holder(candidate.actor, candidate.worker_class, ttl_seconds)
             if not candidate.move_id.startswith(f"{proof_id}/") or candidate.move_id == f"{proof_id}/":
                 raise ValueError("a dispatch lease needs a move in the proof namespace")
         with self._write() as conn:
@@ -395,7 +430,8 @@ class JournalStore:
                 ).fetchone() is not None:
                     serial += 1
                 return self._insert_lease(
-                    conn, proof_id, f"{proof_id}/ls-{serial}", actor, worker_class,
+                    conn, proof_id, f"{proof_id}/ls-{serial}",
+                    candidate.actor, candidate.worker_class,
                     candidate.move_id, revision, ttl_seconds, now_ns, "issued",
                     candidate.score_snapshot,
                 )
