@@ -25,12 +25,10 @@ prove raises            internal-error
 missing request fields  invalid-request
 ======================  =============================================
 
-``formal_search_resume`` hands the same goal back to the reasoner -- its
-Thompson-sampler state persists across calls, so a resumed run continues the
-search rather than restarting it blind. ``formal_replay`` delegates to an
-injected verdict function; :mod:`mathproof.replay` provides the real one
-(``lean_replay_fn`` over Pantograph), while the default remains the Phase 0
-stub so test suites stay deterministic without a Lean backend.
+``formal_search_resume`` reports unsupported checkpoint continuation rather
+than restarting the initial search. ``formal_replay`` delegates to an injected
+runner; without independent replay the default rejects verification, and
+production mode rejects explicit stubs as well.
 """
 
 from __future__ import annotations
@@ -313,12 +311,16 @@ class MathsAIFormalATP(FormalATPAdapter):
         reasoner: Any | None = None,
         reasoner_factory: Callable[[], Any] | None = None,
         replay_fn: ReplayFn | None = None,
+        production: bool = False,
     ):
         if reasoner is None and reasoner_factory is None:
             reasoner_factory = default_reasoner_factory
         self._reasoner = reasoner
         self._factory = reasoner_factory
-        self._replay = replay_fn or stub_replay("verified")
+        # A missing replay implementation is never positive evidence. The
+        # reference fake remains available only by explicit injection.
+        self._replay = replay_fn or stub_replay("rejected")
+        self._production = production
         self._latest: dict[str, Mapping[str, Any]] = {}
         self._requests: dict[str, Mapping[str, Any]] = {}
         self._cancelled: set[str] = set()
@@ -372,6 +374,10 @@ class MathsAIFormalATP(FormalATPAdapter):
         return result
 
     def formal_search_start(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._production and (validate_schema("formal-search-request", request) or "goal_text" in request):
+            result = build_result(RunDisposition.INVALID_REQUEST.value, request)
+            result["artifacts"][0]["note"] = "production request must match the strict public schema; private goal compilation is unavailable"
+            return result
         missing = missing_request_fields(request)
         if not missing and not request.get("goal_text"):
             missing = ["goal_text"]
@@ -386,10 +392,11 @@ class MathsAIFormalATP(FormalATPAdapter):
     ) -> Mapping[str, Any]:
         if run_id in self._cancelled:
             return {"run_id": run_id, "disposition": "cancelled"}
-        request = self._requests.get(run_id)
-        if request is None:
-            return build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
-        return self._run_search(run_id, request)
+        # The backend exposes no checkpoint continuation. Re-running prove()
+        # from the original goal would misrepresent a fresh search as resume.
+        result = build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
+        result["artifacts"][0]["note"] = "unsupported-checkpoint-resume; start an explicit new run"
+        return result
 
     def formal_search_status(self, run_id: str) -> Mapping[str, Any]:
         latest = self._latest.get(run_id)
@@ -404,4 +411,7 @@ class MathsAIFormalATP(FormalATPAdapter):
     def formal_replay(
         self, certificate: Mapping[str, Any], environment_hash: str
     ) -> Mapping[str, Any]:
+        if self._production and not getattr(self._replay, "_independent_lean_replay", False):
+            return {"status": "rejected", "environment_hash": environment_hash,
+                    "rejection_reason": "independent-replay-required"}
         return self._replay(certificate, environment_hash)

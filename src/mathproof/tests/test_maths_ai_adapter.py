@@ -360,17 +360,17 @@ class TestMathsAIFormalATP(unittest.TestCase):
         self.assertEqual(result["disposition"], RunDisposition.INTERNAL_ERROR.value)
         self.assertNotIn("certificate", result)
 
-    def test_invalid_result_is_screened_on_start_and_resume(self):
+    def test_invalid_result_is_screened_on_start_without_fake_resume(self):
         atp = MathsAIFormalATP(reasoner=StubReasoner(
             duplicate_child_graph(), duplicate_child_graph()
         ))
-        for result in (
-            atp.formal_search_start(REQUEST),
-            atp.formal_search_resume(REQUEST["run_id"]),
-        ):
-            self.assertEqual(result["disposition"], RunDisposition.INTERNAL_ERROR.value)
-            self.assertNotIn("certificate", result)
-            self.assertIn("duplicated-subgoal", result["artifacts"][0]["note"])
+        result = atp.formal_search_start(REQUEST)
+        self.assertEqual(result["disposition"], RunDisposition.INTERNAL_ERROR.value)
+        self.assertNotIn("certificate", result)
+        self.assertIn("duplicated-subgoal", result["artifacts"][0]["note"])
+        resumed = atp.formal_search_resume(REQUEST["run_id"])
+        self.assertEqual(resumed["disposition"], RunDisposition.INVALID_REQUEST.value)
+        self.assertIn("unsupported-checkpoint-resume", resumed["artifacts"][0]["note"])
 
     def test_schema_invalid_result_fails_closed(self):
         with patch("mathproof.maths_ai_atp._convert_graph", return_value={
@@ -432,15 +432,16 @@ class TestMathsAIFormalATP(unittest.TestCase):
         self.assertEqual(result["disposition"], RunDisposition.INTERNAL_ERROR.value)
         self.assertIn("RuntimeError", result["artifacts"][0]["note"])
 
-    def test_status_does_not_consume_and_resume_reruns_the_search(self):
+    def test_status_does_not_consume_and_resume_reports_unsupported(self):
         reasoner = StubReasoner(open_graph(), solved_graph())
         atp = MathsAIFormalATP(reasoner=reasoner)
         first = atp.formal_search_start(REQUEST)
         self.assertEqual(first["disposition"], RunDisposition.BUDGET_EXHAUSTED.value)
         self.assertEqual(atp.formal_search_status("p1/fr-1"), first)
         resumed = atp.formal_search_resume("p1/fr-1")
-        self.assertEqual(resumed["disposition"], RunDisposition.PROVED_PENDING_REPLAY.value)
-        self.assertEqual(len(reasoner.calls), 2)
+        self.assertEqual(resumed["disposition"], RunDisposition.INVALID_REQUEST.value)
+        self.assertIn("unsupported-checkpoint-resume", resumed["artifacts"][0]["note"])
+        self.assertEqual(len(reasoner.calls), 1)
 
     def test_resume_of_unknown_run_is_invalid_request(self):
         atp = MathsAIFormalATP(reasoner=StubReasoner())
