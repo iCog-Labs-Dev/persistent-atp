@@ -27,6 +27,9 @@ real-atp = [
     "mathematics-ai-atp",
 ]
 
+[project.scripts]
+persistent-atp-omega = "omegaclaw.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src", "mork" = "mork"}
 
@@ -40,6 +43,7 @@ include = [
     "mathproof*",
     "shared*",
     "mork*",
+    "omegaclaw*",
 ]
 
 [tool.pytest.ini_options]
@@ -56,6 +60,8 @@ testpaths = [
     "mork/visualizer/tests",
     "mork/tests",
     "packages/persistent-atp-client/tests",
+    "src/omegaclaw/tests",
+    "tests/omegaclaw_runtime",
 ]
 
 [tool.uv.sources]

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/speculative-hypothesis.schema.json",
+  "title": "SpeculativeHypothesisV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "hypothesis_id", "statement", "source_ids", "prerequisites", "consequences", "novelty", "support", "cost", "risk", "falsification_test", "expiry_review", "packet_artifact", "result_artifact"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "hypothesis_id": {"type": "string", "pattern": "^[^/]+/hyp-[a-f0-9]{32}$"},
+    "statement": {"type": "string", "minLength": 1},
+    "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "prerequisites": {"type": "array", "items": {"type": "string"}},
+    "consequences": {"type": "array", "items": {"type": "string"}},
+    "novelty": {"type": "string", "minLength": 1},
+    "support": {"type": "string", "minLength": 1},
+    "cost": {"type": "string", "minLength": 1},
+    "risk": {"type": "string", "minLength": 1},
+    "falsification_test": {"type": "string", "minLength": 1},
+    "expiry_review": {"type": "string", "minLength": 1},
+    "packet_artifact": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "result_artifact": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
