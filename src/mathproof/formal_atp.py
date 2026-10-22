@@ -312,6 +312,7 @@ def stub_replay(outcome: str) -> ReplayFn:
             payload["rejection_reason"] = "stub-replay-rejection"
         return payload
 
+    replay._is_stub_replay = True  # type: ignore[attr-defined]
     return replay
 
 
