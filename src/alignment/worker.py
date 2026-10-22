@@ -28,6 +28,7 @@ def build_alignment_proposal(
     base_revision: int | None = None,
     lease_id: str | None = None,
     fencing_token: int | None = None,
+    selected_move_id: str | None = None,
     existing_alignment: bool = False,
 ) -> Proposal:
     """Build a CommitGate Proposal recording the alignment review outcome."""
@@ -78,6 +79,7 @@ def build_alignment_proposal(
         base_revision=base_revision,
         lease_id=lease_id,
         fencing_token=fencing_token,
+        selected_move_id=selected_move_id,
         ops=tuple(ops),
     )
 
@@ -101,6 +103,7 @@ class AlignmentWorker:
         base_revision: int | None = None,
         lease_id: str | None = None,
         fencing_token: int | None = None,
+        selected_move_id: str | None = None,
         existing_alignment: bool = False,
     ) -> tuple[AlignmentReviewResult, Proposal]:
         """Perform review on request and return both result and ready proposal."""
@@ -114,6 +117,7 @@ class AlignmentWorker:
             base_revision=base_revision,
             lease_id=lease_id,
             fencing_token=fencing_token,
+            selected_move_id=selected_move_id,
             existing_alignment=existing_alignment,
         )
         return result, proposal

@@ -4,3 +4,4 @@
 *.egg-info/
 *.png
 *.dot
+.runs/

@@ -27,6 +27,9 @@ real-atp = [
     "mathematics-ai-atp",
 ]
 
+[project.scripts]
+persistent-atp-omega = "omegaclaw.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
@@ -34,7 +37,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests"]
+testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests", "src/omegaclaw/tests", "tests/omegaclaw_runtime"]
 
 [tool.uv.sources]
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }

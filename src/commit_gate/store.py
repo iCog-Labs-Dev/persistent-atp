@@ -97,13 +97,15 @@ class JournalStore:
     def __init__(
         self, db_path: str = ":memory:", busy_timeout_ms: int = 5000,
         *, clock_ns: Callable[[], int] = time.time_ns,
+        allow_cross_thread: bool = False,
     ):
         # Autocommit mode: `with conn:` begins no transaction when
         # isolation_level is None, so `_write` opens them explicitly.
         # `busy_timeout_ms` is how long a writer waits for the lock before
         # giving up; giving up is reported as a rejection, never a hang.
         self._conn = sqlite3.connect(
-            db_path, isolation_level=None, timeout=busy_timeout_ms / 1000
+            db_path, isolation_level=None, timeout=busy_timeout_ms / 1000,
+            check_same_thread=not allow_cross_thread,
         )
         self._clock_ns = clock_ns
         self._conn.row_factory = sqlite3.Row
@@ -278,6 +280,12 @@ class JournalStore:
         if row is None:
             return 0, GENESIS_HASH
         return row["revision"], row["event_hash"]
+
+    def proof_ids(self) -> tuple[str, ...]:
+        """Proof scopes present in the immutable journal, for projection recovery."""
+        return tuple(row[0] for row in self._conn.execute(
+            "SELECT DISTINCT proof_id FROM journal ORDER BY proof_id"
+        ))
 
     @staticmethod
     def _validate_holder(actor: str, worker_class: str, ttl_seconds: float) -> str:
