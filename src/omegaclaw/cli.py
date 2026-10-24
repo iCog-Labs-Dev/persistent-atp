@@ -7,8 +7,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .api import serve
 from .service import OperationService
@@ -29,16 +34,18 @@ def load_config(path: str) -> tuple[dict, Path]:
 
 def doctor(profile: str) -> dict:
     blockers: list[str] = []
-    if profile in ("omega", "persistence", "lean", "real-atp"):
-        if profile == "omega":
-            path = os.environ.get("OMEGA_PINNED_ROOT", "")
-            if not path or not (Path(path) / "src" / "plugin.metta").is_file():
-                blockers.append("OMEGA_PINNED_ROOT must name the pinned Omega checkout")
+    if profile == "deepseek":
+        load_dotenv()
+    if profile in ("omega", "deepseek", "persistence", "lean", "real-atp"):
+        if profile in ("omega", "deepseek"):
+            path = os.environ.get("OMEGA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "Omega"))
+            if not (Path(path) / "src" / "plugin.metta").is_file():
+                blockers.append(f"OMEGA_PINNED_ROOT must name the pinned Omega checkout (default: {ROOT / 'tmp' / 'repos' / 'Omega'})")
             elif subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != "63a78265be9b8efc6e47cc39f3b4bc7a13e06ed5":
                 blockers.append("Omega checkout has the wrong revision")
-            petta = os.environ.get("PETTA_PINNED_ROOT", "")
-            if not petta or not (Path(petta) / "src" / "main.pl").is_file():
-                blockers.append("PETTA_PINNED_ROOT must name the pinned PeTTa v1.0.4 checkout")
+            petta = os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa"))
+            if not (Path(petta) / "src" / "main.pl").is_file():
+                blockers.append(f"PETTA_PINNED_ROOT must name the pinned PeTTa v1.0.4 checkout (default: {ROOT / 'tmp' / 'repos' / 'PeTTa'})")
             elif subprocess.run(["git", "-C", petta, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != "7037f4c2ad378c52fc328004fe216d5118b674f0":
                 blockers.append("PeTTa checkout has the wrong revision")
             if shutil.which("swipl") is None:
@@ -50,6 +57,13 @@ def doctor(profile: str) -> dict:
                 janus_ready = False
             if not janus_ready:
                 blockers.append(f"{petta_python} cannot import janus_swi")
+            if profile == "deepseek":
+                if not os.environ.get("DEEPSEEK_API_KEY"):
+                    blockers.append("DEEPSEEK_API_KEY is unset; live DeepSeek inference cannot be tested")
+                if os.environ.get("DEEPSEEK_MODEL", "deepseek-flash") not in ("deepseek-flash", "deepseek-v4-pro"):
+                    blockers.append("DEEPSEEK_MODEL must be deepseek-flash or deepseek-v4-pro")
+                if not (ROOT / "omegclaw" / "omega-plugin" / "deepseek_provider.py").is_file():
+                    blockers.append("DeepSeek Omega provider plugin is missing")
         if profile == "persistence":
             if not os.environ.get("ARTIFACT_TEST_DB_URL"):
                 blockers.append("ARTIFACT_TEST_DB_URL is unset")
@@ -64,10 +78,18 @@ def doctor(profile: str) -> dict:
         if profile == "lean":
             blockers.append("independent Lean replay and durable proof promotion are not wired")
         if profile == "real-atp":
-            try:
-                import maths_ai  # noqa: F401
-            except ImportError:
-                blockers.append("Mathematics-ai-atp backend is unavailable")
+            endpoint = os.environ.get("MATHS_AI_ATP_URL", "http://127.0.0.1:8000").rstrip("/")
+            parsed = urllib.parse.urlparse(endpoint)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+                blockers.append("MATHS_AI_ATP_URL is invalid")
+            else:
+                try:
+                    with urllib.request.urlopen(endpoint + "/health", timeout=2) as response:
+                        if response.status != 200:
+                            blockers.append(f"ATP API health returned HTTP {response.status}")
+                except (urllib.error.URLError, TimeoutError, OSError):
+                    blockers.append(f"ATP API health is unavailable at {endpoint}/health")
+            blockers.append("persistent-atp formal-search is not wired to the ATP /prove API")
             blockers.append("durable backend checkpoint continuation is not configured")
     return {"profile": profile, "ready": not blockers, "blockers": blockers}
 
@@ -76,7 +98,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="persistent-atp-omega")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("doctor")
-    d.add_argument("--profile", default="reference", choices=("reference", "omega", "persistence", "lean", "real-atp"))
+    d.add_argument("--profile", default="reference", choices=("reference", "omega", "deepseek", "persistence", "lean", "real-atp"))
     d.add_argument("--require", action="store_true")
     s = sub.add_parser("serve")
     s.add_argument("--config", required=True)
