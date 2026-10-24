@@ -7,7 +7,7 @@ import jsonschema
 from persistent_atp_client import (
     Admission, ArtifactRef, Budget, BudgetAmendment, CancelRequest,
     CapabilitySet, DecisionResponse, OperationRef, OperationSnapshot,
-    ProjectDigest,
+    ProjectDigest, schema_manifest,
 )
 from persistent_atp_client.codecs import to_dict
 from persistent_atp_client.models import Event
@@ -37,3 +37,11 @@ def test_public_models_have_packaged_strict_schemas():
         jsonschema.validate(to_dict(model), selected)
         with_extra = {**to_dict(model), "actor": "forged"}
         assert not jsonschema.Draft202012Validator(selected).is_valid(with_extra)
+
+
+def test_schema_manifest_uses_packaged_bytes_and_stable_ids():
+    manifest = schema_manifest()
+    assert len(manifest) == 2
+    assert all(item["schema_id"].startswith("https://persistent-atp.local/schemas/")
+               and item["sha256"].startswith("sha256:") for item in manifest)
+    assert manifest == schema_manifest()

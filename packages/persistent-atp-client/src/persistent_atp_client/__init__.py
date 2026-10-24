@@ -8,11 +8,12 @@ from .models import (
     ProofExport, ProofStatus, StatementAlign,
 )
 from .ports import ReceiverPort
+from .schemas import schema_manifest
 
 __all__ = [
     "ACTION_TYPES", "ActionRequest", "Admission", "ArtifactRef", "AsyncClient",
     "Budget", "BudgetAmendment", "CancelRequest", "CapabilitySet", "DecisionResponse", "Event", "FormalResume", "FormalSearch",
     "LemmaBridge", "OperationHandle", "OperationRef", "OperationSnapshot",
     "Preconditions", "ProjectDigest", "ProofAudit", "ProofCreate", "ProofCycle", "ProofExport",
-    "ProofStatus", "ReceiverPort", "StatementAlign", "SyncClient",
+    "ProofStatus", "ReceiverPort", "StatementAlign", "SyncClient", "schema_manifest",
 ]
