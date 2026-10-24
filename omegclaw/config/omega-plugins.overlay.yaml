@@ -1,3 +1,6 @@
 - name: persistent_atp
   loader: metta
   location: /opt/persistent-atp/omega-plugin
+- name: deepseek_provider
+  loader: python
+  location: /opt/persistent-atp/omega-plugin
