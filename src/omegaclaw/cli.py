@@ -26,6 +26,10 @@ def load_config(path: str) -> tuple[dict, Path]:
     config_path = Path(path)
     if not config_path.is_absolute():
         config_path = ROOT / config_path
+    if not config_path.is_file() and path in {
+            "reference", "omegclaw/config/reference.yaml",
+            "omegaclaw/config/reference.yaml"}:
+        config_path = PACKAGE_ROOT / "config" / "reference.yaml"
     config = json.loads(config_path.read_text())
     root = Path(config["root"])
     if not root.is_absolute():
