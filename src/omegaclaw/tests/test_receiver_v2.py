@@ -8,6 +8,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -91,6 +93,45 @@ def test_reference_http_port_matches_local_contract(tmp_path):
         server.shutdown()
         server.server_close()
         receiver.close()
+
+
+def test_cli_serve_exposes_typed_receiver_and_rejects_duplicate_json(tmp_path):
+    config = tmp_path / "receiver-config.json"
+    config.write_text(json.dumps({"root": str(tmp_path / "service"), "workspace": "reference",
+                                  "host": "127.0.0.1", "port": 0,
+                                  "token_env": "PERSISTENT_ATP_OMEGA_TOKEN"}))
+    root = Path(__file__).resolve().parents[3]
+    env = os.environ.copy()
+    env["PERSISTENT_ATP_OMEGA_TOKEN"] = "long-reference-transport-token"
+    env["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(root / "packages/persistent-atp-client/src")))
+    child = subprocess.Popen([sys.executable, "-m", "omegaclaw.cli", "serve", "--config", str(config)],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    try:
+        ready, _, _ = select.select([child.stdout], [], [], 10)
+        assert ready, child.poll()
+        started = json.loads(child.stdout.readline())
+        assert started["receiver_mode"] == "reference-scripted"
+        endpoint = f"http://127.0.0.1:{started['port']}"
+        async def scenario():
+            client = AsyncClient(HTTPReceiverAdapter(endpoint, env["PERSISTENT_ATP_OMEGA_TOKEN"]))
+            spec = b'{"proof_id":"cliport","title":"CLI","literal_target":"True"}'
+            ref = await client.put_artifact(spec, workspace_id="reference", media_type="application/json")
+            request = client.prepare(ProofCreate(ref), workspace_id="reference", request_id="cli-stable")
+            from persistent_atp_client.codecs import canonical_json
+            duplicate = canonical_json(request).replace(b'"request_id":"cli-stable"',
+                b'"request_id":"cli-stable","request_id":"forged"')
+            raw = urllib.request.Request(endpoint + "/v2/requests", data=duplicate,
+                headers={"Authorization": "Bearer " + env["PERSISTENT_ATP_OMEGA_TOKEN"],
+                         "Content-Type": "application/json"}, method="POST")
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(raw, timeout=5)
+            assert exc.value.code == 400
+            result = await (await client.submit(request)).wait(timeout=5)
+            assert result.lifecycle == "succeeded" and result.project_revision == 1
+        asyncio.run(scenario())
+    finally:
+        child.terminate()
+        child.communicate(timeout=5)
 
 
 def test_reference_receiver_rejects_unowned_artifact_and_reused_id(tmp_path):

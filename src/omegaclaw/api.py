@@ -8,7 +8,7 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from persistent_atp_client.codecs import request_from_dict, to_dict
+from persistent_atp_client.codecs import request_from_json, to_dict
 from persistent_atp_client.models import ArtifactRef, OperationRef
 from persistent_atp_client.errors import ClientError
 
@@ -16,6 +16,18 @@ from .contracts import ContractError
 from .jobs import RequestConflict
 
 MAX_BODY = 65_536
+
+
+def _strict_json(data: bytes):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=pairs,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite JSON value")))
 
 
 def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiver=None) -> HTTPServer:
@@ -129,10 +141,11 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                 size = int(self.headers.get("Content-Length", "-1"))
                 if not 0 <= size <= 20 * 1024 * 1024:
                     raise ValueError("invalid request size")
-                raw = json.loads(self.rfile.read(size))
+                body = self.rfile.read(size)
                 if self.path == "/v2/requests":
-                    data = asyncio.run(receiver.submit(request_from_dict(raw)))
+                    data = asyncio.run(receiver.submit(request_from_json(body)))
                 elif self.path == "/v2/artifacts":
+                    raw = _strict_json(body)
                     if not isinstance(raw, dict) or set(raw) != {"workspace_id", "media_type", "expected_hash", "content_base64"}:
                         raise ValueError("invalid artifact request")
                     content = base64.b64decode(raw["content_base64"], validate=True)

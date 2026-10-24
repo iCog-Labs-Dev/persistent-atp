@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from dotenv import load_dotenv
 
 from .api import serve
 from .service import OperationService
+from .receiver import ReferenceReceiver
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -122,19 +124,29 @@ def main(argv=None) -> int:
         config, root = load_config(args.config)
         token = os.environ.get(config["token_env"], "")
         service = OperationService(root, workspace=config["workspace"])
-        server = serve(service, token, config["host"], int(config["port"]))
-        print(json.dumps({"status": "ready", "host": config["host"], "port": server.server_port}), flush=True)
+        receiver = ReferenceReceiver(service)
+        server = serve(service, token, config["host"], int(config["port"]), receiver=receiver)
+        print(json.dumps({"status": "ready", "host": config["host"], "port": server.server_port,
+                          "receiver_mode": "reference-scripted", "contract_version": "2.0"}), flush=True)
         try:
             server.serve_forever()
         finally:
             server.server_close()
+            receiver.close()
         return 0
     if args.command == "artifact-put":
-        _config, root = load_config(args.config)
+        config, root = load_config(args.config)
         source = Path(args.file)
         if not source.is_file() or source.stat().st_size > 16 * 1024 * 1024:
             raise SystemExit("artifact input must be a file of at most 16 MiB")
-        pointer = OperationService(root).artifacts.put(source.read_bytes())
+        service = OperationService(root, workspace=config["workspace"])
+        receiver = ReferenceReceiver(service)
+        try:
+            artifact = asyncio.run(receiver.put_artifact(source.read_bytes(), workspace_id=config["workspace"],
+                media_type="application/octet-stream"))
+        finally:
+            receiver.close()
+        pointer = artifact.hash
         print(json.dumps({"artifact_ref": pointer, "bytes": source.stat().st_size}, sort_keys=True))
         return 0
     if args.command == "smoke":
