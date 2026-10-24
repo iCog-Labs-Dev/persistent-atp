@@ -43,7 +43,7 @@ include = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.
 testpaths = [
     "src/commit_gate/tests",
@@ -55,6 +55,7 @@ testpaths = [
     "mork/projector/tests",
     "mork/visualizer/tests",
     "mork/tests",
+    "packages/persistent-atp-client/tests",
 ]
 
 [tool.uv.sources]
