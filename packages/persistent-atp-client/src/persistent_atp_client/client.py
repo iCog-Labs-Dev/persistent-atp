@@ -15,8 +15,9 @@ from .errors import (
 )
 from .models import (
     ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
-    CancelRequest, DecisionResponse, Event, OperationRef, OperationSnapshot,
-    Preconditions, TERMINAL_LIFECYCLES,
+    CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
+    LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
+    ProofCreate, ProofCycle, ProofExport, StatementAlign, TERMINAL_LIFECYCLES,
 )
 from .ports import ReceiverPort
 
@@ -59,9 +60,9 @@ class AsyncClient:
             try:
                 receipt = await self._port.lookup_request(request.workspace_id, request.request_id)
             except (TimeoutError, ConnectionError, TransientUnavailable) as lookup_exc:
-                raise SubmissionUncertain("submission and lookup unavailable", request_id=request.request_id) from lookup_exc
+                raise SubmissionUncertain("submission and lookup unavailable", request=request) from lookup_exc
             if receipt is None:
-                raise SubmissionUncertain("authoritative lookup found no admission; retry the same prepared request", request_id=request.request_id) from exc
+                raise SubmissionUncertain("authoritative lookup found no admission; retry the same prepared request", request=request) from exc
         if not isinstance(receipt, Admission) or receipt.request_id != request.request_id or receipt.fingerprint != expected:
             raise ValueError("receiver admission identity mismatch")
         if not receipt.accepted:
@@ -69,6 +70,43 @@ class AsyncClient:
         if receipt.operation_ref.workspace_id != request.workspace_id:
             raise ValueError("receiver admission workspace mismatch")
         return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
+
+    async def submit_action(self, action, *, workspace_id: str, preconditions: Preconditions | None = None,
+                            request_id: str | None = None, deadline: datetime | None = None) -> "OperationHandle":
+        request = self.prepare(action, workspace_id=workspace_id, preconditions=preconditions,
+                               request_id=request_id, deadline=deadline)
+        return await self.submit(request)
+
+    async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
+        return await self.submit_action(ProofCreate(spec_artifact), workspace_id=workspace_id, **request_options)
+
+    async def proof_cycle(self, proof_id: str, *, workspace_id: str, **request_options):
+        return await self.submit_action(ProofCycle(proof_id), workspace_id=workspace_id, **request_options)
+
+    async def proof_status(self, proof_id: str, *, workspace_id: str, at_revision: int | None = None):
+        return await self.status(workspace_id=workspace_id, proof_id=proof_id, at_revision=at_revision)
+
+    async def proof_audit(self, proof_id: str, *, workspace_id: str, **request_options):
+        return await self.submit_action(ProofAudit(proof_id), workspace_id=workspace_id, **request_options)
+
+    async def proof_export(self, proof_id: str, destination_alias: str, *, workspace_id: str, **request_options):
+        return await self.submit_action(ProofExport(proof_id, destination_alias), workspace_id=workspace_id, **request_options)
+
+    async def formal_search(self, proof_id: str, claim_id: str, budget, *, workspace_id: str, **request_options):
+        return await self.submit_action(FormalSearch(proof_id, claim_id, budget), workspace_id=workspace_id, **request_options)
+
+    async def formal_resume(self, proof_id: str, run_id: str, budget, *, workspace_id: str,
+                            checkpoint_artifact: ArtifactRef | None = None, **request_options):
+        return await self.submit_action(FormalResume(proof_id, run_id, budget, checkpoint_artifact),
+                                        workspace_id=workspace_id, **request_options)
+
+    async def statement_align(self, proof_id: str, claim_id: str, lean_source_artifact: ArtifactRef,
+                              *, workspace_id: str, **request_options):
+        return await self.submit_action(StatementAlign(proof_id, claim_id, lean_source_artifact),
+                                        workspace_id=workspace_id, **request_options)
+
+    async def lemma_bridge(self, proof_id: str, obstruction_id: str, *, workspace_id: str, **request_options):
+        return await self.submit_action(LemmaBridge(proof_id, obstruction_id), workspace_id=workspace_id, **request_options)
 
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:
         return await self._port.lookup_request(workspace_id, request_id)

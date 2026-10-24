@@ -27,7 +27,13 @@ class QuotaExceeded(ClientError): code = "QUOTA_EXCEEDED"
 class ReviewRequired(ClientError): code = "REVIEW_REQUIRED"
 class RateLimited(ClientError): code = "RATE_LIMITED"; retryable = True
 class TransientUnavailable(ClientError): code = "TRANSIENT_UNAVAILABLE"; retryable = True
-class SubmissionUncertain(ClientError): code = "SUBMISSION_UNCERTAIN"; retryable = True
+class SubmissionUncertain(ClientError):
+    code = "SUBMISSION_UNCERTAIN"
+    retryable = True
+
+    def __init__(self, message: str, *, request):
+        super().__init__(message, request_id=request.request_id)
+        self.request = request
 class ObservationTimeout(ClientError): code = "OBSERVATION_TIMEOUT"
 class CursorExpired(ClientError): code = "CURSOR_EXPIRED"
 
