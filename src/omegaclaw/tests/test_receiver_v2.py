@@ -7,6 +7,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -132,10 +133,11 @@ def test_reference_receiver_checks_explicit_preconditions(tmp_path):
     asyncio.run(scenario())
 
 
-def test_reference_receiver_recovers_after_process_kill(tmp_path):
-    """Kill after durable admission while the executor has not committed."""
+@pytest.mark.parametrize("stage", ("before-commit", "after-commit"))
+def test_reference_receiver_recovers_after_process_kill(tmp_path, stage):
+    """Kill on either side of the gate append and reconcile one operation."""
     source = r'''
-import asyncio, json, sys, time
+import asyncio, json, pathlib, sys, time
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
 from persistent_atp_client import AsyncClient, ProofCreate
@@ -146,8 +148,14 @@ async def main(root):
     service = OperationService(root)
     original = service.submit
     def delayed(request):
+        if sys.argv[2] == "before-commit":
+            pathlib.Path(root, "kill-marker").write_text("before")
+            time.sleep(60)
+            return original(request)
+        outcome = original(request)
+        pathlib.Path(root, "kill-marker").write_text("after")
         time.sleep(60)
-        return original(request)
+        return outcome
     service.submit = delayed
     receiver = ReferenceReceiver(service)
     client = AsyncClient(LocalReceiverAdapter(receiver))
@@ -162,12 +170,17 @@ asyncio.run(main(sys.argv[1]))
     root = Path(__file__).resolve().parents[3]
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(root / "packages/persistent-atp-client/src")))
-    child = subprocess.Popen([sys.executable, "-c", source, str(tmp_path)],
+    child = subprocess.Popen([sys.executable, "-c", source, str(tmp_path), stage],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
         ready, _, _ = select.select([child.stdout], [], [], 10)
         assert ready, child.poll()
         admitted = json.loads(child.stdout.readline())
+        marker = tmp_path / "kill-marker"
+        deadline = time.monotonic() + 10
+        while not marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.read_text() == ("before" if stage == "before-commit" else "after")
     finally:
         child.kill()
         child.communicate(timeout=5)
