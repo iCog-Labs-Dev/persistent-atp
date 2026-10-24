@@ -14,9 +14,14 @@ case "$tier" in
   *) echo "usage: bash scripts/omegaclaw-test.sh --tier {reference|omega|persistence|lean|real-atp}" >&2; exit 2 ;;
 esac
 
-run_dir="$(mktemp -d "${TMPDIR:-/tmp}/persistent-atp-${tier}-XXXXXX")"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export TMPDIR="${TMPDIR:-$repo_root/tmp/test-runs}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$repo_root/tmp/uv-cache}"
+export OMEGA_PINNED_ROOT="${OMEGA_PINNED_ROOT:-$repo_root/tmp/repos/Omega}"
+export PETTA_PINNED_ROOT="${PETTA_PINNED_ROOT:-$repo_root/tmp/repos/PeTTa}"
+mkdir -p "$TMPDIR" "$UV_CACHE_DIR"
+run_dir="$(mktemp -d "$TMPDIR/persistent-atp-${tier}-XXXXXX")"
 echo "test artifacts: $run_dir"
-export UV_CACHE_DIR="${UV_CACHE_DIR:-$run_dir/uv-cache}"
 status=0
 if ! uv run persistent-atp-omega doctor --profile "$tier" --require > "$run_dir/doctor.json" 2>&1; then
   cat "$run_dir/doctor.json"
