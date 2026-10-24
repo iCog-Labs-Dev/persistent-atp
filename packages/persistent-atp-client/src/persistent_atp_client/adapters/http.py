@@ -8,6 +8,7 @@ the same ReceiverPort and conformance suite.
 from __future__ import annotations
 
 import base64
+from dataclasses import fields
 import json
 import urllib.error
 import urllib.parse
@@ -25,19 +26,34 @@ from ..models import (
 
 
 def _ref(raw):
-    return OperationRef(**raw) if raw is not None else None
+    if raw is None:
+        return None
+    _exact(raw, OperationRef)
+    return OperationRef(**raw)
+
+
+def _exact(raw, cls):
+    if not isinstance(raw, dict) or set(raw) != {item.name for item in fields(cls)}:
+        raise ValueError(f"invalid {cls.__name__} response fields")
 
 
 def _admission(raw):
+    _exact(raw, Admission)
     return Admission(raw["request_id"], raw["fingerprint"], raw["accepted"],
                      _ref(raw.get("operation_ref")), raw.get("error_code"), _ref(raw.get("coalesced_to")))
 
 
 def _snapshot(raw):
+    _exact(raw, OperationSnapshot)
     raw = dict(raw)
     raw["ref"] = _ref(raw["ref"])
-    raw["evidence_artifacts"] = tuple(ArtifactRef(**ref) for ref in raw.get("evidence_artifacts", ()))
+    raw["evidence_artifacts"] = tuple(_artifact(ref) for ref in raw["evidence_artifacts"])
     return OperationSnapshot(**raw)
+
+
+def _artifact(raw):
+    _exact(raw, ArtifactRef)
+    return ArtifactRef(**raw)
 
 
 class HTTPReceiverAdapter:
@@ -76,6 +92,7 @@ class HTTPReceiverAdapter:
 
     async def capabilities(self):
         raw = self._request("GET", "/v2/capabilities")
+        _exact(raw, CapabilitySet)
         return CapabilitySet(raw["contract_version"], frozenset(raw["actions"]),
                              frozenset(raw["controls"]), raw["backend_mode"],
                              raw["independent_replay"], raw["receiver_mode"])
@@ -100,7 +117,8 @@ class HTTPReceiverAdapter:
         if at_revision is not None:
             path += "?" + urllib.parse.urlencode({"at_revision": at_revision})
         raw = self._request("GET", path)
-        raw["target_artifact"] = ArtifactRef(**raw["target_artifact"])
+        _exact(raw, ProjectDigest)
+        raw["target_artifact"] = _artifact(raw["target_artifact"])
         return ProjectDigest(**raw)
 
     async def read_events(self, ref, cursor=None):
@@ -108,13 +126,17 @@ class HTTPReceiverAdapter:
         if cursor is not None:
             path += "?" + urllib.parse.urlencode({"cursor": cursor})
         raw = self._request("GET", path)
+        if not isinstance(raw, dict) or set(raw) != {"events", "cursor"}:
+            raise ValueError("invalid event page fields")
+        for item in raw["events"]:
+            _exact(item, Event)
         return tuple(Event(**{**item, "operation_ref": _ref(item["operation_ref"])}) for item in raw["events"]), raw["cursor"]
 
     async def put_artifact(self, source, *, workspace_id, media_type, expected_hash=None):
         raw = self._request("POST", "/v2/artifacts", {"workspace_id": workspace_id,
             "media_type": media_type, "expected_hash": expected_hash,
             "content_base64": base64.b64encode(source).decode("ascii")})
-        return ArtifactRef(**raw)
+        return _artifact(raw)
 
     async def get_artifact(self, ref, *, workspace_id):
         raw = self._request("GET", "/v2/artifacts/" + self._path(workspace_id, ref.hash))
