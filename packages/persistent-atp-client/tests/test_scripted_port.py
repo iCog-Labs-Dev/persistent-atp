@@ -7,7 +7,7 @@ from persistent_atp_client import (
     AsyncClient, Budget, BudgetAmendment, CancelRequest, DecisionResponse,
     ProofCycle,
 )
-from persistent_atp_client.errors import IdempotencyConflict, StalePrecondition, UnsupportedCapability
+from persistent_atp_client.errors import CursorExpired, IdempotencyConflict, StalePrecondition, UnsupportedCapability
 from persistent_atp_client.testing import ScriptedReceiverPort
 
 
@@ -55,4 +55,24 @@ def test_scripted_controls_are_idempotent_and_versioned():
         assert (await handle.cancel(cancel)).lifecycle == "cancelled"
         with pytest.raises(StalePrecondition):
             await handle.cancel(CancelRequest("cancel-2", handle.ref, expected_observation_version=0))
+    asyncio.run(scenario())
+
+
+def test_expired_event_cursor_refreshes_snapshot_before_resuming():
+    async def scenario():
+        port = ScriptedReceiverPort()
+        client = AsyncClient(port)
+        handle = await client.proof_cycle("p1", workspace_id="lab")
+        original = port.read_events
+        reads = []
+        async def expire_once(ref, cursor=None):
+            reads.append(cursor)
+            if len(reads) == 1:
+                raise CursorExpired("scripted cursor expired")
+            return await original(ref, cursor)
+        port.read_events = expire_once
+        event = await anext(handle.events(cursor="old-cursor"))
+        assert event.event_type == "queued"
+        assert reads == ["old-cursor", None]
+        assert handle._last_version == 0
     asyncio.run(scenario())
