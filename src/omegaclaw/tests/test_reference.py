@@ -435,7 +435,7 @@ def test_o21_o22_packet_uses_committed_theorem_and_rejects_mutation(tmp_path):
 
 
 def test_o20_timeout_is_error_with_one_bounded_attempt(monkeypatch):
-    bridge_path = Path(__file__).resolve().parents[3] / "omegclaw/omega-plugin/omega_persistent_atp_bridge.py"
+    bridge_path = Path(__file__).resolve().parents[1] / "omega_plugin/omega_persistent_atp_bridge.py"
     module_spec = importlib.util.spec_from_file_location("omega_bridge_timeout_test", bridge_path)
     bridge = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(bridge)

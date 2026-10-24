@@ -12,7 +12,9 @@ import shutil
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py", "deepseek_provider.py")
+PACKAGE_ROOT = ROOT / "src" / "omegaclaw"
+PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
+                "deepseek_provider.py", "coordinator-policy.txt")
 ROUTE_MARKER = "location = /deepseek/chat/completions {"
 
 
@@ -23,14 +25,14 @@ def install(omega_root: Path) -> dict:
     if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
         raise ValueError("--omega-root must be a full derived Omega checkout")
     plugin_dir = omega_root / "plugins" / "persistent_atp"
-    source = ROOT / "omegclaw" / "omega-plugin"
+    source = PACKAGE_ROOT / "omega_plugin"
     for name in PLUGIN_FILES:
         target = plugin_dir / name
         if target.exists() and target.read_bytes() != (source / name).read_bytes():
             raise ValueError(f"derived Omega plugin file differs: {target}")
 
     original_catalogue = catalogue.read_text()
-    overlay = (ROOT / "omegclaw" / "config" / "omega-plugins.overlay.yaml").read_text()
+    overlay = (PACKAGE_ROOT / "config" / "omega-plugins.overlay.yaml").read_text()
     overlay = overlay.replace("/opt/persistent-atp/omega-plugin", str(plugin_dir))
     if all(f"- name: {name}" in original_catalogue for name in ("persistent_atp", "deepseek_provider")):
         if overlay.strip() not in original_catalogue:
@@ -43,7 +45,7 @@ def install(omega_root: Path) -> dict:
         updated_catalogue = original_catalogue.rstrip() + "\n\n" + overlay.rstrip() + "\n"
 
     original_proxy = proxy.read_text()
-    route = (ROOT / "omegclaw" / "config" / "deepseek-nginx-location.conf").read_text().rstrip()
+    route = (PACKAGE_ROOT / "config" / "deepseek-nginx-location.conf").read_text().rstrip()
     if ROUTE_MARKER in original_proxy:
         if route not in original_proxy:
             raise ValueError("existing DeepSeek proxy route differs from OmegaClaw route")

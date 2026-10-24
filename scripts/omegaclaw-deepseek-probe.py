@@ -16,7 +16,7 @@ sys.path.insert(0, str(omega / "src"))
 import plugin  # noqa: E402
 import providers  # noqa: E402
 
-plugin.loadPythonPlugin("deepseek_provider", str(ROOT / "omegclaw" / "omega-plugin"))
+plugin.loadPythonPlugin("deepseek_provider", str(ROOT / "src" / "omegaclaw" / "omega_plugin"))
 providers.llmProviderStart("DeepSeek")
 tool = providers.LLMTool().with_name("proof-status").with_description(
     "Read committed proof status").with_parameters([

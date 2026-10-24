@@ -35,6 +35,14 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+omegaclaw = [
+    "config/*.yaml",
+    "config/*.conf",
+    "omega_plugin/*.metta",
+    "omega_plugin/*.txt",
+]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests", "src/omegaclaw/tests", "tests/omegaclaw_runtime"]
