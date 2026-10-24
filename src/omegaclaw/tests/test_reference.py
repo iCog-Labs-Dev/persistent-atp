@@ -16,7 +16,7 @@ from omegaclaw.jobs import RequestConflict
 from omegaclaw.service import OperationService
 from omegaclaw.export import check_export
 from omegaclaw.context import compile_packet, verify_packet
-from omegaclaw.cli import main as cli_main
+from omegaclaw.cli import load_config, main as cli_main
 from mathproof.scheduler import GlobalScheduler
 from commit_gate.canon import canonical_json
 from commit_gate.ops import AddEdge, SetField, UpsertNode
@@ -62,6 +62,13 @@ def test_trusted_cli_uploads_exact_source_bytes(tmp_path, capsys):
     assert cli_main(["artifact-put", "--config", str(config), "--file", str(source)]) == 0
     pointer = json.loads(capsys.readouterr().out)["artifact_ref"]
     assert OperationService(tmp_path / "service").artifacts.get(pointer) == content
+
+
+def test_reference_config_survives_plugin_layout_move(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config, root = load_config("omegclaw/config/reference.yaml")
+    assert config["workspace"] == "reference"
+    assert root == Path(__file__).resolve().parents[3] / "tmp/runs/omega-reference-service"
 
 
 def test_o02_o06_gate_cycle_audit_restart(tmp_path):
