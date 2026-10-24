@@ -19,6 +19,7 @@ from .api import serve
 from .service import OperationService
 
 ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parent
 
 
 def load_config(path: str) -> tuple[dict, Path]:
@@ -62,7 +63,7 @@ def doctor(profile: str) -> dict:
                     blockers.append("DEEPSEEK_API_KEY is unset; live DeepSeek inference cannot be tested")
                 if os.environ.get("DEEPSEEK_MODEL", "deepseek-flash") not in ("deepseek-flash", "deepseek-v4-pro"):
                     blockers.append("DEEPSEEK_MODEL must be deepseek-flash or deepseek-v4-pro")
-                if not (ROOT / "omegclaw" / "omega-plugin" / "deepseek_provider.py").is_file():
+                if not (PACKAGE_ROOT / "omega_plugin" / "deepseek_provider.py").is_file():
                     blockers.append("DeepSeek Omega provider plugin is missing")
         if profile == "persistence":
             if not os.environ.get("ARTIFACT_TEST_DB_URL"):

@@ -46,6 +46,14 @@ include = [
     "omegaclaw*",
 ]
 
+[tool.setuptools.package-data]
+omegaclaw = [
+    "config/*.yaml",
+    "config/*.conf",
+    "omega_plugin/*.metta",
+    "omega_plugin/*.txt",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.

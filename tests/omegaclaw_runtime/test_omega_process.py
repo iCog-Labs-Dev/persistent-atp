@@ -74,6 +74,8 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
             capture_output=True, text=True)
         assert installed.returncode == 0, installed.stderr
     assert original_catalogue in catalogue.read_text()
+    assert (plugin_dir / "coordinator-policy.txt").read_bytes() == (
+        ROOT / "src/omegaclaw/omega_plugin/coordinator-policy.txt").read_bytes()
     assert catalogue.read_text().count("- name: deepseek_provider") == 1
     assert "location = /deepseek/chat/completions {" in (omega_root / "proxy/nginx.conf.template").read_text()
     assert (omega_root / "proxy/nginx.conf.template").read_text().count(
