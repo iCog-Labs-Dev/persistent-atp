@@ -54,6 +54,7 @@ class ScriptedPort:
     """Scripted-test only; it cannot certify real ATP or replay."""
     def __init__(self):
         self.calls = 0
+        self.requests = []
         self.saved = None
         self.snapshot = None
         self.uploaded = None
@@ -64,6 +65,7 @@ class ScriptedPort:
 
     async def submit(self, request):
         self.calls += 1
+        self.requests.append(request)
         ref = OperationRef(request.workspace_id, "op1")
         self.saved = Admission(request.request_id, fingerprint(request), True, ref)
         self.snapshot = OperationSnapshot(ref, request.request_id, 0, "queued")
@@ -74,6 +76,9 @@ class ScriptedPort:
 
     async def get_operation(self, ref):
         return self.snapshot
+
+    async def read_status(self, **kwargs):
+        return kwargs
 
     async def put_artifact(self, source, **_):
         self.uploaded = source
@@ -111,6 +116,7 @@ def test_unknown_admission_remains_uncertain():
         with pytest.raises(SubmissionUncertain) as exc:
             await AsyncClient(port).submit(request)
         assert exc.value.request_id == request.request_id
+        assert exc.value.request is request
         assert port.calls == 1
     asyncio.run(scenario())
 
@@ -133,4 +139,28 @@ def test_sync_client_rejects_active_event_loop():
         client = SyncClient(AsyncClient(ScriptedPort()))
         with pytest.raises(RuntimeError, match="active event loop"):
             client.capabilities()
+    asyncio.run(scenario())
+
+
+def test_named_methods_share_preparation_and_submission_path():
+    async def scenario():
+        port = ScriptedPort()
+        client = AsyncClient(port)
+        ref = ArtifactRef(HASH)
+        calls = (
+            client.proof_create(ref, workspace_id="w", request_id="one"),
+            client.proof_cycle("p1", workspace_id="w", request_id="two"),
+            client.proof_audit("p1", workspace_id="w", request_id="three"),
+            client.proof_export("p1", "registered", workspace_id="w", request_id="four"),
+            client.formal_search("p1", "p1/c-1", Budget(1, 100), workspace_id="w", request_id="five"),
+            client.formal_resume("p1", "run", Budget(1, 100), workspace_id="w", request_id="six"),
+            client.statement_align("p1", "p1/c-1", ref, workspace_id="w", request_id="seven"),
+            client.lemma_bridge("p1", "p1/ob-1", workspace_id="w", request_id="eight"),
+        )
+        for call in calls:
+            assert (await call).ref.workspace_id == "w"
+        assert [item.action.kind for item in port.requests] == [
+            "proof-create", "proof-cycle", "proof-audit", "proof-export",
+            "formal-search", "formal-resume", "statement-align", "lemma-bridge"]
+        assert (await client.proof_status("p1", workspace_id="w"))["proof_id"] == "p1"
     asyncio.run(scenario())
