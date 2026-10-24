@@ -151,6 +151,18 @@ class MorkView:
         ]
         return tuple(sorted(records, key=lambda record: record.edge_id))
 
+    def list_nodes(
+        self, proof_id: str, label: str | None = None
+    ) -> tuple[NodeRecord, ...]:
+        """The shared `ReadView` enumeration; same records as `nodes()`."""
+        return self.nodes(proof_id, label)
+
+    def list_edges(
+        self, proof_id: str, rel_type: str | None = None
+    ) -> tuple[EdgeRecord, ...]:
+        """The shared `ReadView` enumeration; same records as `edges()`."""
+        return self.edges(proof_id, rel_type)
+
     def snapshot(self, proof_id: str) -> tuple[int, ReadView]:
         """Copy one proof at a stable projected revision for validation."""
         for _ in range(3):

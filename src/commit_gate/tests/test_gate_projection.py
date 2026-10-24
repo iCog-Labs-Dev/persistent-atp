@@ -44,6 +44,11 @@ class ReadOnlyView:
     def edges_to(self, node_id: str, rel_type: str) -> tuple[EdgeRecord, ...]:
         return ()
 
+    def list_nodes(self, proof_id: str, label: str | None = None) -> tuple[NodeRecord, ...]:
+        return ()
+
+    def list_edges(self, proof_id: str, rel_type: str | None = None) -> tuple[EdgeRecord, ...]:
+        return ()
 
 class TestProjectsFlag(unittest.TestCase):
     def test_an_independently_projected_view_is_not_written_through(self):

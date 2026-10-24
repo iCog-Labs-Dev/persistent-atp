@@ -292,7 +292,7 @@ class GlobalScheduler:
             )
         events = self._store.read_events_between(proof_id, view_revision, revision)
         ops = tuple(op for event in events for op in Proposal.from_dict(event).ops)
-        node_ids = dict.fromkeys(self._node_ids(snapshot))
+        node_ids = dict.fromkeys(self._node_ids(snapshot, proof_id))
         node_ids.update((op.node_id, None) for op in ops if isinstance(op, UpsertNode))
         view = JournalOverlayView(snapshot, revision, ops)
         return revision, self._build_frontier(proof_id, view, node_ids)
@@ -442,15 +442,8 @@ class GlobalScheduler:
         return {"policy_name": self._policy.name, "weights": dict(self._policy.weights)}
 
     # -- helpers ---------------------------------------------------------------
-
-    def _node_ids(self, view: ReadView) -> list[str]:
-        nodes = getattr(view, "nodes", None)
-        if nodes is None:
-            raise TypeError(
-                "frontier construction needs a view exposing known node ids "
-                "(MemoryView provides `.nodes`; Neo4j adapters should query directly)"
-            )
-        return list(nodes.keys())
+    def _node_ids(self, view: ReadView, proof_id: str) -> list[str]:
+        return [record.node_id for record in view.list_nodes(proof_id)]
 
     def _has_favorable_verdict(self, view: ReadView, claim_id: str) -> bool:
         for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):

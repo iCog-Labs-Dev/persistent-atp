@@ -33,6 +33,7 @@ __all__ = [
     "ProjectionView",
     "MemoryView",
     "JournalOverlayView",
+    "belongs_to_proof",
 ]
 
 
@@ -69,6 +70,16 @@ def _edge_copy(record: EdgeRecord) -> EdgeRecord:
         MappingProxyType(deepcopy(dict(record.fields))),
     )
 
+def belongs_to_proof(identity: str, proof_id: str) -> bool:
+    """Whether `identity` is a record id of the form ``<proof_id>/<local>``.
+
+    A proof owns the ids that begin with its own id and a slash. An id with no
+    slash (such as a content-addressed ``sha256:...`` identity) belongs to no
+    proof, so proof-scoped enumeration never lists it. This is the same rule
+    MORK applies when it files an atom under a proof.
+    """
+    head, separator, _ = identity.partition("/")
+    return bool(proof_id) and bool(separator) and head == proof_id
 
 @runtime_checkable
 class ReadView(Protocol):
@@ -97,6 +108,23 @@ class ReadView(Protocol):
         """Edges of `rel_type` entering `node_id`."""
         ...
 
+    def list_nodes(self, proof_id: str, label: str | None = None) -> tuple[NodeRecord, ...]:
+        """Every node of one proof, optionally only those with `label`.
+
+        Only ids of the form ``<proof_id>/<local>`` are listed, so one proof's
+        enumeration can never include another's. Records come back ordered by
+        `node_id`; an unknown proof, or no match, gives an empty tuple.
+        """
+        ...
+
+    def list_edges(self, proof_id: str, rel_type: str | None = None) -> tuple[EdgeRecord, ...]:
+        """Every edge of one proof, optionally only those of `rel_type`.
+
+        An edge belongs to the proof its `edge_id` names. Records come back
+        ordered by `edge_id`; an unknown proof, or no match, gives an empty
+        tuple.
+        """
+        ...
 
 @runtime_checkable
 class MutableView(Protocol):
@@ -282,6 +310,24 @@ class MemoryView:
         with self._lock:
             return tuple(_edge_copy(self.edges[e]) for e in self._in.get((node_id, rel_type), ()))
 
+    def list_nodes(self, proof_id: str, label: str | None = None) -> tuple[NodeRecord, ...]:
+        with self._lock:
+            return tuple(
+                _node_copy(self.nodes[node_id])
+                for node_id in sorted(self.nodes)
+                if belongs_to_proof(node_id, proof_id)
+                and (label is None or self.nodes[node_id].label == label)
+            )
+
+    def list_edges(self, proof_id: str, rel_type: str | None = None) -> tuple[EdgeRecord, ...]:
+        with self._lock:
+            return tuple(
+                _edge_copy(self.edges[edge_id])
+                for edge_id in sorted(self.edges)
+                if belongs_to_proof(edge_id, proof_id)
+                and (rel_type is None or self.edges[edge_id].rel_type == rel_type)
+            )
+
     def _sync_state_reference(self, node_id: str) -> None:
         node = self.nodes.get(node_id)
         if node is None:
@@ -373,4 +419,24 @@ class JournalOverlayView:
             edge for edge_id in sorted(ids)
             if (edge := self.edge(edge_id)) is not None
             and edge.dst_id == node_id and edge.rel_type == rel_type
+        )
+
+    def list_nodes(self, proof_id: str, label: str | None = None) -> tuple[NodeRecord, ...]:
+        ids = {record.node_id for record in self._base.list_nodes(proof_id, label)}
+        ids.update(node_id for node_id in self._node_ops if belongs_to_proof(node_id, proof_id))
+        return tuple(
+            record
+            for node_id in sorted(ids)
+            if (record := self.node(node_id)) is not None
+            and (label is None or record.label == label)
+        )
+
+    def list_edges(self, proof_id: str, rel_type: str | None = None) -> tuple[EdgeRecord, ...]:
+        ids = {record.edge_id for record in self._base.list_edges(proof_id, rel_type)}
+        ids.update(edge_id for edge_id in self._edge_ops if belongs_to_proof(edge_id, proof_id))
+        return tuple(
+            record
+            for edge_id in sorted(ids)
+            if (record := self.edge(edge_id)) is not None
+            and (rel_type is None or record.rel_type == rel_type)
         )
