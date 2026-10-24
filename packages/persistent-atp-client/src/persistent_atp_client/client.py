@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator
 
 from .codecs import fingerprint
 from .errors import (
-    AdmissionRejected, HashMismatch, ObservationTimeout, SubmissionUncertain,
+    AdmissionRejected, CursorExpired, HashMismatch, ObservationTimeout, SubmissionUncertain,
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
 )
 from .models import (
@@ -187,8 +187,18 @@ class OperationHandle:
 
     async def events(self, *, cursor: str | None = None, poll_interval: float = 0.1) -> AsyncIterator[Event]:
         seen: set[str] = set()
+        refreshed = False
         while True:
-            page, next_cursor = await self._client._port.read_events(self.ref, cursor)
+            try:
+                page, next_cursor = await self._client._port.read_events(self.ref, cursor)
+            except CursorExpired:
+                if refreshed:
+                    raise
+                await self.snapshot()
+                cursor = None
+                refreshed = True
+                continue
+            refreshed = False
             for event in page:
                 if event.operation_ref != self.ref:
                     raise ValueError("out-of-scope event")

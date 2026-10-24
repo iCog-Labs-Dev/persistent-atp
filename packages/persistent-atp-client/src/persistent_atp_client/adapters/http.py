@@ -16,8 +16,10 @@ import urllib.request
 
 from ..codecs import to_dict
 from ..errors import (
-    ArtifactUnavailable, Forbidden, IdempotencyConflict, InvalidRequest, TransientUnavailable,
-    Unauthenticated, UnsupportedCapability,
+    ArtifactUnavailable, BackendUnavailable, CursorExpired, Forbidden, HashMismatch,
+    IdempotencyConflict, InvalidRequest, QuotaExceeded, RateLimited, RequestIdExpired,
+    ReviewRequired, StalePrecondition, TransientUnavailable, Unauthenticated,
+    UnsupportedCapability, UnsupportedContract,
 )
 from ..models import (
     Admission, ArtifactRef, CapabilitySet, Event, OperationRef,
@@ -76,13 +78,19 @@ class HTTPReceiverAdapter:
                 return json.loads(response.read(20 * 1024 * 1024))
         except urllib.error.HTTPError as exc:
             codes = {400: InvalidRequest, 401: Unauthenticated, 403: Forbidden, 404: ArtifactUnavailable,
-                     409: IdempotencyConflict, 422: UnsupportedCapability}
+                     409: IdempotencyConflict, 410: CursorExpired, 422: UnsupportedCapability}
             try:
                 payload = json.loads(exc.read(4096))
                 message = payload.get("error_code", "HTTP_ERROR")
             except (ValueError, OSError):
                 message = "HTTP_ERROR"
-            raise codes.get(exc.code, TransientUnavailable)(message) from exc
+            named = {cls.code: cls for cls in (
+                ArtifactUnavailable, BackendUnavailable, CursorExpired, Forbidden,
+                HashMismatch, IdempotencyConflict, InvalidRequest, QuotaExceeded,
+                RateLimited, RequestIdExpired, ReviewRequired, StalePrecondition,
+                TransientUnavailable, Unauthenticated, UnsupportedCapability,
+                UnsupportedContract)}
+            raise named.get(message, codes.get(exc.code, TransientUnavailable))(message) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TransientUnavailable("receiver transport unavailable") from exc
 

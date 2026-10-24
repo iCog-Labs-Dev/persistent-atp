@@ -13,7 +13,7 @@ import urllib.request
 
 import pytest
 
-from persistent_atp_client import AsyncClient, Preconditions, ProofCreate, ProofCycle, ProofStatus
+from persistent_atp_client import ArtifactRef, AsyncClient, Preconditions, ProofCreate, ProofCycle, ProofStatus
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.errors import ArtifactUnavailable, IdempotencyConflict, StalePrecondition, UnsupportedCapability
@@ -78,6 +78,8 @@ def test_reference_http_port_matches_local_contract(tmp_path):
                            "literal_target": "∀ x, x = x"}, ensure_ascii=False).encode()
         artifact = await remote.put_artifact(spec, workspace_id="reference", media_type="application/json")
         assert await remote.get_artifact(artifact, workspace_id="reference") == spec
+        with pytest.raises(ArtifactUnavailable):
+            await remote.get_artifact(ArtifactRef("sha256:" + "0" * 64), workspace_id="reference")
         request = remote.prepare(ProofCreate(artifact), workspace_id="reference", request_id="remote-stable")
         handle = await remote.submit(request)
         assert (await remote.lookup_request(workspace_id="reference", request_id="remote-stable")).operation_ref == handle.ref
