@@ -33,6 +33,7 @@ def test_nine_actions_round_trip_exactly(action):
     request = ActionRequest("request-Ω", "math-lab", action)
     encoded = canonical_json(request)
     assert request_from_json(encoded) == request
+    assert ActionRequest.from_dict(request.to_dict()) == request
     assert encoded == canonical_json(request_from_dict(to_dict(request)))
     assert fingerprint(request) == "sha256:" + hashlib.sha256(encoded).hexdigest()
     assert b"\\u03a9" not in encoded
@@ -104,6 +105,7 @@ def test_lost_ack_reconciles_one_operation_and_local_timeout():
         assert type(exc.value).__name__ == "ObservationTimeout"
         assert port.calls == 1
         assert (await client.attach(handle.ref).snapshot()).lifecycle == "queued"
+        assert OperationRef.from_dict(handle.ref.to_dict()) == handle.ref
     asyncio.run(scenario())
 
 

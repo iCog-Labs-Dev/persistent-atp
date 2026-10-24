@@ -200,6 +200,15 @@ class ActionRequest:
         if self.deadline is not None and self.deadline.utcoffset().total_seconds() != 0:
             raise ValueError("deadline must use UTC")
 
+    def to_dict(self) -> dict[str, Any]:
+        from .codecs import to_dict
+        return to_dict(self)
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "ActionRequest":
+        from .codecs import request_from_dict
+        return request_from_dict(raw)
+
 
 @dataclass(frozen=True, slots=True)
 class OperationRef:
@@ -209,6 +218,15 @@ class OperationRef:
     def __post_init__(self):
         _alias(self.workspace_id, "workspace_id")
         _identifier(self.operation_id, "operation_id")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"workspace_id": self.workspace_id, "operation_id": self.operation_id}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "OperationRef":
+        if not isinstance(raw, dict) or set(raw) != {"workspace_id", "operation_id"}:
+            raise ValueError("invalid OperationRef fields")
+        return cls(**raw)
 
 
 @dataclass(frozen=True, slots=True)
