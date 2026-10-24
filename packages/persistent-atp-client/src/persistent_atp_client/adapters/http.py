@@ -15,7 +15,7 @@ import urllib.request
 
 from ..codecs import to_dict
 from ..errors import (
-    ArtifactUnavailable, Forbidden, IdempotencyConflict, TransientUnavailable,
+    ArtifactUnavailable, Forbidden, IdempotencyConflict, InvalidRequest, TransientUnavailable,
     Unauthenticated, UnsupportedCapability,
 )
 from ..models import (
@@ -59,7 +59,7 @@ class HTTPReceiverAdapter:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
                 return json.loads(response.read(20 * 1024 * 1024))
         except urllib.error.HTTPError as exc:
-            codes = {401: Unauthenticated, 403: Forbidden, 404: ArtifactUnavailable,
+            codes = {400: InvalidRequest, 401: Unauthenticated, 403: Forbidden, 404: ArtifactUnavailable,
                      409: IdempotencyConflict, 422: UnsupportedCapability}
             try:
                 payload = json.loads(exc.read(4096))
