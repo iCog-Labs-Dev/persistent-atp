@@ -76,3 +76,21 @@ def test_expired_event_cursor_refreshes_snapshot_before_resuming():
         assert reads == ["old-cursor", None]
         assert handle._last_version == 0
     asyncio.run(scenario())
+
+
+def test_event_helper_rejects_out_of_order_receiver_events():
+    async def scenario():
+        port = ScriptedReceiverPort()
+        client = AsyncClient(port)
+        handle = await client.proof_cycle("p1", workspace_id="lab")
+        original = port.read_events
+        async def reverse(ref, cursor=None):
+            port.finish(ref, mathematical_disposition="stagnated")
+            page, next_cursor = await original(ref, cursor)
+            return tuple(reversed(page)), next_cursor
+        port.read_events = reverse
+        stream = handle.events()
+        await anext(stream)
+        with pytest.raises(ValueError, match="regressed"):
+            await anext(stream)
+    asyncio.run(scenario())

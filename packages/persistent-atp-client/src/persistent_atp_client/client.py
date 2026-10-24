@@ -188,6 +188,8 @@ class OperationHandle:
     async def events(self, *, cursor: str | None = None, poll_interval: float = 0.1) -> AsyncIterator[Event]:
         seen: set[str] = set()
         refreshed = False
+        last_sequence = -1
+        last_observation_version = -1
         while True:
             try:
                 page, next_cursor = await self._client._port.read_events(self.ref, cursor)
@@ -203,6 +205,10 @@ class OperationHandle:
                 if event.operation_ref != self.ref:
                     raise ValueError("out-of-scope event")
                 if event.event_id not in seen:
+                    if event.sequence <= last_sequence or event.observation_version < last_observation_version:
+                        raise ValueError("receiver event sequence or observation regressed")
+                    last_sequence = event.sequence
+                    last_observation_version = event.observation_version
                     seen.add(event.event_id)
                     yield event
             if next_cursor is not None:
