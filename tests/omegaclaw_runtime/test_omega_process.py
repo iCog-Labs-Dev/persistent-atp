@@ -12,6 +12,7 @@ import pytest
 
 from omegaclaw.api import serve
 from omegaclaw.service import OperationService
+from omegaclaw.receiver import ReferenceReceiver
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,7 +84,8 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
     assert subprocess.run(["git", "-C", str(omega_source), "rev-parse", "HEAD"],
         capture_output=True, text=True).stdout.strip() == "63a78265be9b8efc6e47cc39f3b4bc7a13e06ed5"
     service = OperationService(tmp_path / "service")
-    server = serve(service, "omega-process-test-token", port=0)
+    receiver = ReferenceReceiver(service)
+    server = serve(service, "omega-process-test-token", port=0, receiver=receiver)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     DeepSeekMockHandler.requests = []
@@ -129,3 +131,4 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
         server.server_close()
         deepseek_server.shutdown()
         deepseek_server.server_close()
+        receiver.close()

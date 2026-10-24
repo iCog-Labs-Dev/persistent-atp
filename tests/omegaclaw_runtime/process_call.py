@@ -47,6 +47,8 @@ assert envelope["phase"] == "finished", envelope
 assert envelope["revision"] == 1, envelope
 assert envelope["claim_status"] == "provisional", envelope
 assert envelope["formal_verified"] is False, envelope
+assert envelope["contract_version"] == "2.0", envelope
+assert envelope["receiver_mode"] == "reference-scripted", envelope
 assert envelope["artifact_pointers"], envelope
 
 # Omega's provider constructs the next request from a tool response. The

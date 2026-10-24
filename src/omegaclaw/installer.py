@@ -12,6 +12,7 @@ import shutil
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+CLIENT_ROOT = PACKAGE_ROOT.parents[1] / "packages" / "persistent-atp-client" / "src" / "persistent_atp_client"
 PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
                 "deepseek_provider.py", "coordinator-policy.txt")
 ROUTE_MARKER = "location = /deepseek/chat/completions {"
@@ -58,6 +59,10 @@ def install(omega_root: Path) -> dict:
     plugin_dir.mkdir(parents=True, exist_ok=True)
     for name in PLUGIN_FILES:
         shutil.copy2(source / name, plugin_dir / name)
+    if not CLIENT_ROOT.is_dir():
+        raise ValueError("standalone persistent-atp-client source is required for Omega installation")
+    shutil.copytree(CLIENT_ROOT, plugin_dir / "persistent_atp_client", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     if updated_catalogue != original_catalogue:
         catalogue.write_text(updated_catalogue)
     if updated_proxy != original_proxy:
