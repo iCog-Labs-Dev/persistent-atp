@@ -72,7 +72,9 @@ class TestCriticCycle(Harness):
             return {"verdict": "critic-accepted", "actor": "critic-1"}
 
         digest = self.cycle(
-            ScriptedDispatcher({"critic": critic_handler}), worker_class="critic"
+            ScriptedDispatcher({"critic": critic_handler}),
+            worker_class="critic",
+            actor="critic-1",
         )
 
         self.assertTrue(digest.accepted, digest.rejections)

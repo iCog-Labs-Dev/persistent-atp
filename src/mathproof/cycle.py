@@ -60,12 +60,19 @@ def run_cycle(
     dispatcher: Dispatcher,
     adapters: Mapping[str, Any] | None = None,
     worker_class: str = "llm-research",
+    actor: str | None = None,
     ttl_seconds: float = 600.0,
     maintenance: Callable[[Any, CommitResult], None] | None = None,
     search_policy: str = "gnn-pln-best-first-v1",
 ) -> CycleDigest:
-    """Lease the best move, run it under its worker class, commit the result."""
-    lease = scheduler.lease_next(proof_id, worker_class, ttl_seconds=ttl_seconds)
+    """Lease the best move, run it under its worker class, commit the result.
+
+    ``actor`` is the worker the lease is issued to; it defaults to the worker
+    class when the caller runs one anonymous worker per class.
+    """
+    lease = scheduler.lease_next(
+        proof_id, worker_class, ttl_seconds=ttl_seconds, actor=actor or worker_class
+    )
     if lease is None:
         return CycleDigest.empty_frontier()
 
@@ -83,7 +90,7 @@ def run_cycle(
         if maintenance is not None:
             maintenance(proposal, commit)
         if result.get("terminal", True):
-            scheduler.release(proof_id, lease.lease_id)
+            scheduler.release(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
 
     return CycleDigest(
         lease_issued=True,

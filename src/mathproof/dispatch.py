@@ -80,14 +80,17 @@ def result_to_proposal(
             proof_id=lease.proof_id,
             view=view,
         )
+    # The gate binds a leased proposal to its holder and move, so both come
+    # from the lease the scheduler issued, never from what the worker reports.
     return Proposal(
         proof_id=lease.proof_id,
-        actor=result.get("actor", lease.worker_class),
+        actor=lease.actor,
         worker_class=worker_class,
         ops=tuple(ops),
         base_revision=lease.base_revision,
         lease_id=lease.lease_id,
         fencing_token=lease.fencing_token,
+        selected_move_id=lease.selected_move_id,
     )
 
 
