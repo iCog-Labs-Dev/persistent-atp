@@ -14,6 +14,8 @@ from omegaclaw.api import serve
 from omegaclaw.service import OperationService
 
 ROOT = Path(__file__).resolve().parents[2]
+SDK_PATH = Path(os.environ.get("OMEGACLAW_PROVIDER_SDK_PATH",
+                       str(ROOT / "tmp/repos/omegaclaw-provider-py310")))
 
 
 class DeepSeekMockHandler(BaseHTTPRequestHandler):
@@ -50,7 +52,13 @@ class DeepSeekMockHandler(BaseHTTPRequestHandler):
         pass
 
 
-def test_o01_o02_real_omega_petta_process(tmp_path):
+@pytest.mark.parametrize("sdk_enabled", [
+    pytest.param(False, id="legacy-provider"),
+    pytest.param(True, id="sdk-provider", marks=pytest.mark.skipif(
+        not (SDK_PATH / "openai/__init__.py").is_file(),
+        reason="OpenAI SDK unavailable in PeTTa Python; set OMEGACLAW_PROVIDER_SDK_PATH")),
+])
+def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     omega_source = Path(os.environ.get("OMEGA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "Omega")))
     petta_source = Path(os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa")))
     if not (omega_source / "src/plugin.py").is_file() or not (petta_source / "src/main.pl").is_file():
@@ -77,6 +85,9 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
     assert (plugin_dir / "coordinator-policy.txt").read_bytes() == (
         ROOT / "src/omegaclaw/omega_plugin/coordinator-policy.txt").read_bytes()
     assert catalogue.read_text().count("- name: deepseek_provider") == 1
+    assert catalogue.read_text().count("- name: persistent_atp_providers") == 1
+    assert (plugin_dir / "persistent_atp_providers.py").read_bytes() == (
+        ROOT / "src/omegaclaw/providers.py").read_bytes()
     assert "location = /deepseek/chat/completions {" in (omega_root / "proxy/nginx.conf.template").read_text()
     assert (omega_root / "proxy/nginx.conf.template").read_text().count(
         "location = /deepseek/chat/completions {") == 1
@@ -97,6 +108,9 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
         "DEEPSEEK_API_KEY": "mock-transport-only", "DEEPSEEK_TEST_MODE": "1",
         "DEEPSEEK_API_URL": f"http://127.0.0.1:{deepseek_server.server_port}/chat/completions",
         "DEEPSEEK_GATEWAY_TEST_URL": f"http://127.0.0.1:{deepseek_server.server_port}"})
+    if sdk_enabled:
+        env["PYTHONPATH"] += os.pathsep + str(SDK_PATH)
+        env["OMEGACLAW_SDK_PROCESS_TEST"] = "1"
     try:
         completed = subprocess.run([process_python, str(ROOT / "tests/omegaclaw_runtime/process_call.py")],
             cwd=petta_root, env=env, capture_output=True, text=True, timeout=30)
@@ -109,13 +123,20 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
         assert service.store.verify_chain("omegaproc") == 1
         assert service.artifacts.exists(result["create"]["artifact_pointers"][0])
         assert result["deepseek_mock_roundtrip"] is True
-        assert len(DeepSeekMockHandler.requests) == 6
+        assert result["sdk_provider_roundtrip"] is sdk_enabled
+        assert len(DeepSeekMockHandler.requests) == (7 if result["sdk_provider_roundtrip"] else 6)
         first, second = (record["body"] for record in DeepSeekMockHandler.requests[:2])
         for record in DeepSeekMockHandler.requests[:5]:
             assert record["auth"] == "Bearer mock-transport-only"
-        assert DeepSeekMockHandler.requests[-1]["auth"] is None
-        assert DeepSeekMockHandler.requests[-1]["path"] == "/deepseek/chat/completions"
-        assert DeepSeekMockHandler.requests[-1]["body"]["model"] == "deepseek-v4-pro"
+        gateway_record = DeepSeekMockHandler.requests[5]
+        assert gateway_record["auth"] is None
+        assert gateway_record["path"] == "/deepseek/chat/completions"
+        assert gateway_record["body"]["model"] == "deepseek-v4-pro"
+        if result["sdk_provider_roundtrip"]:
+            sdk_record = DeepSeekMockHandler.requests[6]
+            assert sdk_record["path"] == "/deepseek/chat/completions"
+            assert sdk_record["body"]["thinking"] == {"type": "disabled"}
+            assert result["create"]["event_hash"] in sdk_record["body"]["messages"][-1]["content"]
         assert first["model"] == "deepseek-flash"
         assert first["thinking"] == {"type": "disabled"}
         assert first["tool_choice"] == "required"

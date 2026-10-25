@@ -14,6 +14,9 @@ import shutil
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
                 "deepseek_provider.py", "coordinator-policy.txt")
+# Omega's core registry is named providers.py. Install the package module under
+# a unique plugin name so the Omega registry cannot be shadowed.
+PROVIDER_PLUGIN = "persistent_atp_providers.py"
 ROUTE_MARKER = "location = /deepseek/chat/completions {"
 
 
@@ -25,20 +28,23 @@ def install(omega_root: Path) -> dict:
         raise ValueError("--omega-root must be a full derived Omega checkout")
     plugin_dir = omega_root / "plugins" / "persistent_atp"
     source = PACKAGE_ROOT / "omega_plugin"
-    for name in PLUGIN_FILES:
+    files = {name: source / name for name in PLUGIN_FILES}
+    files[PROVIDER_PLUGIN] = PACKAGE_ROOT / "providers.py"
+    for name, origin in files.items():
         target = plugin_dir / name
-        if target.exists() and target.read_bytes() != (source / name).read_bytes():
+        if target.exists() and target.read_bytes() != origin.read_bytes():
             raise ValueError(f"derived Omega plugin file differs: {target}")
 
     original_catalogue = catalogue.read_text()
     overlay = (PACKAGE_ROOT / "config" / "omega-plugins.overlay.yaml").read_text()
     overlay = overlay.replace("/opt/persistent-atp/omega-plugin", str(plugin_dir))
-    if all(f"- name: {name}" in original_catalogue for name in ("persistent_atp", "deepseek_provider")):
+    plugin_names = ("persistent_atp", "deepseek_provider", "persistent_atp_providers")
+    if all(f"- name: {name}" in original_catalogue for name in plugin_names):
         if overlay.strip() not in original_catalogue:
             raise ValueError("existing Omega plugin catalogue entries differ from OmegaClaw overlay")
         updated_catalogue = original_catalogue
     else:
-        for name in ("persistent_atp", "deepseek_provider"):
+        for name in plugin_names:
             if re.search(rf"(?m)^- name:\s*['\"]?{name}\b", original_catalogue):
                 raise ValueError(f"Omega plugin name already exists: {name}")
         updated_catalogue = original_catalogue.rstrip() + "\n\n" + overlay.rstrip() + "\n"
@@ -56,8 +62,8 @@ def install(omega_root: Path) -> dict:
         updated_proxy = original_proxy.replace(anchor, route + "\n\n" + anchor, 1)
 
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    for name in PLUGIN_FILES:
-        shutil.copy2(source / name, plugin_dir / name)
+    for name, origin in files.items():
+        shutil.copy2(origin, plugin_dir / name)
     if updated_catalogue != original_catalogue:
         catalogue.write_text(updated_catalogue)
     if updated_proxy != original_proxy:
