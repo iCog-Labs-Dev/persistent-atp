@@ -117,6 +117,13 @@ try:
 finally:
     os.environ["DEEPSEEK_API_URL"] = saved_url
     os.environ["DEEPSEEK_API_KEY"] = saved_key
+plugin.loadPythonPlugin("persistent_atp_providers", plugin_dir)
+sdk_roundtrip = False
+if os.environ.get("OMEGACLAW_SDK_PROCESS_TEST") == "1":
+    providers.llmProviderStart("PersistentATP-DeepSeek")
+    sdk_response = providers.llmProviderChat(next_model_request)
+    assert not sdk_response.is_error() and sdk_response.calls[0].name == "proof-audit", sdk_response
+    sdk_roundtrip = True
 tool_message = providers.llmToolCallResponseMessage("tool", "tool-1", json.dumps(envelope))
 next_request = providers.llmRequest(
     providers.llmRequestMessage("system", "Report only committed status"),
@@ -125,5 +132,6 @@ assert next_request.messages[1].content == json.dumps(envelope)
 print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "next_model_request_saw_digest": envelope["event_hash"] in next_request.messages[1].content,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
+    "sdk_provider_roundtrip": sdk_roundtrip,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
     "registered_skills": 9}, sort_keys=True), flush=True)

@@ -19,6 +19,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+provider-sdk = [
+    "openai>=2.0,<3",
+    "PyYAML>=6.0",
+]
 # The production backend is not on PyPI and lives in a private repository,
 # so plain pip cannot resolve it — [tool.uv.sources] below applies to uv
 # only. Install it with `uv sync --extra real-atp`; everything else
@@ -29,6 +33,7 @@ real-atp = [
 
 [project.scripts]
 persistent-atp-omega = "omegaclaw.cli:main"
+persistent-atp-provider-probe = "omegaclaw.deepseek_probe:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -42,6 +47,7 @@ omegaclaw = [
     "config/*.conf",
     "omega_plugin/*.metta",
     "omega_plugin/*.txt",
+    "omega_plugin/*.py",
 ]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
