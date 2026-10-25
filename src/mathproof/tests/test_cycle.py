@@ -126,6 +126,71 @@ class TestResearchCycle(Harness):
         self.assertEqual(len(moves), 1)
 
 
+class TestWorkedResearchMove(Harness):
+    def setUp(self):
+        self.view = MemoryView()
+        self.view.add_node("p1/rs-1", "ResearchState", {"status": "open"})
+        self.view.add_node("p1/rm-1", "ResearchMove", {"status": "queued", "detail": "find a bridge"})
+        self.view.add_edge("PROPOSES", "p1/rs-1", "p1/rm-1", "p1/rm-1-proposed")
+        self.store = JournalStore()
+        self.gate = CommitGate(self.view, self.store)
+        self.scheduler = GlobalScheduler(self.view, self.store)
+
+    def test_an_answer_can_propose_several_moves_and_retire_the_leased_one(self):
+        def explorer_handler(lease, context):
+            self.assertEqual(context["move"]["id"], "p1/rm-1")
+            return {
+                "parent_state_id": "p1/rs-1",
+                "moves": [
+                    {"detail": "induct on n", "technique_tags": ["induction"]},
+                    {"detail": "pass to generating functions", "technique_tags": ["analytic"]},
+                ],
+                "move_status": "exhausted",
+            }
+
+        digest = self.cycle(ScriptedDispatcher({"llm-research": explorer_handler}), "llm-research")
+
+        self.assertTrue(digest.accepted, digest.rejections)
+        self.assertEqual(self.view.node("p1/rm-1").fields["status"], "exhausted")
+        self.assertEqual(
+            [self.view.node(f"p1/rm-{n}").fields["detail"] for n in (2, 3)],
+            ["induct on n", "pass to generating functions"],
+        )
+        self.assertEqual(self.view.node("p1/rm-3").fields["technique_tags"], ["analytic"])
+        self.assertEqual(
+            sorted(c.move_id for c in self.scheduler.build_frontier("p1")),
+            ["p1/rm-2", "p1/rm-3"],
+        )
+
+    def test_without_a_move_status_the_leased_move_stays_on_the_frontier(self):
+        digest = self.cycle(
+            ScriptedDispatcher(
+                {"llm-research": lambda l, c: {"parent_state_id": "p1/rs-1", "detail": "next"}}
+            ),
+            "llm-research",
+        )
+        self.assertTrue(digest.accepted, digest.rejections)
+        self.assertEqual(self.view.node("p1/rm-1").fields["status"], "queued")
+
+
+class TestCriticGap(Harness):
+    def test_a_refuting_critic_records_its_earliest_gap(self):
+        self.view.add_node("p1/al-1", "Alignment", {"lifecycle": "reviewed", "verdict": "aligned"})
+        self.view.add_edge("ALIGNS_CLAIM", "p1/al-1", "p1/c-1", "p1/al-1-aligns")
+
+        digest = self.cycle(
+            ScriptedDispatcher(
+                {"critic": lambda l, c: {"verdict": "refuted", "earliest_gap": "step 2: n = 0"}}
+            ),
+            "critic",
+        )
+
+        self.assertTrue(digest.accepted, digest.rejections)
+        (attempt,) = [r for r in self.view.nodes.values() if r.label == "Attempt"]
+        self.assertEqual(attempt.fields["earliest_gap"], "step 2: n = 0")
+        self.assertEqual(self.view.node("p1/c-1").fields["status"], "provisional")
+
+
 class TestFormalCycle(Harness):
     def test_a_formal_lease_runs_through_the_adapter_and_commits_states(self):
         from mathproof.formal_atp import FakeFormalATP

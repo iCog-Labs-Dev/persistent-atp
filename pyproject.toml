@@ -19,6 +19,11 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+# The LangGraph coordinator graph (src/coordinator/graph.py); the rest of the
+# coordinator and every other package run without it.
+coordinator = [
+    "langgraph>=1.0",
+]
 # The production backend is not on PyPI and lives in a private repository,
 # so plain pip cannot resolve it — [tool.uv.sources] below applies to uv
 # only. Install it with `uv sync --extra real-atp`; everything else
@@ -34,7 +39,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests"]
+testpaths = ["src/commit_gate/tests", "src/shared/tests", "src/mathproof/tests", "src/alignment/tests", "src/artifacts/tests", "src/coordinator/tests"]
 
 [tool.uv.sources]
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }
