@@ -1,4 +1,4 @@
-from .llm_client import (
+from shared.llm_client import (
     CallableLLMClient,
     GeminiLLMClient,
     HTTPLLMClient,

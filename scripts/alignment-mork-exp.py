@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 
 load_dotenv(REPO_ROOT / ".env", override=False)
 
-from alignment.llm_client import GeminiLLMClient
+from shared.llm_client import GeminiLLMClient
 from alignment.models import AlignmentReviewRequest, compute_content_hash
 from alignment.reviewer import LLMAlignmentReviewer
 from alignment.worker import AlignmentWorker

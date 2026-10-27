@@ -238,6 +238,7 @@ class GlobalScheduler:
         ttl_seconds: float = 600.0,
         *,
         actor: str,
+        category: str | None = None,
     ) -> Lease | None:
         """`proof-lease-next`: select and lease the best eligible move.
 
@@ -245,7 +246,11 @@ class GlobalScheduler:
         raises ConcurrencyError; the caller may retry with a fresh snapshot.
         The trusted caller supplies the actual worker's actor and class.
         """
+        if category is not None and CATEGORY_WORKER_CLASS.get(category) != worker_class:
+            raise ValueError(f"{worker_class!r} cannot lease category {category!r}")
         revision, frontier = self._snapshot_frontier(proof_id)
+        if category is not None:
+            frontier = [candidate for candidate in frontier if candidate.category == category]
         scored = []
         for candidate in frontier:
             features = self._feature_vector(candidate, worker_class)

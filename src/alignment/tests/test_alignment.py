@@ -79,7 +79,7 @@ class TestLLMAlignmentReviewer(unittest.TestCase):
         self.assertIn('never means "exactly mismatched"', ALIGNMENT_REVIEWER_SYSTEM_PROMPT)
 
     def test_llm_review_exact_aligned(self):
-        from alignment.llm_client import MockLLMClient
+        from shared.llm_client import MockLLMClient
         from alignment.reviewer import LLMAlignmentReviewer
 
         mock_response = {
@@ -116,7 +116,7 @@ class TestLLMAlignmentReviewer(unittest.TestCase):
         self.assertEqual(result.reviewer, "llm-critic-01")
 
     def test_llm_review_with_markdown_fences(self):
-        from alignment.llm_client import MockLLMClient
+        from shared.llm_client import MockLLMClient
         from alignment.reviewer import LLMAlignmentReviewer
 
         markdown_json = """Here is my review:
@@ -151,7 +151,7 @@ class TestLLMAlignmentReviewer(unittest.TestCase):
         self.assertEqual(result.criteria.relation, "weakening")
 
     def test_mismatch_and_invalid_relation_handling(self):
-        from alignment.llm_client import MockLLMClient
+        from shared.llm_client import MockLLMClient
         from alignment.reviewer import LLMAlignmentReviewer
 
         request = AlignmentReviewRequest(
@@ -210,7 +210,7 @@ class TestLLMAlignmentReviewer(unittest.TestCase):
         self.assertEqual(result.lifecycle, AlignmentLifecycle.REVIEW_NEEDED)
 
     def test_worker_with_llm_reviewer_integration(self):
-        from alignment.llm_client import MockLLMClient
+        from shared.llm_client import MockLLMClient
         from alignment.reviewer import LLMAlignmentReviewer
 
         mock_client = MockLLMClient(

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Callable, Protocol
 
 from commit_gate.vocab import AlignmentLifecycle, AlignmentVerdict
+from shared.llm_client import HTTPLLMClient, LLMClientProtocol
 
-from .llm_client import HTTPLLMClient, LLMClientProtocol
 from .models import (
     AlignmentCriteria,
     AlignmentReviewRequest,
