@@ -9,7 +9,7 @@ from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from mathproof.scheduler import GlobalScheduler
 from mathproof.worker_cycle import run_worker_cycle
-from mathproof.workers import CriticWorker, ResearchWorker, WorkerDispatcher
+from mathproof.workers import CriticWorker, ResearchWorker
 from shared.llm_client import MockLLMClient
 
 
@@ -26,7 +26,7 @@ def setup_cycle(responses):
     return (
         view, store, llm,
         GlobalScheduler(view, store),
-        WorkerDispatcher(ResearchWorker(llm), CriticWorker(llm)),
+        ResearchWorker(llm), CriticWorker(llm),
         CommitGate(view, store),
     )
 
@@ -36,9 +36,8 @@ def test_roles_share_client_but_use_distinct_prompts_and_validate_output():
         {"next_move": "try induction", "reasoning": "the statement is recursive"},
         {"verdict": "pending", "reasoning": "no derivation was supplied"},
     ])
-    dispatcher = WorkerDispatcher(ResearchWorker(llm), CriticWorker(llm))
-    dispatcher.run(SimpleNamespace(worker_class="llm-research", selected_move_id="p1/rm-1"), {})
-    dispatcher.run(SimpleNamespace(worker_class="critic", selected_move_id="p1/c-1"), {})
+    ResearchWorker(llm).run(SimpleNamespace(worker_class="llm-research", selected_move_id="p1/rm-1"), {})
+    CriticWorker(llm).run(SimpleNamespace(worker_class="critic", selected_move_id="p1/c-1"), {})
     assert llm.history[0][0] != llm.history[1][0]
     with pytest.raises(ValueError, match="invalid critic verdict"):
         CriticWorker(MockLLMClient(default_json={"verdict": "lean-verified", "reasoning": "x"})).run(
@@ -47,13 +46,13 @@ def test_roles_share_client_but_use_distinct_prompts_and_validate_output():
 
 
 def test_research_and_critic_commit_under_their_own_leases():
-    view, store, llm, scheduler, dispatcher, gate = setup_cycle([
+    view, store, llm, scheduler, research_worker, critic_worker, gate = setup_cycle([
         {"next_move": "try induction", "reasoning": "recursive structure"},
         {"verdict": "supported", "reasoning": "the algebraic argument looks sound"},
     ])
     research = run_worker_cycle(
         "p1", "research-move", actor="research-1",
-        scheduler=scheduler, dispatcher=dispatcher, gate=gate,
+        scheduler=scheduler, worker=research_worker, gate=gate,
     )
     assert research.commit.accepted, research.commit.rejections
     assert research.lease.selected_move_id == "p1/rm-1"
@@ -61,7 +60,7 @@ def test_research_and_critic_commit_under_their_own_leases():
 
     critic = run_worker_cycle(
         "p1", "critic-task", actor="critic-1",
-        scheduler=scheduler, dispatcher=dispatcher, gate=gate,
+        scheduler=scheduler, worker=critic_worker, gate=gate,
     )
     assert critic.commit.accepted, critic.commit.rejections
     assert critic.lease.selected_move_id == "p1/c-1"
@@ -77,25 +76,34 @@ def test_research_and_critic_commit_under_their_own_leases():
 
 
 def test_invalid_llm_output_releases_lease_without_journal_mutation():
-    view, store, _, scheduler, _, gate = setup_cycle([])
+    view, store, _, scheduler, _, _, gate = setup_cycle([])
     bad_llm = MockLLMClient(default_json={"next_move": "", "reasoning": "unclear"})
-    dispatcher = WorkerDispatcher(ResearchWorker(bad_llm), CriticWorker(bad_llm))
     with pytest.raises(ValueError, match="next_move"):
         run_worker_cycle(
             "p1", "research-move", actor="research-1",
-            scheduler=scheduler, dispatcher=dispatcher, gate=gate,
+            scheduler=scheduler, worker=ResearchWorker(bad_llm), gate=gate,
         )
     assert store.head("p1")[0] == 0
     assert store.active_leases("p1") == []
 
 
+def test_wrong_worker_is_rejected_before_leasing():
+    _, store, llm, scheduler, _, critic_worker, gate = setup_cycle([])
+    with pytest.raises(ValueError, match="cannot run category"):
+        run_worker_cycle(
+            "p1", "research-move", actor="critic-1",
+            scheduler=scheduler, worker=critic_worker, gate=gate,
+        )
+    assert store.active_leases("p1") == []
+    assert llm.history == []
+
+
 def test_exhausted_research_move_does_not_queue_an_empty_followup():
-    _, store, _, scheduler, _, gate = setup_cycle([])
+    _, store, _, scheduler, _, _, gate = setup_cycle([])
     llm = MockLLMClient(default_json={"next_move": None, "reasoning": "no viable next step"})
-    dispatcher = WorkerDispatcher(ResearchWorker(llm), CriticWorker(llm))
     result = run_worker_cycle(
         "p1", "research-move", actor="research-1",
-        scheduler=scheduler, dispatcher=dispatcher, gate=gate,
+        scheduler=scheduler, worker=ResearchWorker(llm), gate=gate,
     )
     assert result.commit.accepted, result.commit.rejections
     assert "p1/rm-1" not in {c.move_id for c in scheduler.build_frontier("p1")}

@@ -13,7 +13,7 @@ from commit_gate.state import MemoryView
 from commit_gate.vocab import ResearchMoveStatus, WorkerClass
 from mathproof.ids import IdType, parse_local_id
 from mathproof.scheduler import GlobalScheduler, Lease
-from mathproof.workers import WorkerDispatcher
+from mathproof.workers import CriticWorker, ResearchWorker
 
 
 WORKER_CATEGORIES = {
@@ -146,7 +146,7 @@ def run_worker_cycle(
     *,
     actor: str,
     scheduler: GlobalScheduler,
-    dispatcher: WorkerDispatcher,
+    worker: ResearchWorker | CriticWorker,
     gate: CommitGate,
 ) -> WorkerCycleResult | None:
     """Run at most one task of the requested category; idle returns None."""
@@ -154,6 +154,8 @@ def run_worker_cycle(
         worker_class = WORKER_CATEGORIES[category]
     except KeyError as exc:
         raise ValueError(f"unsupported worker category {category!r}") from exc
+    if worker.worker_class != worker_class:
+        raise ValueError(f"{worker.worker_class!r} cannot run category {category!r}")
     lease = scheduler.lease_next(
         proof_id, worker_class, actor=actor, category=category
     )
@@ -162,7 +164,7 @@ def run_worker_cycle(
     try:
         view = _current_snapshot(gate, proof_id)
         context = _context(view, lease)
-        result = dispatcher.run(lease, context)
+        result = worker.run(lease, context)
         commit = gate.commit(_proposal(lease, result, context, view))
         scheduler.update_statistics(commit, category)
         return WorkerCycleResult(lease, result, commit)
