@@ -34,8 +34,7 @@ The context compiler only reads committed state. It does not write directly to
 the commit gate. Any result produced by a worker must later be submitted as a
 proposal through the commit gate.
 
-Runtime scheduler-to-compiler and compiler-to-worker wiring is not implemented
-in this module yet.
+
 
 ## Main concepts
 
@@ -269,13 +268,3 @@ uv run --extra dev pytest -q src/context_compiler/tests
 ```
 
 The request/result fixtures are in `fixtures/context_compilation/`.
-
-## Remaining integration work
-
-- Connect the scheduler/coordinator to snapshot acquisition, retrieval,
-  compiler selection, worker dispatch, and manifest persistence.
-- Define the production response to incomplete retrieval.
-- Decide which advanced scoring and diversity features from the paper are
-  required and which are intentionally omitted.
-- Run MORK- and PostgreSQL-dependent integration tests in an environment that
-  provides those services.
