@@ -53,6 +53,7 @@ REQUEST_REQUIRED_FIELDS = (
     "lean_source_artifact",
     "environment_id",
     "environment_hash",
+    "goal_text",
 )
 
 EMITTABLE_DISPOSITIONS = frozenset(
