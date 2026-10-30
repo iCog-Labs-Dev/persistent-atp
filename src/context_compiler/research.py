@@ -38,6 +38,7 @@ from .contracts import (
 )
 from .errors import ContextValidationError
 from .finalize import finalize_packet
+from .selection import REASON_OVER_TEXT_BUDGET, duplicate_reason
 
 DEFAULT_COMPILER_VERSION = "context/1"
 DEFAULT_RENDERING_VERSION = "text/1"
@@ -369,7 +370,7 @@ def compile_research(
     for key, category, src in candidates:
         signature = _signature(category, src)
         if signature in seen:
-            decide(src, False, f"duplicate of {seen[signature]}")
+            decide(src, False, duplicate_reason(seen[signature]))
         else:
             seen[signature] = src.ref.source_id
             supporting.append((key, category, src))
@@ -431,7 +432,7 @@ def compile_research(
         if src.ref.source_id in kept_ids:
             decide(src, True, f"supporting {category}")
         else:
-            decide(src, False, "dropped: over text budget")
+            decide(src, False, REASON_OVER_TEXT_BUDGET)
 
     # ---- finalize -----------------------------------------------------------
     ordered_decisions = (

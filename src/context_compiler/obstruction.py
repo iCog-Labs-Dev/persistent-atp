@@ -23,9 +23,12 @@ Two properties are load bearing:
   bundle source get a ``SelectionDecision`` recording whether they reached
   the packet and why.
 
-The text-budgeting helpers at the top of this module are deliberately small
-and self-contained so they can move into a shared budgeting module when the
-research compiler lands.
+Text budgeting and the optional-context policy are shared with the other
+compilers (:mod:`context_compiler.budgeting`, :mod:`context_compiler.selection`).
+Mandatory sections (theorem kernel, identity, observed failures, suspected
+causes, research questions) are never dropped or truncated: if they alone exceed the text
+budget, compilation raises ``ContextValidationError``.  Optional sections drop
+in priority order: attempts, then diagnostics, then the source listing.
 """
 
 from __future__ import annotations
@@ -55,8 +58,14 @@ from .contracts import (
     TextBudget,
     TheoremKernel,
 )
+from .budgeting import Section, fit_sections
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
+from .selection import (
+    REASON_OVER_FAILED_STATE_LIMIT,
+    REASON_OVER_TEXT_BUDGET,
+    duplicate_reason,
+)
 
 __all__ = [
     "ArtifactReader",
@@ -492,6 +501,7 @@ class _Section:
     lines: tuple[str, ...]
     mandatory: bool
     source_ids: tuple[str, ...] = ()
+    priority: int = 0  # optional sections only; lower = kept first
 
 
 @dataclass(frozen=True)
@@ -759,7 +769,13 @@ def _select_states(
     repeated_failure_family: str | None,
     frontier: frozenset[str],
     named: frozenset[str],
-) -> tuple[FailedState, ...]:
+) -> tuple[tuple[FailedState, ...], dict[str, str]]:
+    """Pick the failed states to show, and say why ranked ones were left out.
+
+    The second element maps the id of every *ranked but unselected* state to
+    its exclusion reason: a duplicate of a selected state's semantic
+    signature, or over the failed-state limit.
+    """
     failing: dict[str, list[AttemptEvidence]] = {}
     for attempt in records.attempts:
         if attempt.executor_result is not ExecutorResult.LEAN_ACCEPTED:
@@ -797,16 +813,20 @@ def _select_states(
     ranked.sort(key=lambda item: item[:4])
 
     selected: list[FailedState] = []
-    seen_signatures: set[str] = set()
+    seen_signatures: dict[str, str] = {}
+    left_out: dict[str, str] = {}
     for _, _, _, _, state in ranked:
+        signature = state.semantic_signature
+        if signature is not None and signature in seen_signatures:
+            left_out[state.state_id] = duplicate_reason(seen_signatures[signature])
+            continue
         if len(selected) >= max_failed_states:
-            break
-        if state.semantic_signature is not None:
-            if state.semantic_signature in seen_signatures:
-                continue
-            seen_signatures.add(state.semantic_signature)
+            left_out[state.state_id] = REASON_OVER_FAILED_STATE_LIMIT
+            continue
+        if signature is not None:
+            seen_signatures[signature] = state.state_id
         selected.append(state)
-    return tuple(selected)
+    return tuple(selected), left_out
 
 
 def _derive_suspected(
@@ -1127,21 +1147,31 @@ def _render(sections: Sequence[_Section]) -> str:
 def _fit_to_budget(
     sections: Sequence[_Section], budget: TextBudget, counter: TokenCounter
 ) -> tuple[str, tuple[str, ...]]:
-    kept = list(sections)
-    dropped: list[str] = []
-    while True:
-        text = _render(kept)
-        if counter.count(text) <= budget.max_tokens:
-            return text, tuple(dropped)
-        optional = [i for i, section in enumerate(kept) if not section.mandatory]
-        if not optional:
-            break
-        index = optional[-1]
-        dropped.append(kept[index].title)
-        kept.pop(index)
-    raise ContextValidationError(
-        "mandatory obstruction sections exceed the text budget"
+    """Fit sections to ``budget`` with the shared policy.
+
+    Returns the rendered text and the titles of the optional sections that
+    were dropped.  Raises if the mandatory sections alone do not fit.
+    """
+    fit = fit_sections(
+        [
+            Section(
+                key=section.title,
+                heading=section.title,
+                body="\n".join(section.lines),
+                priority=section.priority,
+                mandatory=section.mandatory,
+            )
+            for section in sections
+        ],
+        budget,
+        counter,
+        render=_render_fitted,
     )
+    return fit.text, tuple(section.key for section in fit.dropped)
+
+
+def _render_fitted(sections: Sequence[Section]) -> str:
+    return "\n\n".join(f"{section.heading}\n{section.body}" for section in sections)
 
 
 def _identity_status(body: Mapping[str, Any], records: _Records) -> str:
@@ -1207,7 +1237,7 @@ def compile_obstruction(
         )
     )
     repeated_family = _repeated_failure_family(records, records.attempts)
-    selected = _select_states(
+    selected, left_out = _select_states(
         records,
         max_failed_states=max_failed_states,
         repeated_failure_family=repeated_family,
@@ -1294,6 +1324,7 @@ def compile_obstruction(
             selected_ids=set(payload.selected_state_ids),
             section_of=_section_index(sections),
             dropped=set(dropped),
+            left_out=left_out,
         ),
     )
 
@@ -1419,12 +1450,14 @@ def _build_sections(
             lines=_render_attempts(payload.observed),
             mandatory=False,
             source_ids=attempt_sources,
+            priority=1,
         ),
         _Section(
             title=_DIAGNOSTICS_TITLE,
             lines=_render_diagnostics(payload.observed),
             mandatory=False,
             source_ids=diagnostic_sources,
+            priority=2,
         ),
         _Section(
             title=_SUSPECTED_TITLE,
@@ -1441,6 +1474,7 @@ def _build_sections(
             lines=_render_sources(bundle),
             mandatory=False,
             source_ids=tuple(source.source_id for source in bundle.sources),
+            priority=3,
         ),
     )
 
@@ -1471,6 +1505,7 @@ def _decisions(
     selected_ids: set[str],
     section_of: Mapping[str, str],
     dropped: set[str],
+    left_out: Mapping[str, str],
 ) -> tuple[SelectionDecision, ...]:
     state_status = {
         state.source_id: state.status.value for state in records.states
@@ -1515,7 +1550,10 @@ def _decisions(
             else:
                 included, reason = (
                     False,
-                    "not selected: beyond the small relevant set",
+                    left_out.get(
+                        source.source_id,
+                        "not selected: beyond the small relevant set",
+                    ),
                 )
         elif source.source_type == ATTEMPT_TYPE:
             status = attempt_status[source.source_id]
@@ -1539,7 +1577,7 @@ def _decisions(
                 included, reason = False, "recorded obstruction or run not used"
 
         if included and section is not None and section in dropped:
-            included, reason = False, "excluded: omitted to fit text budget"
+            included, reason = False, REASON_OVER_TEXT_BUDGET
 
         decisions.append(
             SelectionDecision(

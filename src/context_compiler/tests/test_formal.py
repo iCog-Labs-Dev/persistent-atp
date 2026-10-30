@@ -12,6 +12,7 @@ from shared.vocab import WorkerClass
 
 from context_compiler.contracts import (
     CompileRequest,
+    FormalContextLimits,
     FormalExecutionLimits,
     PacketKind,
     SourceBundle,
@@ -19,6 +20,11 @@ from context_compiler.contracts import (
     TheoremKernel,
 )
 from context_compiler.errors import ContextValidationError
+from context_compiler.selection import (
+    REASON_OVER_PREMISE_LIMIT,
+    REASON_OVER_PRIOR_RUN_LIMIT,
+    REASON_OVER_TRANSPOSITION_LIMIT,
+)
 from context_compiler.obstruction import MappingArtifactReader
 from context_compiler.formal import (
     CheckpointPolicy,
@@ -414,6 +420,178 @@ class FormalCompilerTests(unittest.TestCase):
         extra = {"prem-v": {"lean_name": "Nat.add_comm", "statement": "s"}}
         with self.assertRaises(ContextValidationError):
             compile_formal(*make(extra))
+
+
+def many(count_premises=0, count_runs=0, count_transpositions=0):
+    """Extra bodies/accessibility for oversized candidate collections."""
+    extra, names = {}, set(ACCESS.accessible)
+    for i in range(count_premises):
+        name = f"Lib.lemma_{i:02d}"
+        names.add(name)
+        extra[f"prem-v{i:02d}"] = {"lean_name": name, "statement": f"L{i}",
+                                  "status": "lean-verified", "_type": "premise"}
+    for i in range(count_runs):
+        rid = f"{P}/fr-{20 + i}"
+        extra[rid] = {"run_id": rid, "declaration_id": DECL, "disposition": "stagnated",
+                      "environment_hash": h("lake"), "frontier_state_ids": [ROOT],
+                      "_type": "formal-run"}
+    for i in range(count_transpositions):
+        extra[f"tr-n{i:02d}"] = {"from_state_id": f"{P}/fs-{30 + i}",
+                                 "to_state_id": f"{P}/fs-{60 + i}", "accepted": True,
+                                 "_type": "transposition"}
+    return extra, PremiseAccessibility(accessible=frozenset(names),
+                                       unavailable=dict(ACCESS.unavailable))
+
+
+def formal(limits, *, extra=None, access=None, run_id=RUN):
+    request, bundle, reader, task, default_access = make(extra, run_id=run_id)
+    return compile_formal(request, bundle, reader, task, access or default_access,
+                          context_limits=limits)
+
+
+class FormalContextLimitTests(unittest.TestCase):
+    def test_contract_validation(self):
+        FormalContextLimits(0, 0, 0)
+        for bad in (-1, True, 1.5, "3"):
+            with self.assertRaises(ContextValidationError):
+                FormalContextLimits(bad, 1, 1)
+            with self.assertRaises(ContextValidationError):
+                FormalContextLimits(1, bad, 1)
+            with self.assertRaises(ContextValidationError):
+                FormalContextLimits(1, 1, bad)
+        with self.assertRaises(ContextValidationError):
+            compile_formal(*make(), context_limits=(1, 1, 1))
+
+    def test_generous_limits_change_nothing(self):
+        unlimited = compile_formal(*make())
+        limited = formal(FormalContextLimits(100, 100, 100))
+        self.assertEqual(limited.packet_digest, unlimited.packet_digest)
+        self.assertEqual(limited.manifest["sources"], unlimited.manifest["sources"])
+
+    def test_no_limits_keeps_manifest_budgets_unchanged(self):
+        out = compile_formal(*make())
+        self.assertNotIn("context_limits", out.manifest["budgets"])
+
+    def test_limits_are_recorded_in_the_manifest(self):
+        out = formal(FormalContextLimits(5, 2, 1))
+        self.assertEqual(out.manifest["budgets"]["context_limits"],
+                         {"max_premises": 5, "max_prior_runs": 2, "max_transpositions": 1})
+        self.assertEqual(out.manifest["budgets"]["formal_execution"],
+                         {"max_steps": 500, "wall_clock_ms": 60000})
+
+    def test_premise_limit_keeps_verified_before_suggested(self):
+        out = formal(FormalContextLimits(1, 10, 10))
+        self.assertEqual([e.lean_name for e in out.payload.verified_premises],
+                         ["Nat.add_comm"])
+        self.assertEqual(out.payload.suggested_premises, ())
+        d = decisions(out)
+        self.assertTrue(d["prem-v"].included)
+        for dropped in ("prem-s", "prem-c"):
+            self.assertFalse(d[dropped].included)
+            self.assertEqual(d[dropped].reason, REASON_OVER_PREMISE_LIMIT)
+
+    def test_premise_limit_zero_drops_every_premise(self):
+        out = formal(FormalContextLimits(0, 10, 10))
+        self.assertEqual(out.payload.verified_premises, ())
+        self.assertEqual(out.payload.suggested_premises, ())
+        self.assertEqual(decisions(out)["prem-v"].reason, REASON_OVER_PREMISE_LIMIT)
+
+    def test_oversized_premise_collection_is_cut_deterministically(self):
+        extra, access = many(count_premises=30)
+        out = formal(FormalContextLimits(10, 10, 10), extra=extra, access=access)
+        names = [e.lean_name for e in out.payload.verified_premises]
+        self.assertEqual(len(names), 10)
+        self.assertEqual(names, sorted(names))
+        self.assertEqual(out.payload.suggested_premises, ())  # verified fill the limit
+        d = decisions(out)
+        included = [i for i, x in d.items() if x.included and i.startswith("prem-")]
+        over = [i for i, x in d.items() if x.reason == REASON_OVER_PREMISE_LIMIT]
+        self.assertEqual(len(included), 10)
+        self.assertEqual(len(over), 1 + 1 + 21)  # prem-s, prem-c, 21 extra lemmas
+
+    def test_oversized_premise_collection_digest_is_stable(self):
+        digests = set()
+        for _ in range(3):
+            extra, access = many(count_premises=30)
+            digests.add(formal(FormalContextLimits(10, 10, 10),
+                               extra=extra, access=access).packet_digest)
+        self.assertEqual(len(digests), 1)
+
+    def test_prior_runs_keep_the_most_recent_first(self):
+        extra, _ = many(count_runs=5)
+        out = formal(FormalContextLimits(10, 2, 10), extra=extra)
+        kept = [r.run_id for r in out.payload.prior_runs]
+        self.assertEqual(kept, [f"{P}/fr-23", f"{P}/fr-24"])
+        d = decisions(out)
+        for rid in (f"{P}/fr-2", f"{P}/fr-20", f"{P}/fr-21", f"{P}/fr-22"):
+            self.assertFalse(d[rid].included)
+            self.assertEqual(d[rid].reason, REASON_OVER_PRIOR_RUN_LIMIT)
+
+    def test_prior_run_limit_zero(self):
+        out = formal(FormalContextLimits(10, 0, 10))
+        self.assertEqual(out.payload.prior_runs, ())
+        self.assertEqual(decisions(out)[f"{P}/fr-2"].reason, REASON_OVER_PRIOR_RUN_LIMIT)
+
+    def test_resumed_run_is_mandatory_even_when_it_is_old(self):
+        extra, _ = many(count_runs=5)
+        out = formal(FormalContextLimits(10, 2, 10), extra=extra, run_id=f"{P}/fr-2")
+        kept = [r.run_id for r in out.payload.prior_runs]
+        self.assertEqual(kept, [f"{P}/fr-2", f"{P}/fr-24"])  # resumed + 1 most recent
+        d = decisions(out)
+        self.assertEqual(d[f"{P}/fr-2"].reason, "resumed run")
+        self.assertTrue(out.payload.resume)
+
+    def test_resumed_run_survives_a_zero_prior_run_limit(self):
+        out = formal(FormalContextLimits(10, 0, 10), run_id=f"{P}/fr-2")
+        self.assertEqual([r.run_id for r in out.payload.prior_runs], [f"{P}/fr-2"])
+        self.assertTrue(decisions(out)[f"{P}/fr-2"].included)
+
+    def test_transposition_limit_prefers_the_root_state(self):
+        extra, _ = many(count_transpositions=4)
+        out = formal(FormalContextLimits(10, 10, 1), extra=extra)
+        self.assertEqual([t.source_id for t in out.payload.transpositions], ["tr-1"])
+        d = decisions(out)
+        for i in range(4):
+            self.assertEqual(d[f"tr-n{i:02d}"].reason, REASON_OVER_TRANSPOSITION_LIMIT)
+
+    def test_transposition_limit_zero(self):
+        out = formal(FormalContextLimits(10, 10, 0))
+        self.assertEqual(out.payload.transpositions, ())
+        self.assertEqual(decisions(out)["tr-1"].reason, REASON_OVER_TRANSPOSITION_LIMIT)
+
+    def test_duplicate_transpositions_collapse_to_the_lowest_id(self):
+        extra = {"tr-0": {"from_state_id": f"{P}/fs-2", "to_state_id": ROOT,
+                          "accepted": True, "_type": "transposition"}}
+        out = formal(None, extra=extra)
+        self.assertEqual([t.source_id for t in out.payload.transpositions], ["tr-0"])
+        d = decisions(out)
+        self.assertEqual(d["tr-1"].reason, "duplicate of tr-0")
+        self.assertFalse(d["tr-1"].included)
+
+    def test_mandatory_context_is_never_limited_away(self):
+        out = formal(FormalContextLimits(0, 0, 0))
+        d = decisions(out)
+        for mandatory in (DECL, ROOT, "env-1", "kern"):
+            self.assertTrue(d[mandatory].included, mandatory)
+        envelope = json.loads(out.packet.content)
+        self.assertEqual(envelope["context"]["root_state"]["state_id"], ROOT)
+        self.assertEqual(envelope["context"]["environment"]["environment_id"], "env-1")
+        self.assertEqual(envelope["context"]["kernel"]["kernel_id"], "kern")
+
+    def test_every_source_still_gets_exactly_one_decision(self):
+        extra, access = many(count_premises=12, count_runs=6, count_transpositions=6)
+        request, bundle, reader, task, _ = make(extra)
+        out = compile_formal(request, bundle, reader, task, access,
+                             context_limits=FormalContextLimits(3, 2, 2))
+        ids = [x.source_id for x in out.result.selection_decisions]
+        self.assertEqual(sorted(ids), sorted([s.source_id for s in bundle.sources] + ["kern"]))
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(out.manifest["sources"]), len(ids))
+
+    def test_limits_change_the_digest_only_through_the_packet(self):
+        loose = formal(FormalContextLimits(100, 100, 100))
+        tight = formal(FormalContextLimits(0, 0, 0))
+        self.assertNotEqual(loose.packet_digest, tight.packet_digest)
 
 
 if __name__ == "__main__":

@@ -67,6 +67,22 @@ class FormalExecutionLimits:
 
 
 @dataclass(frozen=True)
+class FormalContextLimits:
+    """Item-count limits on optional formal context (not execution limits).
+
+    A limit of ``0`` is allowed and means "include none of this kind".
+    """
+
+    max_premises: int
+    max_prior_runs: int
+    max_transpositions: int
+
+    def __post_init__(self) -> None:
+        for name in ("max_premises", "max_prior_runs", "max_transpositions"):
+            _require_non_negative_integer(name, getattr(self, name))
+
+
+@dataclass(frozen=True)
 class CompileRequest:
     task_id: str
     proof_id: str

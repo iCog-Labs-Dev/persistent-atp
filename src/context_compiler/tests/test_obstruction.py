@@ -19,6 +19,10 @@ from context_compiler.contracts import (
     TheoremKernel,
 )
 from context_compiler.errors import ContextValidationError
+from context_compiler.selection import (
+    REASON_OVER_FAILED_STATE_LIMIT,
+    REASON_OVER_TEXT_BUDGET,
+)
 from context_compiler.obstruction import (
     CharHeuristicTokenCounter,
     MappingArtifactReader,
@@ -550,7 +554,9 @@ def test_budget_is_respected_and_cheapest_sections_drop_first():
     full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     assert counter.count(full.packet.content) <= 1200
 
-    budget = 700
+    # One token under the full packet: only the lowest-priority optional
+    # section (the source listing) has to go.
+    budget = counter.count(full.packet.content) - 1
     case = scenario(text_budget=TextBudget(budget))
     clipped = compile_obstruction(
         case.request, case.bundle, case.reader, case.task
@@ -564,17 +570,113 @@ def test_budget_is_respected_and_cheapest_sections_drop_first():
         assumption in clipped.packet.content for assumption in KERNEL.assumptions
     )
     assert "OBSERVED FAILURES" in clipped.packet.content
-    reasons = {decision.reason for decision in clipped.result.selection_decisions}
-    assert "excluded: omitted to fit text budget" in reasons
+    assert "ATTEMPTED TACTICS" in clipped.packet.content
+    assert "RECURRING DIAGNOSTICS" in clipped.packet.content
+    # The source listing only restates refs the manifest already carries, so
+    # dropping it excludes no source: every decision matches the full packet.
+    full_decisions = {d.source_id: d for d in full.result.selection_decisions}
+    assert {d.source_id: d for d in clipped.result.selection_decisions} == full_decisions
 
 
 def test_tiny_budget_cannot_truncate_the_mandatory_kernel():
     case = scenario(text_budget=TextBudget(60))
     with pytest.raises(
         ContextValidationError,
-        match="mandatory obstruction sections exceed the text budget",
+        match="mandatory .*sections exceed the text budget",
     ):
         compile_obstruction(case.request, case.bundle, case.reader, case.task)
+
+
+def _tokens(text):
+    return CharHeuristicTokenCounter().count(text)
+
+
+def _compile_with_budget(budget):
+    case = scenario(text_budget=TextBudget(budget))
+    return compile_obstruction(case.request, case.bundle, case.reader, case.task)
+
+
+def _smallest_budget():
+    """Smallest text budget the default scenario compiles under."""
+    low, high = 1, 5000
+    while low < high:
+        mid = (low + high) // 2
+        try:
+            _compile_with_budget(mid)
+        except ContextValidationError:
+            low = mid + 1
+        else:
+            high = mid
+    return low
+
+
+def test_optional_sections_drop_in_priority_order():
+    floor = _smallest_budget()
+    # Exactly the mandatory sections: every optional section is dropped.
+    bare = _compile_with_budget(floor)
+    for title in ("ATTEMPTED TACTICS", "RECURRING DIAGNOSTICS", "SOURCE ARTIFACTS"):
+        assert title not in bare.packet.content
+    for title in ("OBSERVED FAILURES", "SUSPECTED CAUSES", "RESEARCH QUESTIONS"):
+        assert title in bare.packet.content
+
+    # Enough room for attempts but not diagnostics: attempts win by priority.
+    attempts_only = bare.packet.content
+    full = compile_default()
+    attempts_block = full.packet.content.split("ATTEMPTED TACTICS")[1].split(
+        "RECURRING DIAGNOSTICS"
+    )[0]
+    budget = floor + _tokens("ATTEMPTED TACTICS" + attempts_block) + 2
+    clipped = _compile_with_budget(budget)
+    assert "ATTEMPTED TACTICS" in clipped.packet.content
+    assert "RECURRING DIAGNOSTICS" not in clipped.packet.content
+    assert "SOURCE ARTIFACTS" not in clipped.packet.content
+    by_id = {d.source_id: d for d in clipped.result.selection_decisions}
+    assert by_id["p1/ta-6"].included
+    assert not by_id["p1/dg-1"].included
+    assert by_id["p1/dg-1"].reason == REASON_OVER_TEXT_BUDGET
+    assert attempts_only != clipped.packet.content
+
+
+def test_mandatory_sections_are_never_truncated_or_dropped():
+    floor = _smallest_budget()
+    with pytest.raises(ContextValidationError, match="mandatory .*sections exceed"):
+        _compile_with_budget(floor - 1)
+    with pytest.raises(ContextValidationError, match="mandatory .*sections exceed"):
+        _compile_with_budget(60)
+
+
+def test_failed_states_over_the_limit_get_an_explicit_reason():
+    case = scenario()
+    compilation = compile_obstruction(
+        case.request, case.bundle, case.reader, case.task, max_failed_states=2
+    )
+    by_id = {d.source_id: d for d in compilation.result.selection_decisions}
+    selected = set(compilation.payload.selected_state_ids)
+    assert len(selected) == 2
+    over = [
+        d for d in by_id.values()
+        if d.reason == REASON_OVER_FAILED_STATE_LIMIT
+    ]
+    assert len(over) == 1 and not over[0].included
+    assert over[0].source_id not in selected
+
+
+def test_semantic_duplicate_state_names_its_survivor():
+    compilation = compile_default()
+    by_id = {d.source_id: d for d in compilation.result.selection_decisions}
+    assert not by_id["p1/fs-14"].included
+    assert by_id["p1/fs-14"].reason == "duplicate of p1/fs-10"
+
+
+def test_budgeted_compilation_is_deterministic():
+    counter = CharHeuristicTokenCounter()
+    case = scenario()
+    full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
+    budget = counter.count(full.packet.content) - 1
+    first = compile_default(text_budget=TextBudget(budget))
+    second = compile_default(text_budget=TextBudget(budget))
+    assert first.packet_digest == second.packet_digest
+    assert first.manifest == second.manifest
 
 
 def test_packet_kind_must_be_obstruction():

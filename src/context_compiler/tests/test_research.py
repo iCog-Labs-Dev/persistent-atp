@@ -14,6 +14,7 @@ from context_compiler.contracts import (
 )
 from context_compiler.errors import ContextValidationError
 from context_compiler.research import ResearchTask, compile_research
+from context_compiler.selection import REASON_OVER_TEXT_BUDGET
 
 CLAIM_A, CLAIM_B = "conjectural", "empirical"
 ATTEMPT = "refuted"
@@ -264,6 +265,100 @@ class ResearchCompilerTests(unittest.TestCase):
     def test_mandatory_overflow(self):
         with self.assertRaises(ContextValidationError):
             compile_research(*make(budget=20))
+
+
+def oversized(count=40):
+    """Many distinct failures, lemmas and alternative moves for state s1."""
+    extra = {}
+    for i in range(count):
+        extra[f"fx{i:02d}"] = {"status": ATTEMPT, "summary": f"Failure variant number {i}",
+                              "state_id": "s1", "_type": "attempt"}
+        extra[f"cx{i:02d}"] = {"status": CLAIM_A, "statement": f"Reusable lemma number {i}",
+                              "reusable": True, "state_id": "s1", "_type": "claim"}
+        extra[f"mx{i:02d}"] = {"status": MOVE, "description": f"Alternative approach {i}",
+                              "state_id": "s1", "required_claim_ids": [], "_type": "research-move"}
+    return extra
+
+
+MANDATORY_IDS = ("s1", "m1", "c1", "kern")
+
+
+class ResearchSelectionPolicyTests(unittest.TestCase):
+    def test_mandatory_context_is_always_included_under_any_feasible_budget(self):
+        floor = None
+        for budget in range(60, 400, 10):
+            try:
+                out = compile_research(*make(oversized(), budget=budget))
+            except ContextValidationError:
+                continue
+            floor = floor or budget
+            d = decisions(out)
+            for mandatory in MANDATORY_IDS:
+                self.assertTrue(d[mandatory].included, (budget, mandatory))
+            self.assertLessEqual(out.token_count, budget)
+        self.assertIsNotNone(floor)
+
+    def test_below_the_mandatory_floor_compilation_fails_loudly(self):
+        with self.assertRaisesRegex(ContextValidationError, "mandatory sections exceed"):
+            compile_research(*make(oversized(), budget=20))
+
+    def test_oversized_collection_every_source_included_or_explained(self):
+        request, bundle, reader, task = make(oversized(), budget=600)
+        out = compile_research(request, bundle, reader, task)
+        d = decisions(out)
+        self.assertEqual(len(out.result.selection_decisions), len(bundle.sources) + 1)
+        over = [x for x in d.values() if x.reason == REASON_OVER_TEXT_BUDGET]
+        self.assertGreater(len(over), 10)
+        self.assertTrue(all(not x.included for x in over))
+        for x in d.values():
+            self.assertTrue(x.reason.strip())
+        self.assertLessEqual(out.token_count, 600)
+
+    def test_budget_keeps_higher_priority_categories_first(self):
+        for budget in (400, 600, 900, 1500):
+            d = decisions(compile_research(*make(oversized(), budget=budget)))
+            counts = {
+                prefix: sum(1 for i, x in d.items() if i.startswith(prefix) and x.included)
+                for prefix in ("fx", "cx", "mx")
+            }
+            # Failures outrank lemmas, which outrank alternative moves: a lower
+            # category appears only once every higher one is fully included.
+            if counts["cx"]:
+                self.assertEqual(counts["fx"], 40, budget)
+            if counts["mx"]:
+                self.assertEqual(counts["cx"], 40, budget)
+        tight = decisions(compile_research(*make(oversized(), budget=400)))
+        self.assertTrue(any(i.startswith("fx") and x.included for i, x in tight.items()))
+        self.assertFalse(any(i.startswith("cx") and x.included for i, x in tight.items()))
+
+    def test_dropped_set_is_nested_as_the_budget_shrinks(self):
+        previous = None
+        for budget in (2000, 1200, 800, 600):
+            out = compile_research(*make(oversized(), budget=budget))
+            included = {s for s, x in decisions(out).items() if x.included}
+            if previous is not None:
+                self.assertTrue(included <= previous, budget)
+            previous = included
+
+    def test_identical_inputs_give_identical_packets_manifests_and_digests(self):
+        a = compile_research(*make(oversized(), budget=700))
+        b = compile_research(*make(oversized(), budget=700))
+        self.assertEqual(a.packet.content, b.packet.content)
+        self.assertEqual(a.manifest, b.manifest)
+        self.assertEqual(a.packet_digest, b.packet_digest)
+
+    def test_exact_duplicates_are_removed_deterministically_in_any_input_order(self):
+        extra = {
+            "fz1": {"status": ATTEMPT, "summary": "Union bound saturates",
+                    "state_id": "s1", "_type": "attempt"},
+            "fz0": {"status": ATTEMPT, "summary": "Union   bound saturates",
+                    "state_id": "s1", "_type": "attempt"},
+        }
+        d = decisions(compile_research(*make(extra)))
+        survivors = [i for i in ("f1", "fz0", "fz1") if d[i].included]
+        self.assertEqual(survivors, ["f1"])
+        self.assertEqual(d["fz0"].reason, "duplicate of f1")
+        self.assertEqual(d["fz1"].reason, "duplicate of f1")
 
 
 if __name__ == "__main__":

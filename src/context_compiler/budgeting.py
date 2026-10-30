@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Callable, Protocol, Sequence, runtime_checkable
 
 from .contracts import TextBudget
 from .errors import ContextValidationError
@@ -92,10 +92,16 @@ def truncate_at_whitespace(text: str, max_chars: int) -> str:
     return cut.rstrip()
 
 
+Renderer = Callable[[Sequence[Section]], str]
+
+
 def _fits(
-    sections: Sequence[Section], budget: int, counter: TokenCounter
+    sections: Sequence[Section],
+    budget: int,
+    counter: TokenCounter,
+    render: Renderer = render_sections,
 ) -> bool:
-    return counter.count(render_sections(sections)) <= budget
+    return counter.count(render(sections)) <= budget
 
 
 def _truncate_to_fit(
@@ -104,6 +110,7 @@ def _truncate_to_fit(
     position: int,
     budget: int,
     counter: TokenCounter,
+    render: Renderer = render_sections,
 ) -> Section | None:
     def trial(body: str) -> list[Section]:
         updated = replace(candidate, body=body)
@@ -114,7 +121,7 @@ def _truncate_to_fit(
         mid = (lo + hi) // 2
         cut = truncate_at_whitespace(candidate.body, mid)
         body = f"{cut}{TRUNCATION_MARKER}" if cut else ""
-        if cut and _fits(trial(body), budget, counter):
+        if cut and _fits(trial(body), budget, counter, render):
             best = replace(candidate, body=body)
             lo = mid + 1
         else:
@@ -126,8 +133,13 @@ def fit_sections(
     sections: Sequence[Section],
     budget: TextBudget,
     counter: TokenCounter,
+    render: Renderer = render_sections,
 ) -> FitResult:
-    """Fit ``sections`` into ``budget`` deterministically."""
+    """Fit ``sections`` into ``budget`` deterministically.
+
+    ``render`` turns the kept sections into packet text.  Compilers that keep
+    their own wire format pass it in; selection and budgeting stay shared.
+    """
     keys = [s.key for s in sections]
     if len(keys) != len(set(keys)):
         raise ContextValidationError("section keys must be unique")
@@ -138,7 +150,7 @@ def fit_sections(
     def ordered() -> list[Section]:
         return [chosen[s.key] for s in sections if s.key in chosen]
 
-    if not _fits(ordered(), budget.max_tokens, counter):
+    if not _fits(ordered(), budget.max_tokens, counter, render):
         raise ContextValidationError(
             "mandatory sections exceed the text budget"
         )
@@ -151,21 +163,21 @@ def fit_sections(
     for cand in optional:
         chosen[cand.key] = cand
         current = ordered()
-        if _fits(current, budget.max_tokens, counter):
+        if _fits(current, budget.max_tokens, counter, render):
             continue
         del chosen[cand.key]
         if cand.truncatable:
             before = ordered()
             position = sum(1 for s in before if index[s.key] < index[cand.key])
             shortened = _truncate_to_fit(
-                cand, before, position, budget.max_tokens, counter
+                cand, before, position, budget.max_tokens, counter, render
             )
             if shortened is not None:
                 chosen[cand.key] = shortened
                 truncated.append(cand.key)
 
     kept = tuple(ordered())
-    text = render_sections(kept)
+    text = render(kept)
     return FitResult(
         text=text,
         token_count=counter.count(text),

@@ -2,7 +2,7 @@ import hashlib
 import json
 from dataclasses import fields, is_dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Mapping
 
 from .contracts import CompiledResult, ContextPacket, SelectionDecision
 from .errors import ContextValidationError
@@ -38,8 +38,14 @@ def finalize_packet(
     *,
     compiler_version: str,
     rendering_version: str,
+    extra_budgets: Mapping[str, object] | None = None,
 ) -> CompiledResult:
-    """Attach a deterministic digest and provenance manifest to a packet."""
+    """Attach a deterministic digest and provenance manifest to a packet.
+
+    ``extra_budgets`` records additional selection limits (for example the
+    formal item-count limits) in the manifest.  The manifest is provenance
+    only; the digest covers the packet, so it is unaffected.
+    """
     if not isinstance(packet, ContextPacket):
         raise ContextValidationError("packet must be a ContextPacket")
     if not isinstance(selection_decisions, tuple):
@@ -73,6 +79,9 @@ def finalize_packet(
             "max_steps": packet.formal_limits.max_steps,
             "wall_clock_ms": packet.formal_limits.wall_clock_ms,
         }
+
+    if extra_budgets:
+        budgets.update(_json_value(dict(extra_budgets)))
 
     manifest = {
         "task_id": packet.task_id,

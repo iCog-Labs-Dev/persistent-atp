@@ -49,6 +49,7 @@ from .contracts import (
     CompiledResult,
     CompileRequest,
     ContextPacket,
+    FormalContextLimits,
     PacketKind,
     SelectionDecision,
     SourceBundle,
@@ -58,6 +59,14 @@ from .contracts import (
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
 from .obstruction import ArtifactReader
+from .selection import (
+    REASON_OVER_PREMISE_LIMIT,
+    REASON_OVER_PRIOR_RUN_LIMIT,
+    REASON_OVER_TRANSPOSITION_LIMIT,
+    apply_item_limit,
+    duplicate_reason,
+    trailing_ordinal,
+)
 
 __all__ = [
     "CheckpointPolicy",
@@ -527,9 +536,18 @@ def compile_formal(
     task: FormalTask,
     accessibility: PremiseAccessibility,
     *,
+    context_limits: FormalContextLimits | None = None,
     compiler_version: str = DEFAULT_COMPILER_VERSION,
     rendering_version: str = DEFAULT_RENDERING_VERSION,
 ) -> FormalCompilation:
+    """Compile a selected formal task into one formal-search packet.
+
+    Mandatory context (never limited, never dropped): theorem kernel, selected
+    declaration, root state, pinned environment, and the resumed run when
+    resuming.  Optional context (premises, prior runs, transpositions) is
+    ordered by the V1 policy in :mod:`context_compiler.selection` and cut to
+    ``context_limits`` when given; ``None`` keeps everything eligible.
+    """
     if not isinstance(request, CompileRequest):
         raise ContextValidationError("request must be a CompileRequest")
     if request.packet_kind is not PacketKind.FORMAL:
@@ -542,6 +560,8 @@ def compile_formal(
         raise ContextValidationError("task must be a FormalTask")
     if not isinstance(accessibility, PremiseAccessibility):
         raise ContextValidationError("accessibility must be a PremiseAccessibility")
+    if context_limits is not None and not isinstance(context_limits, FormalContextLimits):
+        raise ContextValidationError("context_limits must be FormalContextLimits")
 
     refs = sorted(bundle.sources, key=lambda r: r.source_id)
     sources = {ref.source_id: _load(ref, reader) for ref in refs}
@@ -605,7 +625,10 @@ def compile_formal(
                 "resumed run used a different environment than the pinned one"
             )
 
-    prior_runs: list[PriorRun] = []
+    # Eligible prior runs, then the V1 limit.  The resumed run is mandatory
+    # (resuming without it is meaningless): it always comes first and uses one
+    # slot of the limit, but is never itself dropped by it.
+    eligible_runs: list[tuple[_Source, PriorRun]] = []
     for src in sources.values():
         if src.ref.source_type != RUN_TYPE:
             continue
@@ -615,34 +638,89 @@ def compile_formal(
         elif body.get("environment_hash") not in (None, env_hash):
             decide(src, False, "run used a different environment")
         else:
-            decide(src, True, "resumed run" if src is resumed else "prior run of this declaration")
             summary = body.get("summary")
-            prior_runs.append(
-                PriorRun(
-                    run_id=src.ref.source_id,
-                    disposition=body.get("disposition"),
-                    environment_hash=body.get("environment_hash"),
-                    frontier_state_ids=_str_list("frontier_state_ids", body.get("frontier_state_ids")),
-                    summary=summary if isinstance(summary, str) and summary.strip() else None,
+            eligible_runs.append(
+                (
+                    src,
+                    PriorRun(
+                        run_id=src.ref.source_id,
+                        disposition=body.get("disposition"),
+                        environment_hash=body.get("environment_hash"),
+                        frontier_state_ids=_str_list(
+                            "frontier_state_ids", body.get("frontier_state_ids")
+                        ),
+                        summary=summary if isinstance(summary, str) and summary.strip() else None,
+                    ),
                 )
             )
+    eligible_runs.sort(
+        key=lambda item: (
+            item[0] is not resumed,
+            -trailing_ordinal(item[0].ref.source_id),
+            item[0].ref.source_id,
+        )
+    )
+    mandatory_runs = [item for item in eligible_runs if item[0] is resumed]
+    optional_runs = [item for item in eligible_runs if item[0] is not resumed]
+    run_slots = (
+        None
+        if context_limits is None
+        else max(context_limits.max_prior_runs - len(mandatory_runs), 0)
+    )
+    run_selection = apply_item_limit(optional_runs, run_slots)
+    prior_runs: list[PriorRun] = []
+    for src, prior in mandatory_runs:
+        decide(src, True, "resumed run")
+        prior_runs.append(prior)
+    for src, prior in run_selection.kept:
+        decide(src, True, "prior run of this declaration")
+        prior_runs.append(prior)
+    for src, _ in run_selection.dropped:
+        decide(src, False, REASON_OVER_PRIOR_RUN_LIMIT)
 
     # ---- transpositions ------------------------------------------------------
-    transpositions: list[TranspositionEntry] = []
+    # Accepted transpositions: exact duplicates (same from/to pair) collapse to
+    # the lowest source_id; those touching the root state rank first.
+    accepted: list[_Source] = []
     for src in sources.values():
         if src.ref.source_type != TRANSPOSITION_TYPE:
             continue
         if src.body["accepted"]:
-            decide(src, True, "accepted transposition")
-            transpositions.append(
-                TranspositionEntry(
-                    source_id=src.ref.source_id,
-                    from_state_id=src.body["from_state_id"],
-                    to_state_id=src.body["to_state_id"],
-                )
-            )
+            accepted.append(src)
         else:
             decide(src, False, "transposition not accepted")
+    accepted.sort(key=lambda s_: s_.ref.source_id)
+    unique_transpositions: list[_Source] = []
+    first_for_pair: dict[tuple[str, str], str] = {}
+    for src in accepted:
+        pair = (src.body["from_state_id"], src.body["to_state_id"])
+        if pair in first_for_pair:
+            decide(src, False, duplicate_reason(first_for_pair[pair]))
+        else:
+            first_for_pair[pair] = src.ref.source_id
+            unique_transpositions.append(src)
+    unique_transpositions.sort(
+        key=lambda s_: (
+            task.root_state_id not in (s_.body["from_state_id"], s_.body["to_state_id"]),
+            s_.ref.source_id,
+        )
+    )
+    transposition_selection = apply_item_limit(
+        unique_transpositions,
+        None if context_limits is None else context_limits.max_transpositions,
+    )
+    transpositions: list[TranspositionEntry] = []
+    for src in transposition_selection.kept:
+        decide(src, True, "accepted transposition")
+        transpositions.append(
+            TranspositionEntry(
+                source_id=src.ref.source_id,
+                from_state_id=src.body["from_state_id"],
+                to_state_id=src.body["to_state_id"],
+            )
+        )
+    for src in transposition_selection.dropped:
+        decide(src, False, REASON_OVER_TRANSPOSITION_LIMIT)
 
     # ---- premises ------------------------------------------------------------
     candidates: dict[str, list[_Source]] = {}
@@ -667,12 +745,15 @@ def compile_formal(
         else:
             candidates.setdefault(name, []).append(src)
 
-    verified: list[PremiseEntry] = []
-    suggested: list[PremiseEntry] = []
+    # One winner per lean_name (verified beats suggested, then lowest
+    # source_id).  Winners are ordered verified-first, then by lean_name, and
+    # only then cut to the premise limit, so a limit never displaces a
+    # verified premise in favour of a suggested one.
+    winners: list[tuple[_Source, PremiseEntry, bool]] = []
     for name in sorted(candidates):
         group = sorted(
             candidates[name],
-            key=lambda s: (s.status not in _VERIFIED, s.ref.source_id),
+            key=lambda s_: (s_.status not in _VERIFIED, s_.ref.source_id),
         )
         winner = group[0]
         is_verified = winner.status in _VERIFIED
@@ -688,17 +769,27 @@ def compile_formal(
             source_hash=winner.ref.content_hash,
             basis=basis,
         )
+        winners.append((winner, entry, is_verified))
+        for loser in group[1:]:
+            if is_verified and loser.status not in _VERIFIED:
+                decide(loser, False, f"superseded by verified premise {winner.ref.source_id}")
+            else:
+                decide(loser, False, duplicate_reason(winner.ref.source_id))
+    winners.sort(key=lambda item: (not item[2], item[1].lean_name))
+    premise_selection = apply_item_limit(
+        winners, None if context_limits is None else context_limits.max_premises
+    )
+    verified: list[PremiseEntry] = []
+    suggested: list[PremiseEntry] = []
+    for winner, entry, is_verified in premise_selection.kept:
         (verified if is_verified else suggested).append(entry)
         decide(
             winner,
             True,
             "verified premise" if is_verified else "suggested premise (unverified)",
         )
-        for loser in group[1:]:
-            if is_verified and loser.status not in _VERIFIED:
-                decide(loser, False, f"superseded by verified premise {winner.ref.source_id}")
-            else:
-                decide(loser, False, f"duplicate of {winner.ref.source_id}")
+    for winner, _, _ in premise_selection.dropped:
+        decide(winner, False, REASON_OVER_PREMISE_LIMIT)
 
     # ---- everything else -----------------------------------------------------
     for src in sources.values():
@@ -821,5 +912,16 @@ def compile_formal(
         tuple(ordered),
         compiler_version=compiler_version,
         rendering_version=rendering_version,
+        extra_budgets=(
+            None
+            if context_limits is None
+            else {
+                "context_limits": {
+                    "max_premises": context_limits.max_premises,
+                    "max_prior_runs": context_limits.max_prior_runs,
+                    "max_transpositions": context_limits.max_transpositions,
+                }
+            }
+        ),
     )
     return FormalCompilation(payload=payload, packet=packet, result=result)
