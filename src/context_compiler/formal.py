@@ -480,10 +480,10 @@ def _load(ref: SourceRef, reader: ArtifactReader) -> _Source:
         status = _status(body)
         if status not in values(FormalStateStatus):
             raise ContextValidationError("status must be a formal state status")
-        
+
         if body.get("environment_id") is not None:
             _require_str("environment_id", body.get("environment_id"))
-            
+
         _require_sha256("exact_state_hash", body.get("exact_state_hash"))
         _require_sha256("semantic_signature", body.get("semantic_signature"))
         for optional_hash in ("context_digest", "environment_hash"):

@@ -58,4 +58,4 @@ class ProofSnapshot:
             raise StaleSnapshotError(
                 f"request expects revision {request.base_revision}, "
                 f"snapshot is at revision {self.revision}"
-            )   
+            )

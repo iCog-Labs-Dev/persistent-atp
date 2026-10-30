@@ -1,4 +1,4 @@
-"""Research context compiler 
+"""Research context compiler
 
 ``compile_research`` turns a selected research task and a ``SourceBundle`` into
 one rendered ``ContextPacket`` inside the worker's text budget, plus a manifest
@@ -280,7 +280,7 @@ def compile_research(
     selected_move = sources.get(task.selected_move_id)
     if selected_move is None or selected_move.ref.source_type != MOVE_TYPE:
         raise ContextValidationError("selected move is not a research-move in the bundle")
-    
+
     if selected_move.state_id != task.active_state_id:
         raise ContextValidationError(
             f"selected move {task.selected_move_id} belongs to state "
