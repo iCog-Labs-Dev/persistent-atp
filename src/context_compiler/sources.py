@@ -6,7 +6,8 @@ them in the shape the compilers already consume: a ``SourceBundle`` of
 
 The reader only reads. IDs, statuses and field values are copied from the
 committed records exactly as they are; nothing is ranked, summarised or
-filtered by relevance (that is the compilers' job). Anything it could not
+filtered by relevance (that is the compilers' job). Bundle emission is limited
+to source types accepted by the requested compiler. Anything it could not
 retrieve is reported explicitly, never dropped silently.
 """
 
@@ -33,6 +34,7 @@ from .snapshot import ProofSnapshot
 __all__ = [
     "ArtifactSource",
     "DEFAULT_RELATIONS",
+    "EMITTABLE_SOURCE_TYPES",
     "LABEL_TO_SOURCE_TYPE",
     "MissingSource",
     "RetrievalPlan",
@@ -56,6 +58,30 @@ LABEL_TO_SOURCE_TYPE: Mapping[str, str] = {
 }
 """Graph label -> the ``source_type`` string the compilers expect. Labels not
 listed here are walked through but never emitted as sources."""
+
+EMITTABLE_SOURCE_TYPES: Mapping[PacketKind, frozenset[str]] = {
+    PacketKind.RESEARCH: frozenset(
+        {"claim", "research-state", "research-move", "attempt", "obstruction"}
+    ),
+    PacketKind.FORMAL: frozenset(
+        {
+            "formal-declaration",
+            "environment",
+            "formal-state",
+            "formal-run",
+        }
+    ),
+    PacketKind.OBSTRUCTION: frozenset(
+        {"formal-state", "attempt", "diagnostic", "obstruction", "formal-run"}
+    ),
+}
+"""Graph-derived source types this reader may emit for each compiler."""
+
+# There are currently no persisted ``Premise`` or ``Transposition`` graph
+# nodes. Persisted formal premises are ``FormalDeclaration`` nodes supplied as
+# retrieval seeds. Transpositions may still be supplied directly to the formal
+# compiler by another trusted component, but this reader never infers them
+# from similar ``FormalState.semantic_signature`` values.
 
 _IDENTITY_KEY: Mapping[str, str] = {
     "research-state": "state_id",
@@ -96,6 +122,15 @@ class ArtifactSource(Protocol):
 
 @dataclass(frozen=True)
 class RetrievalPlan:
+    """Bounded graph walk starting from the theorem and caller-selected IDs.
+
+    ``seed_ids`` must include task records that the committed graph cannot yet
+    discover through ``DEFAULT_RELATIONS``. Today that includes the selected
+    research state and move, formal premise declarations, and obstruction
+    attempts. The caller (normally the scheduler/coordinator or a retriever)
+    selects those IDs; this reader only resolves them at ``base_revision``.
+    """
+
     kernel_id: str
     seed_ids: tuple[str, ...] = ()
     max_depth: int = 3
@@ -191,6 +226,7 @@ def collect_sources(
     view = snapshot.view
     version = str(snapshot.revision)
     relations = (plan.relations or DEFAULT_RELATIONS)[request.packet_kind]
+    emittable = EMITTABLE_SOURCE_TYPES[request.packet_kind]
 
     refs: dict[str, SourceRef] = {}
     bodies: dict[str, Mapping[str, Any]] = {}
@@ -224,23 +260,27 @@ def collect_sources(
             note_missing(node_id, "node-not-found", parent)
             continue
 
+        if node_id == plan.kernel_id:
+            kernel, why = _kernel_from(node_id, node.label, node.fields)
+            if why:
+                note_missing(node_id, why, None)
+
         source_type = LABEL_TO_SOURCE_TYPE.get(node.label)
         if source_type is not None:
             fields = dict(node.fields)
             if source_type in _IDENTITY_KEY:
                 fields.setdefault(_IDENTITY_KEY[source_type], node_id)
-            try:
-                refs[node_id] = _make_ref(
-                    source_type, node_id, version, {"label": node.label, "fields": node.fields}
-                )
-            except (TypeError, ValueError):
-                note_missing(node_id, "unhashable-fields", parent)
-            else:
-                bodies[node_id] = fields
-                if node_id == plan.kernel_id:
-                    kernel, why = _kernel_from(node_id, node.label, node.fields)
-                    if why:
-                        note_missing(node_id, why, None)
+            bodies[node_id] = fields
+            if node_id != plan.kernel_id and source_type in emittable:
+                try:
+                    refs[node_id] = _make_ref(
+                        source_type,
+                        node_id,
+                        version,
+                        {"label": node.label, "fields": node.fields},
+                    )
+                except (TypeError, ValueError):
+                    note_missing(node_id, "unhashable-fields", parent)
 
         if depth >= plan.max_depth:
             neighbours = [
@@ -267,28 +307,29 @@ def collect_sources(
         kernel = None
 
     # ---- diagnostics: content-addressed artifacts named by records -------
-    for owner_id in sorted(list(bodies)):
-        owner = bodies[owner_id]
-        for key in _DIAGNOSTIC_FIELDS:
-            digest = owner.get(key)
-            if not (isinstance(digest, str) and _SHA256.fullmatch(digest)):
-                continue
-            if digest in bodies:
-                continue
-            if not artifacts.exists(digest):
-                note_missing(digest, "artifact-not-found", owner_id)
-                continue
-            raw = artifacts.get(digest)
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                note_missing(digest, "artifact-not-utf8", owner_id)
-                continue
-            body: dict[str, Any] = {"artifact_hash": digest, "text": text}
-            if isinstance(owner.get("failure_family"), str):
-                body["failure_family"] = owner["failure_family"]
-            refs[digest] = SourceRef("diagnostic", digest, digest, digest)
-            bodies[digest] = body
+    if "diagnostic" in emittable:
+        for owner_id in sorted(list(bodies)):
+            owner = bodies[owner_id]
+            for key in _DIAGNOSTIC_FIELDS:
+                digest = owner.get(key)
+                if not (isinstance(digest, str) and _SHA256.fullmatch(digest)):
+                    continue
+                if digest in bodies:
+                    continue
+                if not artifacts.exists(digest):
+                    note_missing(digest, "artifact-not-found", owner_id)
+                    continue
+                raw = artifacts.get(digest)
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    note_missing(digest, "artifact-not-utf8", owner_id)
+                    continue
+                body: dict[str, Any] = {"artifact_hash": digest, "text": text}
+                if isinstance(owner.get("failure_family"), str):
+                    body["failure_family"] = owner["failure_family"]
+                refs[digest] = SourceRef("diagnostic", digest, digest, digest)
+                bodies[digest] = body
 
     # ---- explicit incompleteness ----------------------------------------
     depth_only = sorted(n for n in depth_cut if n not in visited)
