@@ -6,7 +6,9 @@ worker: where search became stuck, with traceable evidence for a repair.
 The compiler accepts a :class:`~context_compiler.contracts.CompileRequest`
 (``packet_kind = obstruction``), a :class:`~context_compiler.contracts.SourceBundle`
 of complete source artifacts, and a read-only
-:class:`ArtifactReader` for their bodies. It returns a reusable structured
+:class:`ArtifactReader` for their bodies. An :class:`ObstructionTask` carries
+the mandatory theorem kernel separately from failure evidence. The compiler
+returns a reusable structured
 :class:`ObstructionPayload`, the rendered :class:`ContextPacket`, and the
 manifest produced by :func:`context_compiler.finalize.finalize_packet`.
 
@@ -17,8 +19,9 @@ Two properties are load bearing:
   holds unverified hypotheses, each carrying the :class:`EvidenceKind` it
   rests on.  The rendered packet keeps them under separate headings.
 * **Traceability.**  Every selected state, attempt and diagnostic must be
-  backed by a ``SourceRef`` in the bundle; every bundle source gets a
-  ``SelectionDecision`` recording whether it reached the packet and why.
+  backed by a ``SourceRef`` in the bundle.  The theorem kernel and every
+  bundle source get a ``SelectionDecision`` recording whether they reached
+  the packet and why.
 
 The text-budgeting helpers at the top of this module are deliberately small
 and self-contained so they can move into a shared budgeting module when the
@@ -50,6 +53,7 @@ from .contracts import (
     SourceBundle,
     SourceRef,
     TextBudget,
+    TheoremKernel,
 )
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
@@ -63,6 +67,7 @@ __all__ = [
     "MappingArtifactReader",
     "ObstructionCompilation",
     "ObstructionPayload",
+    "ObstructionTask",
     "ObservedFailure",
     "SOURCE_TYPES",
     "SourceBundle",
@@ -171,9 +176,8 @@ _DIAGNOSTICS_TITLE = "RECURRING DIAGNOSTICS (recorded)"
 _SUSPECTED_TITLE = "SUSPECTED CAUSES (unverified, not observed)"
 _QUESTIONS_TITLE = "RESEARCH QUESTIONS"
 _HEADER_TITLE = "OBSTRUCTION"
+_KERNEL_TITLE = "THEOREM KERNEL (canonical, mandatory)"
 _SOURCES_TITLE = "SOURCE ARTIFACTS (complete records)"
-
-_ELLIPSIS = "\u2026"
 
 _MAX_DERIVED_SUSPECTED = 2
 
@@ -321,6 +325,19 @@ class SuspectedCause:
             raise ContextValidationError("source_ids must be a tuple")
         for source_id in self.source_ids:
             _require_str("source_id", source_id)
+
+
+@dataclass(frozen=True)
+class ObstructionTask:
+    """Canonical theorem context for interpreting one formal obstruction."""
+
+    kernel: TheoremKernel
+    kernel_version: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kernel, TheoremKernel):
+            raise ContextValidationError("kernel must be a TheoremKernel")
+        _require_str("kernel_version", self.kernel_version)
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1028,21 @@ def _render_header(
     )
 
 
+def _render_kernel(task: ObstructionTask) -> tuple[str, ...]:
+    kernel = task.kernel
+    lines = [
+        f"id={kernel.kernel_id} version={task.kernel_version} "
+        f"status={kernel.status.value}",
+        f"statement: {kernel.statement}",
+        "assumptions:",
+    ]
+    if kernel.assumptions:
+        lines.extend(f"- {assumption}" for assumption in kernel.assumptions)
+    else:
+        lines.append("- (none)")
+    return tuple(lines)
+
+
 def _render_states(observed: Sequence[ObservedFailure]) -> tuple[str, ...]:
     lines: list[str] = []
     for failure in observed:
@@ -1092,27 +1124,6 @@ def _render(sections: Sequence[_Section]) -> str:
     )
 
 
-def _truncate_to_budget(text: str, budget: TextBudget, counter: TokenCounter) -> str:
-    if counter.count(text + _ELLIPSIS) <= budget.max_tokens:
-        return text
-    low, high, best = 0, len(text), 0
-    while low <= high:
-        mid = (low + high) // 2
-        if counter.count(text[:mid] + _ELLIPSIS) <= budget.max_tokens:
-            best = mid
-            low = mid + 1
-        else:
-            high = mid - 1
-    if best <= 0:
-        raise ContextValidationError(
-            "text budget is too small to render any of the obstruction packet"
-        )
-    boundary = text.rfind(" ", 0, best)
-    if boundary > 0 and best - boundary <= 40:
-        best = boundary
-    return text[:best].rstrip() + _ELLIPSIS
-
-
 def _fit_to_budget(
     sections: Sequence[_Section], budget: TextBudget, counter: TokenCounter
 ) -> tuple[str, tuple[str, ...]]:
@@ -1128,7 +1139,9 @@ def _fit_to_budget(
         index = optional[-1]
         dropped.append(kept[index].title)
         kept.pop(index)
-    return _truncate_to_budget(_render(kept), budget, counter), tuple(dropped)
+    raise ContextValidationError(
+        "mandatory obstruction sections exceed the text budget"
+    )
 
 
 def _identity_status(body: Mapping[str, Any], records: _Records) -> str:
@@ -1143,6 +1156,7 @@ def compile_obstruction(
     request: CompileRequest,
     bundle: SourceBundle,
     reader: ArtifactReader,
+    task: ObstructionTask,
     *,
     token_counter: TokenCounter | None = None,
     suspected_causes: Sequence[SuspectedCause | str] = (),
@@ -1155,8 +1169,10 @@ def compile_obstruction(
 ) -> ObstructionCompilation:
     """Compile recorded search failures into an obstruction packet.
 
-    The returned :class:`ObstructionCompilation` carries the reusable payload,
-    the budget-fitted rendered packet, and that packet's manifest.
+    ``task`` supplies the canonical theorem kernel that makes the failure
+    evidence meaningful.  The returned :class:`ObstructionCompilation`
+    carries the reusable payload, the budget-fitted rendered packet, and that
+    packet's manifest.
     """
     if not isinstance(request, CompileRequest):
         raise ContextValidationError("request must be a CompileRequest")
@@ -1166,6 +1182,8 @@ def compile_obstruction(
         )
     if not isinstance(bundle, SourceBundle):
         raise ContextValidationError("bundle must be a SourceBundle")
+    if not isinstance(task, ObstructionTask):
+        raise ContextValidationError("task must be an ObstructionTask")
     max_failed_states = _require_positive("max_failed_states", max_failed_states)
 
     counter: TokenCounter = token_counter or CharHeuristicTokenCounter()
@@ -1248,6 +1266,7 @@ def compile_obstruction(
 
     sections = _build_sections(
         request=request,
+        task=task,
         payload=payload,
         bundle=bundle,
         run_id=run_id,
@@ -1258,14 +1277,24 @@ def compile_obstruction(
     else:
         content, dropped = _fit_to_budget(sections, request.text_budget, counter)
 
-    decisions = _decisions(
-        bundle=bundle,
-        records=records,
-        payload=payload,
-        attempts=records.attempts,
-        selected_ids=set(payload.selected_state_ids),
-        section_of=_section_index(sections),
-        dropped=set(dropped),
+    kernel = task.kernel
+    decisions = (
+        SelectionDecision(
+            source_id=kernel.kernel_id,
+            source_version=task.kernel_version,
+            status=kernel.status.value,
+            included=True,
+            reason="theorem kernel",
+        ),
+        *_decisions(
+            bundle=bundle,
+            records=records,
+            payload=payload,
+            attempts=records.attempts,
+            selected_ids=set(payload.selected_state_ids),
+            section_of=_section_index(sections),
+            dropped=set(dropped),
+        ),
     )
 
     packet = ContextPacket(
@@ -1332,6 +1361,7 @@ def _diagnostics_for(
 def _build_sections(
     *,
     request: CompileRequest,
+    task: ObstructionTask,
     payload: ObstructionPayload,
     bundle: SourceBundle,
     run_id: str,
@@ -1371,6 +1401,12 @@ def _build_sections(
             ),
             mandatory=True,
             source_ids=_identity_source_ids(bundle),
+        ),
+        _Section(
+            title=_KERNEL_TITLE,
+            lines=_render_kernel(task),
+            mandatory=True,
+            source_ids=(task.kernel.kernel_id,),
         ),
         _Section(
             title=_OBSERVED_TITLE,
