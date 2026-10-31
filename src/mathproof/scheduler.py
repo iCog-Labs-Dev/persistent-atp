@@ -38,6 +38,8 @@ from commit_gate.vocab import (
     RunDisposition,
     WorkerClass,
 )
+from .review_fingerprint import critic_input_digest
+from .actions import STATEMENT_CHECK
 
 __all__ = [
     "Candidate",
@@ -79,6 +81,9 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
 
 CATEGORY_WORKER_CLASS = {
     "research-move": WorkerClass.LLM_RESEARCH.value,
+    "statement-check": WorkerClass.EXPERIMENT.value,
+    "formalization-task": WorkerClass.FORMALIZER.value,
+    "alignment-task": WorkerClass.ALIGNMENT_REVIEWER.value,
     "formal-run": WorkerClass.FORMAL_ATP.value,
     "critic-task": WorkerClass.CRITIC.value,
 }
@@ -238,6 +243,7 @@ class GlobalScheduler:
         ttl_seconds: float = 600.0,
         *,
         actor: str,
+        category: str | None = None,
     ) -> Lease | None:
         """`proof-lease-next`: select and lease the best eligible move.
 
@@ -245,7 +251,11 @@ class GlobalScheduler:
         raises ConcurrencyError; the caller may retry with a fresh snapshot.
         The trusted caller supplies the actual worker's actor and class.
         """
+        if category is not None and CATEGORY_WORKER_CLASS.get(category) != worker_class:
+            raise ValueError(f"{worker_class!r} cannot lease category {category!r}")
         revision, frontier = self._snapshot_frontier(proof_id)
+        if category is not None:
+            frontier = [candidate for candidate in frontier if candidate.category == category]
         scored = []
         for candidate in frontier:
             features = self._feature_vector(candidate, worker_class)
@@ -325,6 +335,18 @@ class GlobalScheduler:
                     ResearchMoveStatus.QUEUED.value,
                     ResearchMoveStatus.OPEN.value,
                 ):
+                    action = move.fields.get("action")
+                    targets = {target.dst_id for target in view.edges_from(move.node_id, "MOVE_TARGETS")}
+                    if isinstance(action, Mapping) and action.get("kind") == STATEMENT_CHECK:
+                        if self._statement_action_ready(view, action, targets):
+                            candidates.append(Candidate(
+                                move_id=edge.dst_id,
+                                category="statement-check",
+                                detail="check a proposed Lean statement",
+                                conflict_ids=(action["declaration_id"],),
+                                features={"verification_value": 0.8, "formalization_readiness": 0.8},
+                            ))
+                        continue
                     candidates.append(
                         Candidate(
                             move_id=edge.dst_id,
@@ -339,10 +361,41 @@ class GlobalScheduler:
                     )
 
         for node_id, record in nodes.items():
+            if record.label == "Attempt" and record.fields.get("status") == AttemptStatus.PENDING.value:
+                action = record.fields.get("follow_up")
+                if not record.fields.get("action_result_id"):
+                    claims = {edge.dst_id for edge in view.edges_from(node_id, "REVIEWS_CLAIM")}
+                    if (len(claims) == 1 and all(claim in nodes for claim in claims)
+                            and self._statement_action_ready(view, action, claims)):
+                        candidates.append(Candidate(
+                            move_id=node_id,
+                            category="statement-check",
+                            detail="check a critic-requested Lean statement",
+                            conflict_ids=(action["declaration_id"],),
+                            features={"verification_value": 0.8, "formalization_readiness": 0.8},
+                        ))
+            if record.label == "FormalDeclaration" and record.fields.get("status") == DeclarationStatus.DRAFT.value:
+                drafted = [edge.dst_id for edge in view.edges_from(node_id, "DRAFTS_CLAIM")]
+                reviewed = bool(view.edges_to(node_id, "ALIGNS_DECLARATION"))
+                if len(drafted) == 1 and drafted[0] in nodes and not reviewed:
+                    candidates.append(Candidate(
+                        move_id=node_id,
+                        category="alignment-task",
+                        detail="draft declaration awaiting statement review",
+                        conflict_ids=(drafted[0],),
+                        features={"verification_value": 0.9, "formalization_readiness": 0.8},
+                    ))
             # Formal targets: aligned declarations and resumable runs (3.2).
             if record.label == "FormalDeclaration" and record.fields.get(
                 "status"
             ) in (DeclarationStatus.ALIGNED.value, DeclarationStatus.SEARCHING.value):
+                if view.edges_from(node_id, "DRAFTS_CLAIM") and not any(
+                    (environment := nodes.get(edge.dst_id)) is not None
+                    and environment.label == "Environment"
+                    and environment.fields.get("lake_manifest_hash")
+                    for edge in view.edges_from(node_id, "PINNED_ENVIRONMENT")
+                ):
+                    continue
                 # An existing run, not its declaration, is the continuation target.
                 if record.fields.get("status") != DeclarationStatus.ALIGNED.value or any(
                     nodes.get(edge.src_id) is not None and nodes[edge.src_id].label == "FormalRun"
@@ -392,10 +445,43 @@ class GlobalScheduler:
 
             # Critic tasks: provisional claims with no favorable verdict (3.3).
             elif record.label == "Claim":
+                stable = record.fields.get("status") == ClaimStatus.CRITIC_ACCEPTED.value or (
+                    record.fields.get("status") == ClaimStatus.PROVISIONAL.value
+                    and self._has_favorable_verdict(view, node_id)
+                )
+                has_draft = any(
+                    nodes.get(edge.src_id) is not None
+                    and nodes[edge.src_id].label == "FormalDeclaration"
+                    and nodes[edge.src_id].fields.get("status") != DeclarationStatus.STALE.value
+                    for edge in view.edges_to(node_id, "DRAFTS_CLAIM")
+                )
+                deps_ready = all(
+                    nodes.get(edge.dst_id) is not None
+                    and nodes[edge.dst_id].fields.get("status") == ClaimStatus.LEAN_VERIFIED.value
+                    for edge in view.edges_from(node_id, "DEPENDS_ON")
+                )
+                claim_text = record.fields.get("claim_text")
+                if stable and isinstance(claim_text, str) and claim_text.strip() and not has_draft and deps_ready:
+                    candidates.append(Candidate(
+                        move_id=node_id,
+                        category="formalization-task",
+                        detail="stable claim awaiting Lean statement draft",
+                        features={"formalization_readiness": 0.9, "verification_value": 0.9},
+                    ))
                 if record.fields.get("status") != ClaimStatus.PROVISIONAL.value:
                     continue
                 if self._has_favorable_verdict(view, node_id):
                     continue
+                latest_review = self._latest_critic_review(view, node_id)
+                if latest_review is not None:
+                    status = latest_review.fields.get("status")
+                    if status == AttemptStatus.REFUTED.value:
+                        continue
+                    if status == AttemptStatus.PENDING.value and (
+                        not latest_review.fields.get("input_digest")
+                        or latest_review.fields["input_digest"] == critic_input_digest(view, node_id)
+                    ):
+                        continue
                 dependencies = len(view.edges_from(node_id, "DEPENDS_ON"))
                 candidates.append(
                     Candidate(
@@ -446,17 +532,40 @@ class GlobalScheduler:
         return [record.node_id for record in view.list_nodes(proof_id)]
 
     def _has_favorable_verdict(self, view: ReadView, claim_id: str) -> bool:
+        attempt = self._latest_critic_review(view, claim_id)
+        return bool(attempt and attempt.fields.get("status") in (
+            AttemptStatus.SUPPORTED.value, AttemptStatus.CRITIC_ACCEPTED.value
+        ) and (
+            not attempt.fields.get("input_digest")
+            or attempt.fields["input_digest"] == critic_input_digest(view, claim_id)
+        ))
+
+    def _latest_critic_review(self, view: ReadView, claim_id: str):
+        attempts = []
         for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):
             attempt = view.node(edge.src_id)
             if attempt is None or attempt.label != "Attempt":
                 continue
-            if (
-                attempt.fields.get("worker_class") == WorkerClass.CRITIC.value
-                and attempt.fields.get("status")
-                in (AttemptStatus.SUPPORTED.value, AttemptStatus.CRITIC_ACCEPTED.value)
-            ):
-                return True
-        return False
+            if attempt.fields.get("worker_class") == WorkerClass.CRITIC.value:
+                attempts.append(attempt)
+        def serial(record):
+            suffix = record.node_id.rsplit("-", 1)[-1]
+            return (int(suffix) if suffix.isdigit() else 0, record.node_id)
+        return max(attempts, key=serial) if attempts else None
+
+    def _statement_action_ready(self, view: ReadView, action: Any, claim_ids: set[str]) -> bool:
+        if not isinstance(action, Mapping) or action.get("kind") != STATEMENT_CHECK:
+            return False
+        declaration_id = action.get("declaration_id")
+        if not isinstance(declaration_id, str):
+            return False
+        declaration = view.node(declaration_id)
+        return bool(
+            declaration is not None and declaration.label == "FormalDeclaration"
+            and declaration.fields.get("status") in {"draft", "aligned"}
+            and declaration.fields.get("lean_type") and declaration.fields.get("imports")
+            and claim_ids & {edge.dst_id for edge in view.edges_from(declaration_id, "DRAFTS_CLAIM")}
+        )
 
     def _run_has_open_checkpoint(self, view: ReadView, run_id: str) -> bool:
         for edge in view.edges_from(run_id, "HAS_CHECKPOINT"):
