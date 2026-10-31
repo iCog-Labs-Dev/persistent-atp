@@ -17,6 +17,19 @@ it does not generate or assert a proof. Its proposal may create one
 Drafts still require a separate alignment review and Lean replay before they
 can enter proof search or support a verified claim.
 
+To inspect the compiled packet and proposed draft locally, run from the
+repository root:
+
+```bash
+uv run python scripts/formalizer_demo.py
+```
+
+The default uses a deterministic mock. Supply `--claim-text`, `--theorem`,
+`--lean-name`, and `--lean-type` to try another example. For an HTTP LLM, set
+`LLM_ENDPOINT_URL`, `LLM_API_KEY`, and `LLM_MODEL`, then add `--live`. The
+script prints the selection manifest, packet digest, candidate, gate findings,
+and proposal; it does not commit the proposal or invoke Lean.
+
 ---
 
 ## 1. System Pipeline & Role
