@@ -27,7 +27,8 @@ uv run python scripts/formalizer_demo.py
 The command uses a configured API key by default. Set `OPENAI_API_KEY` (or
 `LLM_API_KEY`) and `LLM_MODEL` for an OpenAI-compatible endpoint; set
 `LLM_ENDPOINT_URL` for a non-default endpoint. For Gemini, set
-`GEMINI_API_KEY` and `GEMINI_MODEL`. Environment variables may be placed in a
+`GEMINI_API_KEY`; `GEMINI_MODEL` optionally overrides the client's default.
+Environment variables may be placed in a
 local `.env` file. Use `--provider` to choose explicitly when more than one
 provider is configured. Supply `--claim-text` and `--theorem` to try another
 claim. `--mock` uses the fixed sample answer and accepts `--lean-name` and

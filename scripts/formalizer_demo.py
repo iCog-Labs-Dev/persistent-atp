@@ -103,9 +103,7 @@ def main() -> int:
         else:
             if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
                 parser.error("Gemini provider needs GEMINI_API_KEY or GOOGLE_API_KEY")
-            model = args.model or os.getenv("GEMINI_MODEL")
-            if not model:
-                parser.error("Gemini provider needs --model or GEMINI_MODEL")
+            model = args.model or os.getenv("GEMINI_MODEL") or "gemini-flash-lite-latest"
             client = GeminiLLMClient(model=model)
 
     result = FormalizerWorker(client, actor="demo-formalizer").run(

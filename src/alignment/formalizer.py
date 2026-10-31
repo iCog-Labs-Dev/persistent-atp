@@ -23,7 +23,8 @@ __all__ = ["FormalizationResult", "FormalizerWorker", "FORMALIZER_SYSTEM_PROMPT"
 
 FORMALIZER_SYSTEM_PROMPT = """You translate an informal mathematical claim into a Lean 4 proposition.
 Return exactly one JSON object with fields lean_name, lean_type, module_path,
-universe_level, and notes. lean_type is the proposition only; do not provide a
+universe_level, and notes. Use null for module_path or universe_level when
+unknown. lean_type is the proposition only; do not provide a
 proof, tactic script, sorry, axiom, theorem body, or claim that Lean accepted
 it. Preserve the claim's quantifiers, domains, assumptions, and strength. Use
 only names and assumptions present in the supplied context. If the claim is
@@ -118,16 +119,10 @@ class FormalizerWorker:
         if "lean_value" in candidate or "proof" in candidate:
             raise ValueError("formalizer output must contain a proposition only")
 
-        output_module = candidate.get("module_path", module_path)
-        if output_module is not None and (
-            not isinstance(output_module, str) or not output_module.strip()
-        ):
-            raise ValueError("module_path must be a non-empty string when present")
-        universe = candidate.get("universe_level")
-        if universe is not None and (
-            not isinstance(universe, str) or not universe.strip()
-        ):
-            raise ValueError("universe_level must be a non-empty string when present")
+        output_module = _optional_text(candidate.get("module_path"), "module_path")
+        if output_module is None:
+            output_module = _optional_text(module_path, "module_path")
+        universe = _optional_text(candidate.get("universe_level"), "universe_level")
 
         proposal = Proposal(
             proof_id=compilation.result.packet.proof_id,
@@ -173,6 +168,14 @@ def _required_text(payload: Mapping[str, Any], field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _optional_text(value: object, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null")
+    return value.strip() or None
 
 
 def _draft_edge_id(declaration_id: str, claim_id: str) -> str:

@@ -59,6 +59,22 @@ def test_formalizer_emits_one_draft_for_compiled_claim():
     assert compilation.packet_digest.startswith("sha256:")
 
 
+def test_formalizer_accepts_blank_optional_metadata_from_api():
+    client = MockLLMClient(default_json={
+        "lean_name": "nat_self_eq",
+        "lean_type": "∀ n : Nat, n = n",
+        "module_path": "",
+        "universe_level": "",
+        "notes": "No module or universe needed",
+    })
+    result = FormalizerWorker(client, actor="formalizer-1").run(
+        _compile(), declaration_id="p1/fd-1", claim_id="p1/c-1",
+        base_revision=3, lease_id="p1/ls-1", fencing_token=1,
+    )
+    assert result.module_path is None
+    assert result.universe_level is None
+
+
 def test_compiler_rejects_unverified_dependency():
     with pytest.raises(ContextValidationError, match="not Lean verified"):
         _compile(({"id": "p1/c-2", "label": "Claim", "fields": {
