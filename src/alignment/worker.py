@@ -38,6 +38,9 @@ def build_alignment_proposal(
     lease_id: str | None = None,
     fencing_token: int | None = None,
     existing_alignment: bool = False,
+    selected_move_id: str | None = None,
+    statement_checked: bool = False,
+    lean_diagnostics: str = "",
 ) -> Proposal:
     """Build a CommitGate Proposal recording the alignment review outcome."""
     ops: list[Op] = []
@@ -50,6 +53,9 @@ def build_alignment_proposal(
             "lifecycle": result.lifecycle.value,
             "statement_hash": request.statement_hash,
             "source_hash": request.source_hash,
+            "reasoning": result.reasoning,
+            "statement_checked": statement_checked,
+            "lean_diagnostics": lean_diagnostics,
         }
         ops.append(UpsertNode(label="Alignment", node_id=alignment_id, fields=fields))
         ops.append(
@@ -65,6 +71,11 @@ def build_alignment_proposal(
                 ),
             )
         )
+        if statement_checked and result.lifecycle.value == "reviewed" and result.verdict.value == "aligned":
+            ops.append(SetField(
+                label="FormalDeclaration", node_id=request.declaration_id,
+                field="status", value="aligned", prior="draft",
+            ))
         ops.append(
             AddEdge(
                 rel_type="ALIGNS_DECLARATION",
@@ -98,6 +109,7 @@ def build_alignment_proposal(
         lease_id=lease_id,
         fencing_token=fencing_token,
         ops=tuple(ops),
+        selected_move_id=selected_move_id,
     )
 
 
@@ -121,6 +133,9 @@ class AlignmentWorker:
         lease_id: str | None = None,
         fencing_token: int | None = None,
         existing_alignment: bool = False,
+        selected_move_id: str | None = None,
+        statement_checked: bool = False,
+        lean_diagnostics: str = "",
     ) -> tuple[AlignmentReviewResult, Proposal]:
         """Perform review on request and return both result and ready proposal."""
         result = self.reviewer.review(request)
@@ -134,6 +149,9 @@ class AlignmentWorker:
             lease_id=lease_id,
             fencing_token=fencing_token,
             existing_alignment=existing_alignment,
+            selected_move_id=selected_move_id,
+            statement_checked=statement_checked,
+            lean_diagnostics=lean_diagnostics,
         )
         return result, proposal
 

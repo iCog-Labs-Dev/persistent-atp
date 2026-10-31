@@ -114,6 +114,7 @@ TRUSTED_WORKER_CLASSES = frozenset(
 """Actors that may write any label: they operate the store, not one proof."""
 
 WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
+    WorkerClass.FORMALIZER.value: frozenset({"FormalDeclaration"}),
     WorkerClass.FORMAL_ATP.value: frozenset(
         {
             "FormalState",
@@ -130,11 +131,11 @@ WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
         {"Claim", "SpeculativeHypothesis", "ResearchState", "ResearchMove"}
     ),
     WorkerClass.CRITIC.value: frozenset({"Attempt", "Critique", "Claim"}),
-    WorkerClass.ALIGNMENT_REVIEWER.value: frozenset({"Alignment", "Artifact", "Claim"}),
+    WorkerClass.ALIGNMENT_REVIEWER.value: frozenset({"Alignment", "Artifact", "Claim", "FormalDeclaration"}),
     WorkerClass.HYPERON.value: frozenset(
         {"Claim", "SpeculativeHypothesis", "ResearchState", "ResearchMove"}
     ),
-    WorkerClass.EXPERIMENT.value: frozenset({"Experiment"}),
+    WorkerClass.EXPERIMENT.value: frozenset({"Experiment", "ResearchMove"}),
 }
 """The atom labels each worker class may create or overwrite.
 
@@ -157,6 +158,7 @@ UNSCOPED_LABELS = frozenset({"Artifact"})
 """Labels that are content-addressed and therefore carry no proof scope."""
 
 WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
+    WorkerClass.FORMALIZER.value: frozenset({"DRAFTS_CLAIM"}),
     WorkerClass.FORMAL_ATP.value: frozenset(
         {
             "HAS_TACTIC",
@@ -188,7 +190,7 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
     WorkerClass.ALIGNMENT_REVIEWER.value: frozenset(
         {"ALIGNS_CLAIM", "ALIGNS_DECLARATION"}
     ),
-    WorkerClass.EXPERIMENT.value: frozenset(),
+    WorkerClass.EXPERIMENT.value: frozenset({"CHECKS_CLAIM", "CHECKS_DECLARATION"}),
 }
 """The relationships each worker class may assert or remove.
 
@@ -197,6 +199,9 @@ labels do not establish that a worker may make the assertion.
 """
 
 EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "CHECKS_CLAIM": ("Experiment", "Claim"),
+    "CHECKS_DECLARATION": ("Experiment", "FormalDeclaration"),
+    "DRAFTS_CLAIM": ("FormalDeclaration", "Claim"),
     "HAS_TACTIC": ("FormalState", "TacticApplication"),
     "FORMAL_REQUIRES": ("TacticApplication", "FormalState"),
     "CLOSES_STATE": ("TacticApplication", "FormalState"),
@@ -375,6 +380,74 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
     edge_authority = WORKER_CLASS_EDGE_AUTHORITY.get(worker_class, frozenset())
 
     for index, op in enumerate(proposal.ops):
+        if worker_class == WorkerClass.EXPERIMENT.value and (
+            (isinstance(op, UpsertNode) and op.label in {"Attempt", "ResearchMove"})
+            or (isinstance(op, SetField) and op.label == "Attempt" and op.field != "action_result_id")
+            or (isinstance(op, SetField) and op.label == "ResearchMove" and not (
+                op.field == "action_result_id" or (op.field == "status" and op.value == "closed")
+            ))
+        ):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "experiment may only record a statement check result", index)
+        if (worker_class == WorkerClass.EXPERIMENT.value
+                and isinstance(op, SetField) and op.field == "action_result_id"
+                and op.label in {"Attempt", "ResearchMove"}
+                and not any(
+                    isinstance(result, UpsertNode) and result.label == "Experiment"
+                    and result.node_id == op.value
+                    and result.fields.get("owner_id") == op.node_id
+                    and result.fields.get("kind") == "lean_statement_check"
+                    for result in proposal.ops
+                )):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "action result must name its new experiment", index)
+        if (worker_class == WorkerClass.EXPERIMENT.value
+                and isinstance(op, SetField) and op.label == "ResearchMove"
+                and op.field == "status" and op.value == "closed"
+                and not any(
+                    isinstance(result, SetField) and result.label == "ResearchMove"
+                    and result.node_id == op.node_id and result.field == "action_result_id"
+                    for result in proposal.ops
+                )):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "closing an action requires a result", index)
+        if worker_class == WorkerClass.FORMALIZER.value and (
+            (isinstance(op, UpsertNode) and op.label == "FormalDeclaration" and op.fields.get("status") != "draft")
+            or (isinstance(op, SetField) and op.label == "FormalDeclaration")
+        ):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "formalizer may only create draft declarations", index)
+        if worker_class == WorkerClass.ALIGNMENT_REVIEWER.value and (
+            (isinstance(op, UpsertNode) and op.label == "FormalDeclaration")
+            or (isinstance(op, SetField) and op.label == "FormalDeclaration"
+                and (op.field != "status" or op.value != "aligned"))
+        ):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "alignment reviewer may only align declarations", index)
+        if (
+            worker_class == WorkerClass.ALIGNMENT_REVIEWER.value
+            and isinstance(op, SetField)
+            and op.label == "FormalDeclaration"
+            and op.field == "status"
+            and op.value == "aligned"
+            and not any(
+                isinstance(candidate, UpsertNode)
+                and candidate.label == "Alignment"
+                and candidate.fields.get("statement_checked") is True
+                and candidate.fields.get("lifecycle") == "reviewed"
+                and candidate.fields.get("verdict") == "aligned"
+                and any(
+                    isinstance(edge, AddEdge)
+                    and edge.rel_type == "ALIGNS_DECLARATION"
+                    and edge.src_id == candidate.node_id
+                    and edge.dst_id == op.node_id
+                    for edge in proposal.ops
+                )
+                for candidate in proposal.ops
+            )
+        ):
+            yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                            "alignment needs a checked, reviewed statement", index)
         if (
             isinstance(op, UpsertNode)
             and op.label in PROVENANCE_ACTOR_LABELS

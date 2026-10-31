@@ -307,6 +307,7 @@ class WorkerClass(StrEnum):
     COORDINATOR = "coordinator"
     LLM_RESEARCH = "llm-research"
     HYPERON = "hyperon"
+    FORMALIZER = "formalizer"
     FORMAL_ATP = "formal-atp"
     REPLAYER = "replayer"
     CRITIC = "critic"

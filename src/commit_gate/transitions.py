@@ -119,7 +119,7 @@ STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
         "stale": frozenset(),
     },
     ("ResearchMove", "status"): {
-        "queued": frozenset({"leased", "open", "dominated", "exhausted", "stale"}),
+        "queued": frozenset({"leased", "open", "closed", "dominated", "exhausted", "stale"}),
         "open": frozenset(
             {"leased", "closed", "refuted", "dominated", "exhausted", "stale"}
         ),
@@ -149,7 +149,7 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
     ),
     "Claim": frozenset({"claim_text", "tag"}),
     "FormalDeclaration": frozenset(
-        {"lean_name", "lean_type", "lean_value", "module_path", "universe_level"}
+        {"lean_name", "lean_type", "lean_value", "statement_source", "imports", "namespace", "module_path", "universe_level"}
     ),
     "FormalRun": frozenset({"actor", "start_time", "environment_hash"}),
     "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash"}),
