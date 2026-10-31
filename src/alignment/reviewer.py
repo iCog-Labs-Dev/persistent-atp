@@ -6,7 +6,7 @@ from typing import Callable, Protocol
 
 from commit_gate.vocab import AlignmentLifecycle, AlignmentVerdict
 
-from .llm_client import HTTPLLMClient, LLMClientProtocol
+from shared.llm_client import HTTPLLMClient, LLMClientProtocol
 from .models import (
     AlignmentCriteria,
     AlignmentReviewRequest,
