@@ -127,7 +127,13 @@ class TestEscalation(RoundCase):
         self.seed("p1", declaration("p1"))
         answers = {
             FIVE_MECHANISMS: [
-                {"detail": f"try {tag}", "technique_tags": [tag]}
+                {
+                    "detail": f"Try {tag}",
+                    "why_it_helps": f"Explore a {tag} route around the obstruction",
+                    "first_test": f"Check the first {tag} step",
+                    "technique_tag": tag,
+                    "prerequisite_claim_ids": [],
+                }
                 for tag in ("induction", "extremal", "algebraic", "analytic", "probabilistic")
             ]
         }
@@ -140,7 +146,7 @@ class TestEscalation(RoundCase):
 
         (request,) = self.moves("p1", FIVE_MECHANISMS)
         self.assertEqual(request.fields["detail"].split(";")[0], "no verified progress in 2 rounds")
-        self.assertEqual(request.fields["status"], "exhausted")
+        self.assertEqual(request.fields["status"], "closed")
         proposed = [
             move for move in self.moves("p1")
             if (move.fields.get("technique_tags") or [None])[0] is not None
@@ -189,7 +195,7 @@ class TestAuthority(RoundCase):
         self.seed("p1", declaration("p1"), *aligned_claim("p1"))
         workspace = self.workspace(
             "p1",
-            handlers={"llm-research": explorer(), "critic": critic("refuted")},
+            handlers={"llm-research": explorer(), "critic": critic("refuted", earliest_gap="missing proof step")},
             plan={"p1/fr-1": ["stagnated"]},
         )
         self.run_rounds(workspace, 10)

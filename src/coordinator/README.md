@@ -9,7 +9,7 @@ plan_round --Send per active proof--> work --> assess --> plan_round | END
 ```
 
 1. **`plan_round`** opens the round and fans the active proofs out with LangGraph's `Send`.
-2. **`work`** runs one proof's portfolio (Section 8.6): one `run_cycle` per slot that has work — *exploit* (formal search), *explore* (research moves, including the coordinator's escalations) and *critic* (provisional claims). Proofs run in parallel; the slots of one proof run in turn, because a proposal must be based on the head it commits onto.
+2. **`work`** runs one proof's portfolio (Section 8.6): one `run_cycle` per slot that has work. The default `PORTFOLIO` has formal search, research and critic slots. `AGENT_PORTFOLIO` also routes critic-accepted claims to the formalizer, drafts to the alignment reviewer, and statement checks to the experiment adapter. Pass it as `Coordinator(workspaces, slots=AGENT_PORTFOLIO)` when those workers and adapters are configured. Proofs run in parallel; the slots of one proof run in turn, because a proposal must be based on the head it commits onto.
 3. **`assess`** joins the round. For each proof it re-reads committed state, updates the stall count, raises the escalations the stagnation policy calls for, commits them, and records milestone messages (Section 10.7).
 4. The run ends when every proof is solved, when no proof can move without a replay or a human (`halted`), or when the round budget runs out.
 
@@ -63,6 +63,6 @@ python -m pytest src/coordinator/tests
 ## Not yet covered
 
 - Two cycles on the same proof cannot overlap: the gate requires a proposal's base revision to equal the head, so a second commit on one proof would be rejected as stale. Parallelism is across proofs until the gate can rebase a disjoint proposal.
-- Workers are scripted in the tests. A real LLM worker for the five-mechanism request, and routing `alignment-review` moves to the alignment reviewer instead of the research slot, are next steps.
+- Tests run the research, critic, formalizer, and LLM alignment worker implementations with fixed LLM replies. Live model calls and a live Lean checker are not part of the coordinator tests. The five-mechanism response still needs its dedicated contract enforced in the research worker, and `alignment-review` escalations still route through research moves.
 - Replay is not driven by the coordinator; a proof whose certificate awaits replay is parked.
 - Rules 3 and 4 read obstructions directly; they do not yet use per-run routing decisions.

@@ -1,8 +1,9 @@
-"""Shared fixtures: a journal on disk, seeded through the gate, and scripted workers."""
+"""Shared fixtures: a journal on disk and real workers with fixed LLM replies."""
 
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from typing import Any, Mapping
@@ -14,6 +15,8 @@ from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from mathproof.dispatch import ScriptedDispatcher
 from mathproof.formal_atp import FakeFormalATP
+from mathproof.workers import CriticWorker, ResearchWorker
+from shared.llm_client import CallableLLMClient
 
 from coordinator.workspace import ProofWorkspace, project
 
@@ -36,7 +39,9 @@ def aligned_claim(proof_id: str, serial: int = 1) -> list:
     claim_id = f"{proof_id}/c-{serial}"
     alignment_id = f"{proof_id}/al-{serial}"
     return [
-        UpsertNode("Claim", claim_id, {"status": "provisional", "claim_text": "x"}),
+        UpsertNode("Claim", claim_id, {
+            "status": "provisional", "claim_text": "True", "proof_sketch": "True.intro",
+        }),
         UpsertNode("Alignment", alignment_id, {"lifecycle": "reviewed", "verdict": "aligned"}),
         AddEdge("ALIGNS_CLAIM", alignment_id, claim_id, f"{alignment_id}-aligns"),
     ]
@@ -119,27 +124,32 @@ class JournalCase(unittest.TestCase):
 
 
 def explorer(answers: Mapping[str, Any] | None = None, worked: list | None = None):
-    """A research worker that marks each move it takes as worked.
+    """The research worker with deterministic replies keyed by escalation.
 
     ``answers`` maps an escalation name to the ``moves`` it proposes in reply.
     ``worked`` collects the move ids it was given.
     """
 
-    def handler(lease, packet):
+    def reply(system_prompt, user_prompt):
+        packet = json.loads(user_prompt)
         move = packet["move"]["fields"]
         if worked is not None:
-            worked.append(lease.selected_move_id)
+            worked.append(packet["move"]["id"])
         return {
-            "parent_state_id": packet["parent_state"]["id"],
             "moves": list((answers or {}).get(move.get("escalation"), [])),
-            "move_status": "exhausted",
+            "reasoning": "Check this escalation against the fixed theorem target.",
         }
 
-    return handler
+    return ResearchWorker(CallableLLMClient(reply)).run
 
 
 def critic(verdict: str = "critic-accepted", **fields):
-    def handler(lease, packet):
-        return {"verdict": verdict, "actor": lease.actor, **fields}
-
-    return handler
+    response = {
+        "verdict": {"critic-accepted": "supported"}.get(verdict, verdict),
+        "reasoning": "Review the supplied argument and alignment.",
+        "earliest_gap": None,
+        "repair": None,
+        "evidence_ids": [],
+        **fields,
+    }
+    return CriticWorker(CallableLLMClient(lambda _system, _user: response)).run

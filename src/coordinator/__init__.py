@@ -7,13 +7,14 @@ StateGraph and needs the optional `coordinator` extra.
 
 from .escalate import COORDINATOR_ACTOR, commit_escalations, escalation_ops
 from .policy import Escalation, StagnationPolicy, classify
-from .portfolio import PORTFOLIO, Slot, SlotScheduler, run_portfolio
+from .portfolio import AGENT_PORTFOLIO, PORTFOLIO, Slot, SlotScheduler, run_portfolio
 from .progress import ProofReading, read_proof
 from .rounds import assess, new_track, work
 from .workspace import ProofWorkspace, project
 
 __all__ = [
     "COORDINATOR_ACTOR",
+    "AGENT_PORTFOLIO",
     "Escalation",
     "PORTFOLIO",
     "ProofReading",

@@ -22,7 +22,7 @@ from mathproof.scheduler import Candidate, GlobalScheduler, SchedulerStatistics
 
 from .workspace import ProofWorkspace, project
 
-__all__ = ["Slot", "PORTFOLIO", "SlotScheduler", "frontier_by_category", "run_portfolio"]
+__all__ = ["Slot", "PORTFOLIO", "AGENT_PORTFOLIO", "SlotScheduler", "frontier_by_category", "run_portfolio"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +36,15 @@ PORTFOLIO = (
     Slot("exploit", "formal-run", "formal-atp"),
     Slot("explore", "research-move", "llm-research"),
     Slot("critic", "critic-task", "critic"),
+)
+
+AGENT_PORTFOLIO = (
+    Slot("critic", "critic-task", "critic"),
+    Slot("formalize", "formalization-task", "formalizer"),
+    Slot("alignment", "alignment-task", "alignment-reviewer"),
+    Slot("exploit", "formal-run", "formal-atp"),
+    Slot("explore", "research-move", "llm-research"),
+    Slot("statement-check", "statement-check", "experiment"),
 )
 
 

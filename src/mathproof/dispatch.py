@@ -78,6 +78,7 @@ def result_to_proposal(
             {**result, "actor": lease.actor},
             claim_id=lease.selected_move_id,
             attempt_id=attempt_id or f"{lease.proof_id}/at-{_next_serial(view, 'at', lease.proof_id)}",
+            view=view,
         )
     else:
         ops = research_result_to_ops(
@@ -355,9 +356,9 @@ def formal_result_to_ops(
 
 
 def critic_result_to_ops(
-    result: Mapping[str, Any], *, claim_id: str, attempt_id: str
+    result: Mapping[str, Any], *, claim_id: str, attempt_id: str, view: ReadView
 ) -> list[Any]:
-    """Record the review; only an explicit critic-accepted verdict promotes."""
+    """Record the review; promote supported claims only after alignment."""
     verdict = result["verdict"]
     fields = {
         "actor": result.get("actor", "critic"),
@@ -379,7 +380,16 @@ def critic_result_to_ops(
             result.get("review_edge_id", f"{attempt_id}-reviews"),
         ),
     ]
-    if verdict == AttemptStatus.CRITIC_ACCEPTED.value:
+    aligned = any(
+        (alignment := view.node(edge.src_id)) is not None
+        and alignment.label == "Alignment"
+        and alignment.fields.get("lifecycle") == "reviewed"
+        and alignment.fields.get("verdict") == "aligned"
+        for edge in view.edges_to(claim_id, "ALIGNS_CLAIM")
+    )
+    if verdict == AttemptStatus.CRITIC_ACCEPTED.value or (
+        verdict == AttemptStatus.SUPPORTED.value and aligned
+    ):
         ops.append(
             SetField("Claim", claim_id, "status", "critic-accepted", prior="provisional")
         )
