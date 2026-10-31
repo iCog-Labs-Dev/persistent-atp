@@ -24,11 +24,16 @@ repository root:
 uv run python scripts/formalizer_demo.py
 ```
 
-The default uses a deterministic mock. Supply `--claim-text`, `--theorem`,
-`--lean-name`, and `--lean-type` to try another example. For an HTTP LLM, set
-`LLM_ENDPOINT_URL`, `LLM_API_KEY`, and `LLM_MODEL`, then add `--live`. The
-script prints the selection manifest, packet digest, candidate, gate findings,
-and proposal; it does not commit the proposal or invoke Lean.
+The command uses a configured API key by default. Set `OPENAI_API_KEY` (or
+`LLM_API_KEY`) and `LLM_MODEL` for an OpenAI-compatible endpoint; set
+`LLM_ENDPOINT_URL` for a non-default endpoint. For Gemini, set
+`GEMINI_API_KEY` and `GEMINI_MODEL`. Environment variables may be placed in a
+local `.env` file. Use `--provider` to choose explicitly when more than one
+provider is configured. Supply `--claim-text` and `--theorem` to try another
+claim. `--mock` uses the fixed sample answer and accepts `--lean-name` and
+`--lean-type`. The script prints the selection manifest, packet digest,
+candidate, gate findings, and proposal; it does not commit the proposal or
+invoke Lean.
 
 ---
 

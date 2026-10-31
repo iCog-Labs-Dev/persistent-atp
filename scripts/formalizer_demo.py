@@ -12,7 +12,7 @@ import json
 import os
 
 from alignment.formalizer import FormalizerWorker
-from alignment.llm_client import HTTPLLMClient, MockLLMClient
+from alignment.llm_client import GeminiLLMClient, HTTPLLMClient, MockLLMClient
 from commit_gate.state import MemoryView
 from commit_gate.validate import validate_proposal
 from context_compiler import (
@@ -46,10 +46,13 @@ def main() -> int:
         "--budget", type=int, default=2048, help="Maximum context tokens"
     )
     parser.add_argument(
-        "--live",
-        action="store_true",
-        help="Use the configured HTTP LLM instead of a deterministic mock",
+        "--mock", action="store_true", help="Use the fixed sample answer instead of an API"
     )
+    parser.add_argument(
+        "--provider", choices=("auto", "http", "gemini"), default="auto",
+        help="API provider; auto selects from configured keys",
+    )
+    parser.add_argument("--model", help="Model name (or set LLM_MODEL/GEMINI_MODEL)")
     args = parser.parse_args()
 
     request = CompileRequest(
@@ -72,14 +75,38 @@ def main() -> int:
         theorem={"statement": args.theorem},
     )
 
-    if args.live:
-        client = HTTPLLMClient(model=os.getenv("LLM_MODEL", "deepseek-chat"))
-    else:
+    if args.mock:
         client = MockLLMClient(default_json={
             "lean_name": args.lean_name,
             "lean_type": args.lean_type,
             "notes": "Deterministic demo candidate",
         })
+    else:
+        provider = args.provider
+        if provider == "auto":
+            if os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"):
+                provider = "http"
+            elif os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+                provider = "gemini"
+            else:
+                parser.error(
+                    "No API key found. Set LLM_API_KEY/OPENAI_API_KEY or "
+                    "GEMINI_API_KEY in the environment or .env; use --mock for a sample."
+                )
+        if provider == "http":
+            if not (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")):
+                parser.error("HTTP provider needs LLM_API_KEY or OPENAI_API_KEY")
+            model = args.model or os.getenv("LLM_MODEL")
+            if not model:
+                parser.error("HTTP provider needs --model or LLM_MODEL")
+            client = HTTPLLMClient(model=model)
+        else:
+            if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+                parser.error("Gemini provider needs GEMINI_API_KEY or GOOGLE_API_KEY")
+            model = args.model or os.getenv("GEMINI_MODEL")
+            if not model:
+                parser.error("Gemini provider needs --model or GEMINI_MODEL")
+            client = GeminiLLMClient(model=model)
 
     result = FormalizerWorker(client, actor="demo-formalizer").run(
         compilation,
