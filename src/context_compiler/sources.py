@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
 from commit_gate.canon import content_hash
+from commit_gate.state import belongs_to_proof
 from shared.vocab import ClaimStatus
 
 from .contracts import (
@@ -250,6 +251,10 @@ def collect_sources(
         node_id, depth, parent = queue.popleft()
         if node_id in visited:
             continue
+        if not belongs_to_proof(node_id, snapshot.proof_id):
+            if parent is None:
+                note_missing(node_id, "outside-proof", None)
+            continue
         if len(visited) >= plan.max_nodes:
             node_cut.add(node_id)
             continue
@@ -287,10 +292,10 @@ def collect_sources(
                 e for rel in relations
                 for e in (*view.edges_from(node_id, rel), *view.edges_to(node_id, rel))
             ]
-            depth_cut.update(
-                (e.dst_id if e.src_id == node_id else e.src_id)
-                for e in neighbours
-            )
+            for edge in neighbours:
+                other = edge.dst_id if edge.src_id == node_id else edge.src_id
+                if belongs_to_proof(other, snapshot.proof_id):
+                    depth_cut.add(other)
             continue
 
         edges = sorted(
@@ -300,7 +305,7 @@ def collect_sources(
         )
         for e in edges:
             other = e.dst_id if e.src_id == node_id else e.src_id
-            if other not in visited:
+            if other not in visited and belongs_to_proof(other, snapshot.proof_id):
                 queue.append((other, depth + 1, node_id))
 
     if plan.kernel_id not in visited or view.node(plan.kernel_id) is None:

@@ -42,6 +42,27 @@ class _Artifacts:
 
 
 class TestReaderFeedsResearchCompiler(unittest.TestCase):
+    def test_cross_proof_edges_cannot_supply_context(self):
+        view = MemoryView()
+        view.add_node("p1/c0", "Claim", {"statement": "Target", "status": "provisional"})
+        view.add_node("p2/c1", "Claim", {"statement": "Other proof secret", "status": "critic-accepted"})
+        view.add_node("p1/rs1", "ResearchState", {"status": "open"})
+        view.add_node("p1/rm1", "ResearchMove", {
+            "status": "queued", "state_id": "p1/rs1", "detail": "Investigate",
+        })
+        view.add_edge("DEPENDS_ON", "p1/c0", "p2/c1", "p1/e-cross")
+        request = CompileRequest(
+            "task", "p1", 0, PacketKind.RESEARCH, WorkerClass.LLM_RESEARCH,
+            text_budget=TextBudget(4000),
+        )
+        collection = collect_sources(
+            request, ProofSnapshot("p1", 0, view), _NoArtifacts(),
+            RetrievalPlan("p1/c0", seed_ids=("p1/rs1", "p1/rm1")),
+        )
+        self.assertNotIn("p2/c1", collection.bodies)
+        self.assertNotIn("p2/c1", (ref.source_id for ref in collection.bundle.sources))
+        self.assertTrue(collection.is_complete)
+
     def _collect(self):
         view = MemoryView()
         view.add_node("p1/c0", "Claim", {"statement": "Every X is Y.", "status": "provisional"})
