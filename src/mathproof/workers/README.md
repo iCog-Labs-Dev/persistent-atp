@@ -2,7 +2,7 @@
 
 These bounded LLM workers receive context through `mathproof.worker_context.compile_context`. Research context is selected and budgeted by the shared `context_compiler` package; the adapter adds lease and action metadata. Critic and formalizer context is assembled for their specific gate operations. The scheduler leases a proof-scoped task, and `run_cycle` sends the worker's structured result through the commit gate. Workers never write to MORK themselves.
 
-- Research requires a theorem target and a leased `ResearchMove`. It proposes up to five testable moves, closes or exhausts the worked move, and records the model output and packet digest. Its output creates no verified claim.
+- Research requires a theorem target and a leased `ResearchMove`. It proposes up to five testable OR alternatives, closes or exhausts the worked move, and records the model output and packet digest. Its output creates no verified claim.
 - Critic reviews a leased `Claim` and returns a verdict, earliest gap, repair, and cited evidence IDs. An unsupported "supported" opinion is recorded as pending. A "supported" opinion never promotes the claim; only the explicit gate-reviewed `critic-accepted` path can do that.
 
 Register the workers with the existing dispatcher seam:
@@ -22,6 +22,8 @@ dispatcher = ScriptedDispatcher({
 Then pass `dispatcher` to `mathproof.cycle.run_cycle` with a `GlobalScheduler` and `CommitGate`. The cycle selects the matching frontier category, compiles context at the lease revision, validates the result, and releases the lease on failure.
 
 The compiler uses `ReadView.list_nodes`, so memory and MORK receive the same proof-scoped packet shape. The theorem kernel includes committed `Proof` targets and aligned declarations when present, or the selected move's target claim when no `Proof` node exists. Missing theorem data is not invented. Broader retrieval, tool calls, artifact storage for large outputs, and coordinator policy remain separate work.
+
+An alternative can name up to three AND subgoals. Each subgoal becomes a conjectural `Claim` with its own `ResearchState` and queued `ResearchMove`. `REQUIRES_SUBGOAL` links the alternative to each child move; multiple alternatives may share one identical subgoal. The alternative is marked closed because its planning step finished, not because the claim was proved. A child can be decomposed again up to depth two. The formal ATP and Lean replay remain responsible for actual proof closure.
 
 ## Formalization before ATP
 

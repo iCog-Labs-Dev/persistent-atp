@@ -181,10 +181,10 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
     ),
     WorkerClass.REPLAYER.value: frozenset({"REPLAYED_BY", "REPLAY_ENVIRONMENT"}),
     WorkerClass.LLM_RESEARCH.value: frozenset(
-        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
+        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS", "REQUIRES_SUBGOAL"}
     ),
     WorkerClass.HYPERON.value: frozenset(
-        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
+        {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS", "REQUIRES_SUBGOAL"}
     ),
     WorkerClass.CRITIC.value: frozenset({"REVIEWS_CLAIM"}),
     WorkerClass.ALIGNMENT_REVIEWER.value: frozenset(
@@ -227,6 +227,7 @@ EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
     "HAS_TARGET": ("Proof", "Claim"),
     "PROPOSES": ("ResearchState", "ResearchMove"),
     "MOVE_TARGETS": ("ResearchMove", "Claim"),
+    "REQUIRES_SUBGOAL": ("ResearchMove", "ResearchMove"),
     "REVIEWS_CLAIM": ("Attempt", "Claim"),
 }
 """Required endpoint labels per relationship type.

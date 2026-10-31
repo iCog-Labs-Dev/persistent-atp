@@ -100,7 +100,7 @@ _DIAGNOSTIC_FIELDS = ("diagnostic", "diagnostic_artifact")
 DEFAULT_RELATIONS: Mapping[PacketKind, tuple[str, ...]] = {
     PacketKind.RESEARCH: (
         "HAS_TARGET", "DEPENDS_ON", "PROVED_BY", "ALIGNS_CLAIM",
-        "RESOLVES", "RAISED_OBSTRUCTION", "AT_STATE",
+        "RESOLVES", "RAISED_OBSTRUCTION", "AT_STATE", "REQUIRES_SUBGOAL",
     ),
     PacketKind.FORMAL: (
         "HAS_ROOT", "HAS_TACTIC", "FORMAL_REQUIRES", "RAN_UNDER",

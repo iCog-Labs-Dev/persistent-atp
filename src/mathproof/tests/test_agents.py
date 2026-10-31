@@ -52,6 +52,7 @@ def test_compiler_scopes_context_and_preserves_theorem_target():
     )
     packet = compile_context(lease, view)
     assert packet["theorem"]["target_claims"] == [{"id": "p1/c-1"}]
+    assert packet["theorem"]["statement"] == "For all n : Nat, n + 0 = n"
     assert "For all n : Nat, n + 0 = n" in packet["context_text"]
     assert "n is a natural number" in packet["context_text"]
     assert packet["manifest_digest"].startswith("sha256:")
@@ -122,6 +123,107 @@ def test_research_and_critic_run_through_one_cycle_without_promoting_claim():
     assert attempt.fields["context_digest"]
     assert attempt.fields["model_output"]["earliest_gap"] == attempt.fields["earliest_gap"]
     assert "p1/c-1" in critic_llm.history[0][1]
+
+
+def test_research_alternatives_create_conjunctive_subgoals():
+    view, store = MemoryView(), JournalStore()
+    seed(view, "p1")
+    answer = {
+        "moves": [
+            {
+                "detail": "Use induction", "why_it_helps": "Split the theorem",
+                "first_test": "Check the base case", "technique_tag": "induction",
+                "prerequisite_claim_ids": [],
+                "subgoals": [
+                    {"statement": "Base case", "why_needed": "Induction base"},
+                    {"statement": "Successor case", "why_needed": "Induction step"},
+                ],
+            },
+            {
+                "detail": "Use rewriting", "why_it_helps": "Try an equality lemma",
+                "first_test": "Search for a rewrite", "technique_tag": "rewriting",
+                "prerequisite_claim_ids": [],
+                "subgoals": [{"statement": "Base case", "why_needed": "Shared supporting fact"}],
+            },
+            {
+                "detail": "Use direct algebra", "why_it_helps": "Avoid induction",
+                "first_test": "Try a direct simplification", "technique_tag": "algebra",
+                "prerequisite_claim_ids": [],
+            },
+        ],
+        "reasoning": "Two distinct strategies",
+    }
+    gate = CommitGate(view, store)
+    scheduler = GlobalScheduler(view, store)
+    result = run_cycle(
+        "p1", view=view, gate=gate, scheduler=scheduler,
+        dispatcher=ScriptedDispatcher({"llm-research": ResearchWorker(MockLLMClient(default_json=answer)).run}),
+        maintenance=lambda proposal, commit: view.apply_journal_event(store, "p1", commit.revision),
+    )
+    assert result.accepted, result.rejections
+    alternatives = [view.node(f"p1/rm-{i}") for i in (2, 5, 6)]
+    assert [move.fields["status"] for move in alternatives] == ["closed", "closed", "queued"]
+    children = view.edges_from("p1/rm-2", "REQUIRES_SUBGOAL")
+    assert [edge.dst_id for edge in children] == ["p1/rm-3", "p1/rm-4"]
+    assert view.edges_from("p1/rm-5", "REQUIRES_SUBGOAL")[0].dst_id == "p1/rm-3"
+    assert [view.node(f"p1/c-{i}").fields["status"] for i in (2, 3)] == ["conjectural"] * 2
+    assert view.node("p1/c-1").fields["status"] == "provisional"
+    assert [view.node(f"p1/rs-{i}").fields["branch_depth"] for i in (2, 3)] == [1, 1]
+    frontier = {item.move_id for item in scheduler.build_frontier("p1")}
+    assert {"p1/rm-3", "p1/rm-4", "p1/rm-6"} <= frontier
+    assert not {"p1/rm-2", "p1/rm-5"} & frontier
+    child_packet = compile_context(SimpleNamespace(
+        proof_id="p1", worker_class="llm-research", selected_move_id="p1/rm-3",
+        base_revision=store.head("p1")[0], lease_id="p1/ls-child",
+    ), view)
+    assert child_packet["parent_state"]["branch_depth"] == 1
+    assert "Base case" in child_packet["context_text"]
+
+
+def test_research_cannot_expand_subgoals_beyond_depth_limit():
+    view, store = MemoryView(), JournalStore()
+    seed(view, "p1")
+    view.set_field("p1/rs-1", "branch_depth", 2)
+    worker = ResearchWorker(MockLLMClient(default_json={
+        "moves": [{
+            "detail": "Split again", "why_it_helps": "Try a smaller lemma",
+            "first_test": "Check the lemma", "technique_tag": "decompose",
+            "prerequisite_claim_ids": [],
+            "subgoals": [{"statement": "A smaller lemma", "why_needed": "Bridge step"}],
+        }],
+        "reasoning": "Further decomposition",
+    }))
+    with pytest.raises(ValueError, match="branch depth"):
+        run_cycle(
+            "p1", view=view, gate=CommitGate(view, store),
+            scheduler=GlobalScheduler(view, store),
+            dispatcher=ScriptedDispatcher({"llm-research": worker.run}),
+        )
+    assert store.head("p1")[0] == 0
+    assert not store.active_leases("p1")
+
+
+def test_research_cannot_repeat_its_target_as_a_subgoal():
+    view = MemoryView()
+    seed(view, "p1")
+    lease = SimpleNamespace(
+        proof_id="p1", worker_class="llm-research", selected_move_id="p1/rm-1",
+        base_revision=0, lease_id="p1/ls-1",
+    )
+    packet = compile_context(lease, view)
+    worker = ResearchWorker(MockLLMClient(default_json={
+        "moves": [{
+            "detail": "Repeat target", "why_it_helps": "Try again",
+            "first_test": "Inspect it", "technique_tag": "repeat",
+            "prerequisite_claim_ids": [],
+            "subgoals": [{
+                "statement": "For all n : Nat, n + 0 = n", "why_needed": "Circular step",
+            }],
+        }],
+        "reasoning": "No smaller goal",
+    }))
+    with pytest.raises(ValueError, match="repeats the current theorem target"):
+        worker.run(lease, packet)
 
 
 def test_critic_downgrades_unsupported_opinion_and_rejects_invented_citations():

@@ -392,20 +392,72 @@ def research_result_to_ops(
 ) -> list[Any]:
     """Queue proposed moves and retire a worked move through the gate."""
     parent_state_id = result["parent_state_id"]
+    parent_state = view.node(parent_state_id)
+    if parent_state is None or parent_state.label != "ResearchState" or not parent_state_id.startswith(f"{proof_id}/"):
+        raise ValueError("research result names no state in this proof")
+    depth = parent_state.fields.get("branch_depth", 0)
+    if type(depth) is not int or depth < 0 or depth > 2:
+        raise ValueError("research state has invalid branch depth")
     proposed = result.get("moves")
     if proposed is None:
         proposed = [{"move_id": result.get("move_id"), "detail": result.get("detail", "")}]
     serial = _next_serial(view, "rm", proof_id)
+    claim_serial = _next_serial(view, "c", proof_id)
+    state_serial = _next_serial(view, "rs", proof_id)
+    shared_subgoals: dict[str, str] = {}
     ops: list[Any] = []
     for entry in proposed:
         move_id = entry.get("move_id") or f"{proof_id}/rm-{serial}"
         serial += 1
-        fields = {key: value for key, value in entry.items() if key not in ("move_id", "status", "state_id")}
+        subgoals = entry.get("subgoals", [])
+        if not isinstance(subgoals, list) or len(subgoals) > 3:
+            raise ValueError("research alternative needs at most three subgoals")
+        if subgoals and (depth >= 2 or entry.get("action") is not None):
+            raise ValueError("subgoals exceed branch depth or conflict with an action")
+        fields = {key: value for key, value in entry.items() if key not in ("move_id", "status", "state_id", "subgoals")}
         fields.setdefault("detail", "")
-        ops.append(UpsertNode("ResearchMove", move_id, {"status": "queued", "state_id": parent_state_id, **fields}))
+        ops.append(UpsertNode("ResearchMove", move_id, {
+            "status": "closed" if subgoals else "queued",
+            "state_id": parent_state_id, **fields,
+        }))
         ops.append(AddEdge("PROPOSES", parent_state_id, move_id, f"{move_id}-proposed"))
         for index, claim_id in enumerate(result.get("target_claim_ids", ())):
             ops.append(AddEdge("MOVE_TARGETS", move_id, claim_id, f"{move_id}-target-{index}"))
+        for index, subgoal in enumerate(subgoals):
+            if not isinstance(subgoal, Mapping) or set(subgoal) != {"statement", "why_needed"}:
+                raise ValueError("subgoal needs a statement and reason")
+            statement, why = subgoal["statement"], subgoal["why_needed"]
+            if not isinstance(statement, str) or not statement.strip() or not isinstance(why, str) or not why.strip():
+                raise ValueError("subgoal statement and reason must be nonempty")
+            key = " ".join(statement.split()).casefold()
+            child_move_id = shared_subgoals.get(key)
+            if child_move_id is None:
+                claim_id = f"{proof_id}/c-{claim_serial}"
+                state_id = f"{proof_id}/rs-{state_serial}"
+                child_move_id = f"{proof_id}/rm-{serial}"
+                claim_serial += 1
+                state_serial += 1
+                serial += 1
+                ops.extend((
+                    UpsertNode("Claim", claim_id, {
+                        "status": "conjectural", "claim_text": statement.strip(),
+                    }),
+                    UpsertNode("ResearchState", state_id, {
+                        "status": "open", "target_claim_id": claim_id,
+                        "branch_depth": depth + 1,
+                    }),
+                    UpsertNode("ResearchMove", child_move_id, {
+                        "status": "queued", "state_id": state_id,
+                        "detail": f"Investigate subgoal: {statement.strip()}",
+                    }),
+                    AddEdge("PROPOSES", state_id, child_move_id, f"{child_move_id}-proposed"),
+                    AddEdge("MOVE_TARGETS", child_move_id, claim_id, f"{child_move_id}-target-0"),
+                ))
+                shared_subgoals[key] = child_move_id
+            ops.append(AddEdge(
+                "REQUIRES_SUBGOAL", move_id, child_move_id,
+                f"{move_id}-subgoal-{index}", {"why_needed": why.strip()},
+            ))
 
     leased = view.node(leased_move_id) if leased_move_id else None
     if leased is not None and leased.label == "ResearchMove":

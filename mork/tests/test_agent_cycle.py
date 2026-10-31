@@ -57,6 +57,7 @@ def test_real_mork_agent_cycle():
                 "detail": "Check the successor case", "why_it_helps": "It completes induction",
                 "first_test": "Run Lean on the successor case", "technique_tag": "induction",
                 "prerequisite_claim_ids": [f"{proof_id}/c-1"],
+                "subgoals": [{"statement": "Prove the successor step", "why_needed": "Induction step"}],
             }],
             "reasoning": "The successor case is open",
         })).run,
@@ -80,6 +81,10 @@ def test_real_mork_agent_cycle():
     assert view.node(f"{proof_id}/rm-1").fields["status"] == "closed"
     assert view.node(f"{proof_id}/rm-1").fields["model_output"]["moves"][0]["technique_tag"] == "induction"
     assert view.node(f"{proof_id}/rm-2").fields["first_test"] == "Run Lean on the successor case"
+    assert view.node(f"{proof_id}/rm-2").fields["status"] == "closed"
+    assert view.edges_from(f"{proof_id}/rm-2", "REQUIRES_SUBGOAL")[0].dst_id == f"{proof_id}/rm-3"
+    assert view.node(f"{proof_id}/c-2").fields["status"] == "conjectural"
+    assert view.node(f"{proof_id}/rm-3").fields["status"] == "queued"
     assert view.node(f"{proof_id}/at-1").fields["status"] == "pending"
     assert view.node(f"{proof_id}/c-1").fields["status"] == "provisional"
 

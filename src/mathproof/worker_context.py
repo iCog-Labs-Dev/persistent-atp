@@ -193,7 +193,8 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
         ResearchTask(
             kernel, str(lease.base_revision), parents[0], move.node_id,
             "Investigate the leased move without changing the theorem target.",
-            "JSON research moves", "Only propose testable next steps.",
+            "JSON OR alternatives with optional AND subgoals",
+            "Only propose testable next steps.",
         ),
     )
     included = {d.source_id for d in compilation.result.selection_decisions if d.included}
@@ -204,13 +205,18 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
     return {
         "role": "research", "proof_id": lease.proof_id,
         "revision": lease.base_revision, "lease_id": lease.lease_id,
-        "move": {"id": move.node_id}, "parent_state": {"id": parents[0]},
-        "theorem": {"target_claims": [{"id": targets[0]}]},
-        "target_claims": [{"id": targets[0]}],
+        "move": {"id": move.node_id},
+        "parent_state": {
+            "id": parents[0],
+            "branch_depth": view.node(parents[0]).fields.get("branch_depth", 0),
+        },
+        "theorem": {
+            "target_claims": [{"id": targets[0]}],
+            "statement": kernel.statement,
+        },
         "claims": [{"id": claim_id} for claim_id in claim_ids],
         "declarations": [{"id": item["id"]} for item in _draft_declarations(view, targets, lease.proof_id)],
         "context_text": compilation.packet.content,
-        "manifest": compilation.manifest,
         "manifest_digest": compilation.packet_digest,
     }
 
