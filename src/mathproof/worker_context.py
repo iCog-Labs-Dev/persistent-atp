@@ -205,7 +205,7 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
     return {
         "role": "research", "proof_id": lease.proof_id,
         "revision": lease.base_revision, "lease_id": lease.lease_id,
-        "move": {"id": move.node_id},
+        "move": {"id": move.node_id, "fields": dict(move.fields)},
         "parent_state": {
             "id": parents[0],
             "branch_depth": view.node(parents[0]).fields.get("branch_depth", 0),
