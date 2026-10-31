@@ -25,6 +25,7 @@ from .reviewer import (
     RuleBasedAlignmentReviewer,
 )
 from .worker import AlignmentWorker, build_alignment_proposal, build_worker_result
+from .formalizer import FORMALIZER_SYSTEM_PROMPT, FormalizationResult, FormalizerWorker
 
 __all__ = [
     "ALIGNMENT_REVIEWER_SYSTEM_PROMPT",
@@ -35,6 +36,9 @@ __all__ = [
     "AlignmentReviewStrategy",
     "AlignmentReviewerProtocol",
     "AlignmentWorker",
+    "FORMALIZER_SYSTEM_PROMPT",
+    "FormalizationResult",
+    "FormalizerWorker",
     "CallableLLMClient",
     "GeminiLLMClient",
     "HTTPLLMClient",

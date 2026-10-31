@@ -28,6 +28,7 @@ from .errors import ContextValidationError
 class PacketKind(StrEnum):
     RESEARCH = "research"
     FORMAL = "formal"
+    FORMALIZATION = "formalization"
     OBSTRUCTION = "obstruction"
 
 

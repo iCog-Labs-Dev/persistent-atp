@@ -4,6 +4,19 @@ The **Statement Alignment Worker** audits and certifies semantic equivalence bet
 
 In this architecture, an informal `Claim` and a Lean `FormalDeclaration` are separate objects in the proof metagraph. A Lean proof verifies an informal claim **only when** an alignment record with verdict `aligned` and lifecycle `reviewed` links them.
 
+## Formalization worker
+
+`FormalizerWorker` consumes a `FormalizationCompilation` produced by
+`context_compiler.compile_formalization`. The packet contains the target claim,
+its verified dependencies, theorem context, and a revision-bound selection
+manifest. The worker asks the configured LLM for a Lean proposition type only;
+it does not generate or assert a proof. Its proposal may create one
+`FormalDeclaration` in `draft` status and connect it to the source claim with
+`DRAFTS_CLAIM`. The gate rejects any additional writes by this worker.
+
+Drafts still require a separate alignment review and Lean replay before they
+can enter proof search or support a verified claim.
+
 ---
 
 ## 1. System Pipeline & Role

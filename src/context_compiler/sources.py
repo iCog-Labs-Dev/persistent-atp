@@ -71,6 +71,7 @@ EMITTABLE_SOURCE_TYPES: Mapping[PacketKind, frozenset[str]] = {
             "formal-run",
         }
     ),
+    PacketKind.FORMALIZATION: frozenset({"claim"}),
     PacketKind.OBSTRUCTION: frozenset(
         {"formal-state", "attempt", "diagnostic", "obstruction", "formal-run"}
     ),
@@ -105,6 +106,7 @@ DEFAULT_RELATIONS: Mapping[PacketKind, tuple[str, ...]] = {
         "HAS_ROOT", "HAS_TACTIC", "FORMAL_REQUIRES", "RAN_UNDER",
         "PINNED_ENVIRONMENT", "SEARCHES", "ALIGNS_DECLARATION",
     ),
+    PacketKind.FORMALIZATION: ("DEPENDS_ON", "PROVED_BY"),
     PacketKind.OBSTRUCTION: (
         "RAISED_OBSTRUCTION", "AT_STATE", "RESOLVES", "RAN_UNDER", "HAS_ROOT",
     ),
