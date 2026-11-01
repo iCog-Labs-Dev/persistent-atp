@@ -21,12 +21,14 @@ from persistent_atp_client.errors import (
     UnsupportedCapability,
 )
 from persistent_atp_client.models import (
-    ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
+    ACTION_TYPES, BASE_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, CapabilitySet, DecisionResponse, Event, FormalResume,
     FormalSearch, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, ProofStatus, ProjectDigest,
-    StatementAlign, TERMINAL_LIFECYCLES,
+    StatementAlign, TERMINAL_LIFECYCLES, SelectedProofCycle, QueueResearchMoves,
+    CoordinationPage, CoordinationItem,
 )
+from mathproof.scheduler import GlobalScheduler
 
 from .service import OperationService
 
@@ -41,6 +43,9 @@ class ReferenceReceiver:
         self.principal = principal
         self.workspace_id = service.workspace
         self._lock = threading.RLock()
+        # JournalStore has one SQLite connection. Serialize receiver reads with
+        # worker commits so an HTTP poll cannot inspect a transaction in flight.
+        self._service_lock = threading.RLock()
         self._db = sqlite3.connect(Path(service.root) / "receiver-v2.sqlite3", isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -83,14 +88,24 @@ class ReferenceReceiver:
         self._db.execute("INSERT INTO events(event_id,operation_id,event_type,observation_version) VALUES (?,?,?,?)",
                          (uuid.uuid4().hex, operation_id, event_type, version))
 
-    async def capabilities(self) -> CapabilitySet:
-        return CapabilitySet("2.0", frozenset(ACTION_TYPES), backend_mode="unavailable",
-                             independent_replay=False, receiver_mode="reference-scripted")
+    async def capabilities(self, contract_version: str = "2.0") -> CapabilitySet:
+        if contract_version not in {"2.0", "2.1"}:
+            raise UnsupportedCapability("unsupported contract version")
+        actions = BASE_ACTION_TYPES if contract_version == "2.0" else ACTION_TYPES
+        return CapabilitySet(contract_version, frozenset(actions),
+                             controls=frozenset({"coordination-read"}) if contract_version == "2.1" else frozenset(),
+                             backend_mode="unavailable", independent_replay=False,
+                             receiver_mode="reference-scripted")
 
     async def submit(self, request: ActionRequest) -> Admission:
         if not isinstance(request, ActionRequest):
             raise TypeError("receiver requires ActionRequest")
         self._scope(request.workspace_id)
+        capabilities = await self.capabilities(request.contract_version)
+        if request.action.kind not in capabilities.actions:
+            raise UnsupportedCapability("action is unavailable under this contract version")
+        if isinstance(request.action, QueueResearchMoves) and request.preconditions.expected_revision is None:
+            raise ValueError("guidance requires an expected proof revision")
         digest = fingerprint(request)
         body = canonical_json(request)
         with self._lock:
@@ -114,14 +129,15 @@ class ReferenceReceiver:
             except (ValueError, KeyError, TypeError):
                 proof_id = None
         if proof_id is not None:
-            revision = self.service.store.head(proof_id)[0]
-            if pre.expected_revision is not None and revision != pre.expected_revision:
-                raise StalePrecondition("proof revision differs from precondition", request_id=request.request_id)
-            if pre.expected_theorem_hash is not None:
-                target = self.service.view.node(f"{proof_id}/proof")
-                target_hash = target.fields.get("target_artifact") if target else None
-                if pre.expected_theorem_hash != target_hash:
-                    raise StalePrecondition("target identity differs from precondition", request_id=request.request_id)
+            with self._service_lock:
+                revision = self.service.store.head(proof_id)[0]
+                if pre.expected_revision is not None and revision != pre.expected_revision:
+                    raise StalePrecondition("proof revision differs from precondition", request_id=request.request_id)
+                if pre.expected_theorem_hash is not None:
+                    target = self.service.view.node(f"{proof_id}/proof")
+                    target_hash = target.fields.get("target_artifact") if target else None
+                    if pre.expected_theorem_hash != target_hash:
+                        raise StalePrecondition("target identity differs from precondition", request_id=request.request_id)
         elif pre.expected_revision is not None or pre.expected_theorem_hash is not None:
             raise StalePrecondition("cannot check precondition against an unknown proof", request_id=request.request_id)
         if isinstance(request.action, ProofStatus) and request.action.at_revision is not None:
@@ -207,7 +223,16 @@ class ReferenceReceiver:
                 raise
         try:
             request = request_from_json(row["body"])
-            outcome = self.service.submit(self._legacy_request(request))
+            with self._service_lock:
+                if isinstance(request.action, SelectedProofCycle):
+                    action = request.action
+                    outcome = self.service._cycle(action.proof_id, operation_id,
+                        category=action.category, record_progress=False)
+                elif isinstance(request.action, QueueResearchMoves):
+                    outcome = self.service.queue_research_moves(request.action,
+                        expected_revision=request.preconditions.expected_revision)
+                else:
+                    outcome = self.service.submit(self._legacy_request(request))
             lifecycle = "failed" if outcome.get("phase") == "failed" or outcome.get("transport_status") == "error" else "succeeded"
         except Exception as exc:
             lifecycle = "failed"
@@ -252,8 +277,9 @@ class ReferenceReceiver:
         request = request_from_json(row["body"])
         outcome = json.loads(row["result"]) if row["result"] else None
         proof_id = getattr(request.action, "proof_id", None) or (outcome or {}).get("proof_id")
-        head = self.service.store.head(proof_id) if proof_id else (None, None)
-        watermark = self.service.view.snapshot(proof_id)[0] if proof_id else None
+        with self._service_lock:
+            head = self.service.store.head(proof_id) if proof_id else (None, None)
+            watermark = self.service.view.snapshot(proof_id)[0] if proof_id else None
         return OperationSnapshot(ref, row["request_id"], row["observation_version"], row["lifecycle"],
             execution_phase=(outcome or {}).get("phase"),
             mathematical_disposition=(outcome or {}).get("cycle_disposition"),
@@ -272,11 +298,12 @@ class ReferenceReceiver:
 
     async def read_status(self, *, workspace_id: str, proof_id: str, at_revision: int | None = None) -> ProjectDigest:
         self._scope(workspace_id)
-        if self.service.store.head(proof_id)[0] == 0:
-            raise KeyError("proof not found")
         # The reference status read is bounded and journal-backed; production
         # receivers should use their own async storage or bounded executor.
-        raw = self.service._status(proof_id)
+        with self._service_lock:
+            if self.service.store.head(proof_id)[0] == 0:
+                raise KeyError("proof not found")
+            raw = self.service._status(proof_id)
         if at_revision is not None and raw["revision"] != at_revision:
             raise UnsupportedCapability("historical revision read is unavailable")
         target_ref = raw["artifact_pointers"][0]
@@ -286,6 +313,56 @@ class ReferenceReceiver:
                              ArtifactRef(target_ref, len(target), "text/plain; charset=utf-8"),
                              target.decode("utf-8"), raw["claim_status"], bool(raw["formal_verified"]), raw["summary"],
                              "reference-scripted")
+
+    async def read_coordination(self, *, workspace_id: str, proof_id: str,
+                                cursor: str | None = None, page_size: int = 100) -> CoordinationPage:
+        """Page through one journal-pinned proof graph and its full frontier."""
+        self._scope(workspace_id)
+        with self._service_lock:
+            return self._read_coordination_locked(workspace_id, proof_id, cursor, page_size)
+
+    def _read_coordination_locked(self, workspace_id: str, proof_id: str,
+                                  cursor: str | None, page_size: int) -> CoordinationPage:
+        if type(page_size) is not int or not 1 <= page_size <= 200:
+            raise ValueError("page_size must be within 1..200")
+        self.service.catch_up(proof_id)
+        head_revision, head_hash = self.service.store.head(proof_id)
+        if head_revision == 0:
+            raise KeyError("proof not found")
+        revision, snapshot = self.service.view.snapshot(proof_id)
+        if revision != head_revision:
+            raise StalePrecondition("projection is behind the journal")
+        if cursor is None:
+            offset = 0
+        else:
+            prefix = f"{proof_id}:{revision}:"
+            if not cursor.startswith(prefix) or not cursor[len(prefix):].isdecimal():
+                raise StalePrecondition("coordination cursor is stale or belongs to another proof")
+            offset = int(cursor[len(prefix):])
+        nodes = snapshot.list_nodes(proof_id)
+        edges = snapshot.list_edges(proof_id)
+        if len(nodes) + len(edges) > 10_000:
+            raise UnsupportedCapability("reference coordination read exceeds its 10000-record bound")
+        items = [CoordinationItem("node", node.node_id, node.label, dict(node.fields))
+                 for node in nodes]
+        items.extend(CoordinationItem("edge", edge.edge_id, edge.rel_type,
+            {"src_id": edge.src_id, "dst_id": edge.dst_id, **dict(edge.fields)})
+            for edge in edges)
+        frontier = GlobalScheduler(snapshot, self.service.store).build_frontier(proof_id)
+        if len(items) + len(frontier) > 10_000:
+            raise UnsupportedCapability("reference coordination read exceeds its 10000-record bound")
+        items.extend(CoordinationItem("frontier", candidate.move_id, candidate.category,
+            {"detail": candidate.detail, "features": dict(candidate.features),
+             "conflict_ids": list(candidate.conflict_ids)}) for candidate in frontier)
+        if self.service.store.head(proof_id) != (head_revision, head_hash):
+            raise StalePrecondition("proof changed during coordination read")
+        if offset > len(items):
+            raise ValueError("coordination cursor exceeds item count")
+        selected = tuple(items[offset:offset + page_size])
+        next_offset = offset + len(selected)
+        next_cursor = f"{proof_id}:{revision}:{next_offset}" if next_offset < len(items) else None
+        return CoordinationPage(workspace_id, proof_id, revision, head_hash, revision,
+            selected, len(items), next_cursor, "reference-scripted")
 
     async def read_events(self, ref: OperationRef, cursor: str | None = None):
         self._scope(ref.workspace_id)

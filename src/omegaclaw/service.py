@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -334,7 +335,8 @@ class OperationService:
             "artifact_pointers": [claim.fields["literal_target_hash"]] if claim else [],
             "summary": f"claim remains {status}; independent Lean replay not recorded"}
 
-    def _cycle(self, proof_id: str, operation_id: str) -> dict:
+    def _cycle(self, proof_id: str, operation_id: str, *, category: str | None = None,
+               record_progress: bool = True) -> dict:
         attempt_id = f"{proof_id}/at-{operation_id.replace('-', '')}"
         self.catch_up(proof_id)
         existing = self.view.node(attempt_id)
@@ -346,20 +348,23 @@ class OperationService:
         scheduler = GlobalScheduler(self.view, self.store, worker_actors={
             "critic": "omega-critic", "formal-atp": "omega-formal-adapter",
             "llm-research": "omega-research-dispatch"})
-        lease = scheduler.lease_best_global_move(proof_id, ttl_seconds=15)
+        lease = scheduler.lease_best_global_move(proof_id, ttl_seconds=15, category=category)
         if lease is None:
-            frontier = scheduler.build_frontier(proof_id)
+            frontier = [item for item in scheduler.build_frontier(proof_id)
+                        if category is None or item.category == category]
             disposition = "waiting-on-lease" if frontier and self.store.active_leases(proof_id) else "idle"
             return {**self._status(proof_id), "cycle_disposition": disposition,
                 "component_mode": "scripted-reference",
                 "viable_move_ids": [candidate.move_id for candidate in frontier]}
-        self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id, "phase": "leased", "selected_move_id": lease.selected_move_id})
+        if record_progress:
+            self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id, "phase": "leased", "selected_move_id": lease.selected_move_id})
         try:
             packet = compile_packet(proof_id, lease, self.view, self.artifacts)
             packet_ref = self.artifacts.put(packet)
             verify_packet(self.artifacts.get(packet_ref), lease=lease,
                 view=self.view, artifacts=self.artifacts)
-            self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id, "phase": "request-saved", "packet_ref": packet_ref})
+            if record_progress:
+                self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id, "phase": "request-saved", "packet_ref": packet_ref})
             if lease.worker_class != "critic":
                 blocker = ("FORMAL_BACKEND_UNAVAILABLE" if lease.worker_class == "formal-atp"
                     else "THREADKEEPER_UNAVAILABLE")
@@ -392,9 +397,10 @@ class OperationService:
                     "selected_move_id": lease.selected_move_id}
             result_ref = self.artifacts.put(result_bytes)
             diagnostic_ref = self.artifacts.put(error_bytes)
-            self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id,
-                "phase": "result-saved", "packet_ref": packet_ref, "result_ref": result_ref,
-                "diagnostic_ref": diagnostic_ref})
+            if record_progress:
+                self.jobs.update(operation_id, {"operation_id": operation_id, "proof_id": proof_id,
+                    "phase": "result-saved", "packet_ref": packet_ref, "result_ref": result_ref,
+                    "diagnostic_ref": diagnostic_ref})
             try:
                 parsed = json.loads(result_bytes)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -423,6 +429,69 @@ class OperationService:
                 "selected_move_id": lease.selected_move_id}
         finally:
             scheduler.release(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
+
+    def queue_research_moves(self, action, *, expected_revision: int) -> dict:
+        """Translate bounded coordinator guidance into gate-checked speculative moves."""
+        proof_id = action.proof_id
+        self.catch_up(proof_id)
+        if self.store.head(proof_id)[0] == 0:
+            raise ContractError("unknown proof")
+        guidance = {"proof_id": action.proof_id, "intent_key": action.intent_key,
+                    "moves": [{"move_kind": move.move_kind, "detail": move.detail,
+                               "target_id": move.target_id} for move in action.moves]}
+        digest = hashlib.sha256(json.dumps(guidance, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        suffix = hashlib.sha256(action.intent_key.encode()).hexdigest()[:24]
+        state_id = f"{proof_id}/rs-coordination-{suffix}"
+        move_ids = [f"{proof_id}/rm-coordination-{suffix}-{index}" for index in range(len(action.moves))]
+        existing = self.view.node(state_id)
+        if existing is not None:
+            if existing.fields.get("guidance_digest") != digest:
+                raise ContractError("coordination intent key was reused with different guidance")
+            if any(self.view.node(move_id) is None for move_id in move_ids):
+                raise ContractError("committed guidance is incomplete")
+            return {**self._status(proof_id), "research_state_id": state_id,
+                    "research_move_ids": move_ids, "component_mode": "reference-scripted"}
+        revision = self.store.head(proof_id)[0]
+        if revision != expected_revision:
+            raise ContractError("coordination revision changed before commit")
+        ops = [UpsertNode("ResearchState", state_id,
+                          {"status": "open", "guidance_digest": digest,
+                           "coordination_intent_key": action.intent_key})]
+        for index, move in enumerate(action.moves):
+            if move.target_id is not None:
+                target = self.view.node(move.target_id)
+                if not move.target_id.startswith(proof_id + "/") or target is None:
+                    raise ContractError("guidance target does not belong to this proof")
+            else:
+                target = None
+            move_id = move_ids[index]
+            ops.append(UpsertNode("ResearchMove", move_id,
+                {"status": "queued", "move_kind": move.move_kind,
+                 "strategy": move.detail, "target_id": move.target_id,
+                 "guidance_digest": digest}))
+            ops.append(AddEdge("PROPOSES", state_id, move_id,
+                f"{proof_id}/coord-proposes-{suffix}-{index}"))
+            if target is not None and target.label == "Claim":
+                ops.append(AddEdge("MOVE_TARGETS", move_id, move.target_id,
+                    f"{proof_id}/coord-targets-{suffix}-{index}"))
+        lease_id = f"{proof_id}/coordination-{uuid.uuid4().hex}"
+        token = self.store.acquire_lease(proof_id, lease_id, actor=ACTOR,
+            worker_class="coordinator", ttl_seconds=30)
+        try:
+            if self.store.head(proof_id)[0] != expected_revision:
+                raise ContractError("coordination revision changed before commit")
+            proposal = Proposal(proof_id, ACTOR, "coordinator", ops=tuple(ops),
+                base_revision=expected_revision, lease_id=lease_id, fencing_token=token)
+            committed = self.gate.commit(proposal)
+            if not committed.accepted:
+                raise ContractError("gate rejected guidance: " + ", ".join(
+                    item.reason.value for item in committed.rejections))
+            self.catch_up(proof_id)
+            return {**self._status(proof_id), "research_state_id": state_id,
+                    "research_move_ids": move_ids, "component_mode": "reference-scripted"}
+        finally:
+            self.store.release_lease(proof_id, lease_id, fencing_token=token)
 
     def _audit(self, proof_id: str) -> dict:
         count = self.store.verify_chain(proof_id)
