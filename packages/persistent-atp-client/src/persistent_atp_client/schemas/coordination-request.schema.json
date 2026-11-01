@@ -1,0 +1,500 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.local/schemas/coordination-request-v2.1.1.json",
+  "title": "Persistent ATP coordinator-neutral ActionRequest contract 2.1 schema 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "schema_version",
+    "request_id",
+    "workspace_id",
+    "action",
+    "preconditions",
+    "deadline"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "2.1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/id"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/alias"
+    },
+    "action": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/proofCreate"
+        },
+        {
+          "$ref": "#/$defs/proofCycle"
+        },
+        {
+          "$ref": "#/$defs/proofStatus"
+        },
+        {
+          "$ref": "#/$defs/proofAudit"
+        },
+        {
+          "$ref": "#/$defs/proofExport"
+        },
+        {
+          "$ref": "#/$defs/formalSearch"
+        },
+        {
+          "$ref": "#/$defs/formalResume"
+        },
+        {
+          "$ref": "#/$defs/statementAlign"
+        },
+        {
+          "$ref": "#/$defs/lemmaBridge"
+        },
+        {
+          "$ref": "#/$defs/selectedProofCycle"
+        },
+        {
+          "$ref": "#/$defs/queueResearchMoves"
+        }
+      ]
+    },
+    "preconditions": {
+      "$ref": "#/$defs/preconditions"
+    },
+    "deadline": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f]+$"
+    },
+    "alias": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hash",
+        "size_bytes",
+        "media_type"
+      ],
+      "properties": {
+        "hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        },
+        "media_type": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          ]
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_steps",
+        "wall_clock_ms"
+      ],
+      "properties": {
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "wall_clock_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "preconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_theorem_hash",
+        "expected_revision",
+        "environment_hash",
+        "declaration_hash",
+        "checkpoint_hash"
+      ],
+      "properties": {
+        "expected_theorem_hash": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        },
+        "environment_hash": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        },
+        "declaration_hash": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        },
+        "checkpoint_hash": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/hash"
+            }
+          ]
+        }
+      }
+    },
+    "proofCreate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "spec_artifact"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-create"
+        },
+        "spec_artifact": {
+          "$ref": "#/$defs/artifact"
+        }
+      }
+    },
+    "proofCycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-cycle"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "proofStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "at_revision"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-status"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "at_revision": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        }
+      }
+    },
+    "proofAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-audit"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "proofExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "destination_alias"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-export"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "destination_alias": {
+          "$ref": "#/$defs/alias"
+        }
+      }
+    },
+    "formalSearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "claim_id",
+        "budget"
+      ],
+      "properties": {
+        "kind": {
+          "const": "formal-search"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/id"
+        },
+        "budget": {
+          "$ref": "#/$defs/budget"
+        }
+      }
+    },
+    "formalResume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "run_id",
+        "budget",
+        "checkpoint_artifact"
+      ],
+      "properties": {
+        "kind": {
+          "const": "formal-resume"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "budget": {
+          "$ref": "#/$defs/budget"
+        },
+        "checkpoint_artifact": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "statementAlign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "claim_id",
+        "lean_source_artifact"
+      ],
+      "properties": {
+        "kind": {
+          "const": "statement-align"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/id"
+        },
+        "lean_source_artifact": {
+          "$ref": "#/$defs/artifact"
+        }
+      }
+    },
+    "lemmaBridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "obstruction_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "lemma-bridge"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "obstruction_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "selectedProofCycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "category"
+      ],
+      "properties": {
+        "kind": {
+          "const": "proof-cycle-selected"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "category": {
+          "enum": [
+            "formal-run",
+            "research-move",
+            "critic-task"
+          ]
+        }
+      }
+    },
+    "researchGuidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "move_kind",
+        "detail",
+        "target_id"
+      ],
+      "properties": {
+        "move_kind": {
+          "$ref": "#/$defs/id"
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        }
+      }
+    },
+    "queueResearchMoves": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "intent_key",
+        "moves"
+      ],
+      "properties": {
+        "kind": {
+          "const": "queue-research-moves"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "intent_key": {
+          "$ref": "#/$defs/id"
+        },
+        "moves": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/researchGuidance"
+          }
+        }
+      }
+    }
+  }
+}

@@ -3,17 +3,17 @@
 from .client import AsyncClient, OperationHandle, SyncClient
 from .models import (
     ACTION_TYPES, ActionRequest, Admission, ArtifactRef, Budget, BudgetAmendment,
-    CancelRequest, CapabilitySet, DecisionResponse, Event, FormalResume, FormalSearch, LemmaBridge, OperationRef,
+    CancelRequest, CapabilitySet, CoordinationItem, CoordinationPage, DecisionResponse, Event, FormalResume, FormalSearch, LemmaBridge, OperationRef,
     OperationSnapshot, Preconditions, ProjectDigest, ProofAudit, ProofCreate, ProofCycle,
-    ProofExport, ProofStatus, StatementAlign,
+    ProofExport, ProofStatus, QueueResearchMoves, ResearchGuidance, SelectedProofCycle, StatementAlign,
 )
 from .ports import ReceiverPort
 from .schemas import schema_manifest
 
 __all__ = [
     "ACTION_TYPES", "ActionRequest", "Admission", "ArtifactRef", "AsyncClient",
-    "Budget", "BudgetAmendment", "CancelRequest", "CapabilitySet", "DecisionResponse", "Event", "FormalResume", "FormalSearch",
+    "Budget", "BudgetAmendment", "CancelRequest", "CapabilitySet", "CoordinationItem", "CoordinationPage", "DecisionResponse", "Event", "FormalResume", "FormalSearch",
     "LemmaBridge", "OperationHandle", "OperationRef", "OperationSnapshot",
     "Preconditions", "ProjectDigest", "ProofAudit", "ProofCreate", "ProofCycle", "ProofExport",
-    "ProofStatus", "ReceiverPort", "StatementAlign", "SyncClient", "schema_manifest",
+    "ProofStatus", "QueueResearchMoves", "ResearchGuidance", "ReceiverPort", "SelectedProofCycle", "StatementAlign", "SyncClient", "schema_manifest",
 ]

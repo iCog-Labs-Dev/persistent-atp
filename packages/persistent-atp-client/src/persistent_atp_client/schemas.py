@@ -5,7 +5,7 @@ import hashlib
 from importlib.resources import files
 import json
 
-SCHEMA_FILES = ("action-request.schema.json", "public-models.schema.json")
+SCHEMA_FILES = ("action-request.schema.json", "coordination-request.schema.json", "public-models.schema.json")
 
 
 def schema_manifest() -> tuple[dict[str, str], ...]:

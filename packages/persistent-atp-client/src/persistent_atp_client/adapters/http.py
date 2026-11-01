@@ -22,7 +22,7 @@ from ..errors import (
     UnsupportedCapability, UnsupportedContract,
 )
 from ..models import (
-    Admission, ArtifactRef, CapabilitySet, Event, OperationRef,
+    Admission, ArtifactRef, CapabilitySet, CoordinationItem, CoordinationPage, Event, OperationRef,
     OperationSnapshot, ProjectDigest,
 )
 
@@ -98,8 +98,11 @@ class HTTPReceiverAdapter:
     def _path(*segments):
         return "/".join(urllib.parse.quote(str(item), safe="") for item in segments)
 
-    async def capabilities(self):
-        raw = self._request("GET", "/v2/capabilities")
+    async def capabilities(self, *, contract_version="2.0"):
+        path = "/v2/capabilities"
+        if contract_version != "2.0":
+            path += "?" + urllib.parse.urlencode({"contract_version": contract_version})
+        raw = self._request("GET", path)
         _exact(raw, CapabilitySet)
         return CapabilitySet(raw["contract_version"], frozenset(raw["actions"]),
                              frozenset(raw["controls"]), raw["backend_mode"],
@@ -128,6 +131,18 @@ class HTTPReceiverAdapter:
         _exact(raw, ProjectDigest)
         raw["target_artifact"] = _artifact(raw["target_artifact"])
         return ProjectDigest(**raw)
+
+    async def read_coordination(self, *, workspace_id, proof_id, cursor=None, page_size=100):
+        query = urllib.parse.urlencode({"page_size": page_size, "cursor": cursor or ""})
+        raw = self._request("GET", "/v2/coordination/" + self._path(workspace_id, proof_id) + "?" + query)
+        _exact(raw, CoordinationPage)
+        if not isinstance(raw["items"], list):
+            raise ValueError("coordination items must be a list")
+        items = []
+        for item in raw["items"]:
+            _exact(item, CoordinationItem)
+            items.append(CoordinationItem(**item))
+        return CoordinationPage(**{**raw, "items": tuple(items)})
 
     async def read_events(self, ref, cursor=None):
         path = "/v2/events/" + self._path(ref.workspace_id, ref.operation_id)
