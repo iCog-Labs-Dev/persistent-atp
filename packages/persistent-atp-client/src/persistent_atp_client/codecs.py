@@ -7,7 +7,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions
+from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions, QueueResearchMoves, ResearchGuidance
 
 
 def _dump(value: Any) -> Any:
@@ -69,6 +69,10 @@ def request_from_dict(raw: object) -> ActionRequest:
                 data[name] = _strict(ArtifactRef, data[name])
     if cls.kind in {"formal-search", "formal-resume"} and "budget" in data:
         data["budget"] = _strict(Budget, data["budget"])
+    if cls is QueueResearchMoves and "moves" in data:
+        if not isinstance(data["moves"], list):
+            raise ValueError("moves must be a list")
+        data["moves"] = tuple(_strict(ResearchGuidance, move) for move in data["moves"])
     payload["action"] = _strict(cls, data)
     payload["preconditions"] = _strict(Preconditions, payload["preconditions"])
     if payload["deadline"] is not None:

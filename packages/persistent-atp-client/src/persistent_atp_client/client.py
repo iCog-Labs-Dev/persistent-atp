@@ -14,10 +14,11 @@ from .errors import (
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
 )
 from .models import (
-    ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
+    ACTION_TYPES, COORDINATION_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
     LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
-    ProofCreate, ProofCycle, ProofExport, StatementAlign, TERMINAL_LIFECYCLES,
+    ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
+    SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES,
 )
 from .ports import ReceiverPort
 
@@ -35,14 +36,17 @@ class AsyncClient:
 
     def prepare(self, action, *, workspace_id: str, preconditions: Preconditions | None = None,
                 request_id: str | None = None, deadline: datetime | None = None) -> ActionRequest:
+        version = "2.1" if getattr(action, "kind", None) in COORDINATION_ACTION_TYPES else "2.0"
         return ActionRequest(request_id=request_id or uuid.uuid4().hex,
                              workspace_id=workspace_id, action=action,
-                             preconditions=preconditions or Preconditions(), deadline=deadline)
+                             preconditions=preconditions or Preconditions(), deadline=deadline,
+                             contract_version=version)
 
-    async def capabilities(self):
-        caps = await self._port.capabilities()
-        if caps.contract_version != "2.0":
-            raise UnsupportedContract("receiver does not support contract 2.0")
+    async def capabilities(self, *, contract_version: str = "2.0"):
+        caps = await (self._port.capabilities() if contract_version == "2.0"
+                      else self._port.capabilities(contract_version=contract_version))
+        if caps.contract_version != contract_version:
+            raise UnsupportedContract(f"receiver does not support contract {contract_version}")
         return caps
 
     async def submit(self, request: ActionRequest) -> "OperationHandle":
@@ -50,7 +54,7 @@ class AsyncClient:
             raise RuntimeError("client is closed")
         if not isinstance(request, ActionRequest):
             raise TypeError("submit requires a prepared ActionRequest")
-        caps = await self.capabilities()
+        caps = await self.capabilities(contract_version=request.contract_version)
         if request.action.kind not in caps.actions:
             raise UnsupportedCapability(f"{request.action.kind} is unavailable", request_id=request.request_id)
         expected = fingerprint(request)
@@ -80,8 +84,27 @@ class AsyncClient:
     async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
         return await self.submit_action(ProofCreate(spec_artifact), workspace_id=workspace_id, **request_options)
 
-    async def proof_cycle(self, proof_id: str, *, workspace_id: str, **request_options):
-        return await self.submit_action(ProofCycle(proof_id), workspace_id=workspace_id, **request_options)
+    async def proof_cycle(self, proof_id: str, *, workspace_id: str,
+                          category: str | None = None, **request_options):
+        action = ProofCycle(proof_id) if category is None else SelectedProofCycle(proof_id, category)
+        return await self.submit_action(action, workspace_id=workspace_id, **request_options)
+
+    async def queue_research_moves(self, proof_id: str, intent_key: str,
+                                   moves: tuple[ResearchGuidance, ...], *, workspace_id: str,
+                                   preconditions: Preconditions, **request_options):
+        if preconditions.expected_revision is None:
+            raise ValueError("guidance requires expected_revision")
+        return await self.submit_action(QueueResearchMoves(proof_id, intent_key, moves),
+                                        workspace_id=workspace_id, preconditions=preconditions,
+                                        **request_options)
+
+    async def coordination_page(self, proof_id: str, *, workspace_id: str,
+                                cursor: str | None = None, page_size: int = 100):
+        caps = await self.capabilities(contract_version="2.1")
+        if "coordination-read" not in caps.controls:
+            raise UnsupportedCapability("coordination-read is unavailable")
+        return await self._port.read_coordination(workspace_id=workspace_id, proof_id=proof_id,
+                                                   cursor=cursor, page_size=page_size)
 
     async def proof_status(self, proof_id: str, *, workspace_id: str, at_revision: int | None = None):
         return await self.status(workspace_id=workspace_id, proof_id=proof_id, at_revision=at_revision)
@@ -214,6 +237,8 @@ class OperationHandle:
             if next_cursor is not None:
                 cursor = next_cursor
             elif not page:
+                if (await self.snapshot()).lifecycle in TERMINAL_LIFECYCLES:
+                    return
                 await asyncio.sleep(poll_interval)
 
     async def cancel(self, request: CancelRequest):
@@ -270,8 +295,11 @@ class SyncClient:
     def attach(self, ref: OperationRef):
         return self._client.attach(ref)
 
-    def capabilities(self):
-        return self._run(self._client.capabilities())
+    def capabilities(self, *, contract_version: str = "2.0"):
+        return self._run(self._client.capabilities(contract_version=contract_version))
+
+    def coordination_page(self, proof_id: str, **kwargs):
+        return self._run(self._client.coordination_page(proof_id, **kwargs))
 
     def close(self):
         return self._run(self._client.aclose())

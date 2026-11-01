@@ -31,10 +31,10 @@ real-atp = [
 persistent-atp-omega = "omegaclaw.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "src", "mork" = "mork"}
+package-dir = {"" = "src", "mork" = "mork", "persistent_atp_client" = "packages/persistent-atp-client/src/persistent_atp_client"}
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src", ".", "packages/persistent-atp-client/src"]
 namespaces = false
 include = [
     "alignment*",
@@ -44,6 +44,7 @@ include = [
     "omegaclaw*",
     "shared*",
     "mork*",
+    "persistent_atp_client*",
 ]
 
 [tool.setuptools.package-data]
@@ -53,6 +54,7 @@ omegaclaw = [
     "omega_plugin/*.metta",
     "omega_plugin/*.txt",
 ]
+persistent_atp_client = ["schemas/*.json"]
 [tool.pytest.ini_options]
 pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.

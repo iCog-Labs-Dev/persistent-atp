@@ -84,6 +84,55 @@ class ProofCycle:
         _identifier(self.proof_id, "proof_id")
 
 
+COORDINATION_CATEGORIES = frozenset({"formal-run", "research-move", "critic-task"})
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedProofCycle:
+    """One service-owned cycle restricted to a frontier category."""
+
+    kind: ClassVar[str] = "proof-cycle-selected"
+    proof_id: str
+    category: str
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        if self.category not in COORDINATION_CATEGORIES:
+            raise ValueError("unknown frontier category")
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchGuidance:
+    """A speculative move request; it carries no proof authority."""
+
+    move_kind: str
+    detail: str
+    target_id: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.move_kind, "move_kind")
+        if not isinstance(self.detail, str) or not self.detail.strip() or len(self.detail.encode("utf-8")) > 4096:
+            raise ValueError("guidance detail must be nonempty and at most 4096 bytes")
+        if self.target_id is not None:
+            _identifier(self.target_id, "target_id")
+
+
+@dataclass(frozen=True, slots=True)
+class QueueResearchMoves:
+    """Idempotently queue bounded guidance through the trusted receiver."""
+
+    kind: ClassVar[str] = "queue-research-moves"
+    proof_id: str
+    intent_key: str
+    moves: tuple[ResearchGuidance, ...]
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.intent_key, "intent_key")
+        if not isinstance(self.moves, tuple) or not 1 <= len(self.moves) <= 5 or not all(isinstance(move, ResearchGuidance) for move in self.moves):
+            raise ValueError("moves must contain one to five typed research guidance items")
+
+
 @dataclass(frozen=True, slots=True)
 class ProofStatus:
     kind: ClassVar[str] = "proof-status"
@@ -172,8 +221,10 @@ class LemmaBridge:
         _identifier(self.obstruction_id, "obstruction_id")
 
 
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge
-ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
+BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
+COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
+ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES}
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,10 +241,12 @@ class ActionRequest:
         _identifier(self.request_id, "request_id")
         _alias(self.workspace_id, "workspace_id")
         if type(self.action) not in ACTION_TYPES.values():
-            raise TypeError("action must be one of the nine typed actions")
+            raise TypeError("action must be a registered typed action")
         if not isinstance(self.preconditions, Preconditions):
             raise TypeError("preconditions must be Preconditions")
-        if self.contract_version != "2.0" or type(self.schema_version) is not int or self.schema_version != 1:
+        if (self.contract_version not in {"2.0", "2.1"}
+                or (self.contract_version == "2.0" and self.action.kind in COORDINATION_ACTION_TYPES)
+                or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):
             raise ValueError("deadline must be an aware UTC datetime")
@@ -309,6 +362,55 @@ class ProjectDigest:
 
 
 @dataclass(frozen=True, slots=True)
+class CoordinationItem:
+    """One read-only graph or scheduler record from a pinned proof revision."""
+
+    item_type: str
+    record_id: str
+    label: str
+    fields: dict[str, Any]
+
+    def __post_init__(self):
+        if self.item_type not in {"node", "edge", "frontier"}:
+            raise ValueError("unknown coordination item type")
+        _identifier(self.record_id, "record_id")
+        _identifier(self.label, "label")
+        if not isinstance(self.fields, dict) or not all(isinstance(key, str) for key in self.fields):
+            raise ValueError("coordination fields must be a string-keyed mapping")
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinationPage:
+    """A complete or explicitly continued proof-scoped coordination read."""
+
+    workspace_id: str
+    proof_id: str
+    revision: int
+    journal_hash: str
+    projection_watermark: int
+    items: tuple[CoordinationItem, ...]
+    total_items: int
+    next_cursor: str | None
+    component_mode: str
+
+    def __post_init__(self):
+        _alias(self.workspace_id, "workspace_id")
+        _identifier(self.proof_id, "proof_id")
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("revision must be nonnegative")
+        _hash(self.journal_hash, "journal_hash")
+        if type(self.projection_watermark) is not int or not 0 <= self.projection_watermark <= self.revision:
+            raise ValueError("invalid projection watermark")
+        if not isinstance(self.items, tuple) or not all(isinstance(item, CoordinationItem) for item in self.items):
+            raise ValueError("items must be typed coordination items")
+        if type(self.total_items) is not int or self.total_items < len(self.items):
+            raise ValueError("invalid coordination item count")
+        if self.next_cursor is not None:
+            _identifier(self.next_cursor, "next_cursor")
+        _identifier(self.component_mode, "component_mode")
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
     event_id: str
     sequence: int
@@ -334,9 +436,10 @@ class CapabilitySet:
     receiver_mode: str = "unavailable"
 
     def __post_init__(self):
-        if self.contract_version != "2.0":
+        if self.contract_version not in {"2.0", "2.1"}:
             raise ValueError("unsupported contract version")
-        if not self.actions <= ACTION_TYPES.keys():
+        supported = BASE_ACTION_TYPES.keys() if self.contract_version == "2.0" else ACTION_TYPES.keys()
+        if not self.actions <= supported:
             raise ValueError("unknown advertised action")
         if self.backend_mode not in {"real", "scripted-test", "unavailable"}:
             raise ValueError("unknown backend mode")
