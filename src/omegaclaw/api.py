@@ -101,7 +101,7 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                 parts = [unquote(item) for item in path.path.split("/") if item]
                 query = parse_qs(path.query)
                 if parts == ["v2", "capabilities"]:
-                    data = asyncio.run(receiver.capabilities())
+                    data = asyncio.run(receiver.capabilities(query.get("contract_version", ["2.0"])[0]))
                 elif len(parts) == 4 and parts[:2] == ["v2", "requests"]:
                     data = asyncio.run(receiver.lookup_request(parts[2], parts[3]))
                 elif len(parts) == 4 and parts[:2] == ["v2", "operations"]:
@@ -115,6 +115,10 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                     revision = query.get("at_revision", [None])[0]
                     data = asyncio.run(receiver.read_status(workspace_id=parts[2], proof_id=parts[3],
                         at_revision=int(revision) if revision is not None else None))
+                elif len(parts) == 4 and parts[:2] == ["v2", "coordination"]:
+                    data = asyncio.run(receiver.read_coordination(workspace_id=parts[2], proof_id=parts[3],
+                        cursor=query.get("cursor", [None])[0],
+                        page_size=int(query.get("page_size", ["100"])[0])))
                 elif len(parts) == 4 and parts[:2] == ["v2", "events"]:
                     events, cursor = asyncio.run(receiver.read_events(OperationRef(parts[2], parts[3]),
                         query.get("cursor", [None])[0]))

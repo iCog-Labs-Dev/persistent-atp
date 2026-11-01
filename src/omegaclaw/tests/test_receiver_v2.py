@@ -13,7 +13,8 @@ import urllib.request
 
 import pytest
 
-from persistent_atp_client import ArtifactRef, AsyncClient, Preconditions, ProofCreate, ProofCycle, ProofStatus
+from persistent_atp_client import (ArtifactRef, AsyncClient, Preconditions, ProofCreate,
+                                   ProofCycle, ProofStatus, ResearchGuidance)
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.errors import ArtifactUnavailable, IdempotencyConflict, StalePrecondition, UnsupportedCapability
@@ -74,6 +75,8 @@ def test_reference_http_port_matches_local_contract(tmp_path):
         remote = AsyncClient(HTTPReceiverAdapter(url, "long-reference-transport-token"))
         local = AsyncClient(LocalReceiverAdapter(receiver))
         assert (await remote.capabilities()) == (await local.capabilities())
+        assert (await remote.capabilities(contract_version="2.1")) == (
+            await local.capabilities(contract_version="2.1"))
         spec = json.dumps({"proof_id": "remotep", "title": "Remote",
                            "literal_target": "∀ x, x = x"}, ensure_ascii=False).encode()
         artifact = await remote.put_artifact(spec, workspace_id="reference", media_type="application/json")
@@ -89,6 +92,18 @@ def test_reference_http_port_matches_local_contract(tmp_path):
         assert (await local.status(workspace_id="reference", proof_id="remotep")) == (
             await remote.status(workspace_id="reference", proof_id="remotep"))
         assert service.store.verify_chain("remotep") == 1
+        page = await remote.coordination_page("remotep", workspace_id="reference", page_size=1)
+        assert page.revision == 1 and page.next_cursor
+        next_page = await remote.coordination_page("remotep", workspace_id="reference",
+                                                   cursor=page.next_cursor, page_size=1)
+        assert next_page.journal_hash == page.journal_hash
+        guidance = await remote.queue_research_moves("remotep", "remote-guidance",
+            (ResearchGuidance("bridge-lemma", "Investigate a bridging equality", "remotep/c-1"),),
+            workspace_id="reference", preconditions=Preconditions(expected_revision=1))
+        assert (await receiver.get_operation(guidance.ref)).proof_id == "remotep"
+        assert (await guidance.wait(timeout=5)).result["revision"] == 2
+        selected = await remote.proof_cycle("remotep", workspace_id="reference", category="research-move")
+        assert (await selected.wait(timeout=5)).result["error_code"] == "THREADKEEPER_UNAVAILABLE"
     try:
         asyncio.run(scenario())
     finally:

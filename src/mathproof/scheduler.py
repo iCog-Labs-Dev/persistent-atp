@@ -244,6 +244,7 @@ class GlobalScheduler:
 
     def lease_best_global_move(
         self, proof_id: str, ttl_seconds: float = 600.0,
+        *, category: str | None = None,
     ) -> Lease | None:
         """Lease the highest-ranked free move to its required worker class.
 
@@ -252,9 +253,13 @@ class GlobalScheduler:
         currently routable move is free, never proof completion. Journal
         revision races still raise `ConcurrencyError` from `claim_next`.
         """
+        if category is not None and category not in CATEGORY_WORKER_CLASS:
+            raise ValueError(f"unknown frontier category {category!r}")
         revision, frontier = self._snapshot_frontier(proof_id)
         scored: list[tuple[float, Candidate, str, dict[str, float]]] = []
         for candidate in frontier:
+            if category is not None and candidate.category != category:
+                continue
             try:
                 worker_class = CATEGORY_WORKER_CLASS[candidate.category]
             except KeyError as exc:
