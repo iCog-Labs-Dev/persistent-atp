@@ -105,10 +105,11 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
         assert completed.returncode == 0, completed.stderr[-6000:] + completed.stdout[-6000:]
         result_line = next(line for line in completed.stdout.splitlines() if line.startswith("PROCESS_RESULT="))
         result = json.loads(result_line.split("=", 1)[1])
-        assert result["registered_skills"] == 9
+        assert result["registered_skills"] == 12
         assert result["next_model_request_saw_digest"] is True
-        assert service.store.head("omegaproc")[0] == 1
-        assert service.store.verify_chain("omegaproc") == 1
+        assert service.store.head("omegaproc")[0] == 2
+        assert service.store.verify_chain("omegaproc") == 2
+        assert result["coordination"]["queued_revision"] == 2
         assert service.artifacts.exists(result["create"]["artifact_pointers"][0])
         assert result["deepseek_mock_roundtrip"] is True
         assert len(DeepSeekMockHandler.requests) == 6
@@ -121,7 +122,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path):
         assert first["model"] == "deepseek-flash"
         assert first["thinking"] == {"type": "disabled"}
         assert first["tool_choice"] == "required"
-        assert len(first["tools"]) == 9
+        assert len(first["tools"]) == 12
         assert all("strict" not in t["function"] for t in first["tools"])
         assert second["messages"][-2]["tool_calls"][0]["function"]["name"] == "proof-status"
         assert second["messages"][-1]["tool_call_id"] == "deepseek-call-1"

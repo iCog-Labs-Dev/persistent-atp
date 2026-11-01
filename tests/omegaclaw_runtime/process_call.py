@@ -32,7 +32,8 @@ assert "deepseek_provider" in catalogue, catalogue
 skills_once = execute("!(getSkills)")[0]
 assert skills_once.count('(proof-create "') == 1, skills_once
 for name in ("proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export",
-             "formal-search", "formal-resume", "statement-align", "lemma-bridge"):
+             "formal-search", "formal-resume", "statement-align", "lemma-bridge",
+             "coordination-page", "proof-cycle-selected", "queue-research-moves"):
     assert skills_once.count(f'({name} "') == 1, (name, skills_once)
 execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
 skills_twice = execute("!(getSkills)")[0]
@@ -68,6 +69,9 @@ tool_names = {
     "formal-resume": ("proof", "run", "budget", "workspace"),
     "statement-align": ("proof", "claim", "lean_source", "workspace"),
     "lemma-bridge": ("proof", "obstruction", "workspace"),
+    "coordination-page": ("proof", "cursor", "page_size", "workspace"),
+    "proof-cycle-selected": ("proof", "category", "workspace"),
+    "queue-research-moves": ("proof", "intent_key", "moves", "expected_revision", "workspace"),
 }
 tools = [providers.LLMTool().with_name(name).with_description(name).with_parameters(
     [providers.LLMToolParameter().with_name(param) for param in params])
@@ -124,8 +128,20 @@ next_request = providers.llmRequest(
     providers.llmRequestMessage("system", "Report only committed status"),
     [tool_message], 128, "low", [])
 assert next_request.messages[1].content == json.dumps(envelope)
+coordination = json.loads(execute('!(coordination-page "omegaproc" "" "100" "reference")')[0])
+assert coordination["revision"] == 1 and coordination["next_cursor"] is None, coordination
+guidance = json.dumps([{"move_kind": "bridge-lemma", "detail": "Investigate an intermediate equality",
+                        "target_id": "omegaproc/c-1"}])
+queued = json.loads(execute(f'!(queue-research-moves "omegaproc" "process-guidance" '
+                            f'{json.dumps(guidance)} "1" "reference")')[0])
+assert queued["revision"] == 2 and len(queued["research_move_ids"]) == 1, queued
+selected = json.loads(execute('!(proof-cycle-selected "omegaproc" "research-move" "reference")')[0])
+assert selected["error_code"] == "THREADKEEPER_UNAVAILABLE", selected
+assert selected["selected_move_id"] == queued["research_move_ids"][0], selected
 print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "next_model_request_saw_digest": envelope["event_hash"] in next_request.messages[1].content,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
-    "registered_skills": 9}, sort_keys=True), flush=True)
+    "registered_skills": 12,
+    "coordination": {"queued_revision": queued["revision"],
+                     "selected_move_id": selected["selected_move_id"]}}, sort_keys=True), flush=True)

@@ -8,7 +8,7 @@ Omega/PeTTa skill → Omega bridge → persistent_atp_client → ReceiverPort
                            persistent-ATP receiver → service → commit gate
 ```
 
-The client has no database or Omega dependency. Python 3.11 or later is required. The package's contract version is `2.0`; the package version is separate.
+The client has no database, Omega, or LangGraph dependency. Python 3.11 or later is required. The original nine actions retain contract `2.0`; coordinator reads and actions use capability-gated contract `2.1`.
 
 ## Install and start the reference receiver
 
@@ -16,7 +16,6 @@ From the persistent-atp repository root:
 
 ```bash
 .venv/bin/python -m ensurepip --upgrade
-UV_CACHE_DIR=tmp/uv-cache uv pip install -e packages/persistent-atp-client
 UV_CACHE_DIR=tmp/uv-cache uv pip install -e .
 
 export PERSISTENT_ATP_OMEGA_TOKEN='replace-with-a-secret-at-least-16-characters'
@@ -33,6 +32,13 @@ curl -H "Authorization: Bearer $PERSISTENT_ATP_OMEGA_TOKEN" \
 ```
 
 The reference receiver reports `receiver_mode=reference-scripted`, `backend_mode=unavailable`, and `independent_replay=false`. Its operation ledger and proof journal are durable SQLite files, but its graph view is in memory, its byte store is a labeled reference store, and its critic is scripted. This profile cannot certify a theorem through Lean.
+
+Check coordinator capabilities separately:
+
+```bash
+curl -H "Authorization: Bearer $PERSISTENT_ATP_OMEGA_TOKEN" \
+  'http://127.0.0.1:8765/v2/capabilities?contract_version=2.1'
+```
 
 ## Use the same client outside OmegaClaw
 
@@ -95,6 +101,34 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+Any coordinator can use the same client to inspect every committed node and edge of one proof, including the full scheduler frontier, and to queue typed speculative guidance. The receiver pins each page to a journal revision. A later commit invalidates a cursor; restart with a fresh first page. Guidance requires an expected revision and an intent key, so a retry cannot create duplicate moves. The receiver constructs graph operations and sends them through `CommitGate`.
+
+```python
+from persistent_atp_client import Preconditions, ResearchGuidance
+
+page = await client.coordination_page(PROOF_ID, workspace_id=WORKSPACE, page_size=100)
+items = list(page.items)
+while page.next_cursor:
+    page = await client.coordination_page(
+        PROOF_ID, workspace_id=WORKSPACE, cursor=page.next_cursor, page_size=100
+    )
+    items.extend(page.items)
+
+revision = page.revision
+handle = await client.queue_research_moves(
+    PROOF_ID, "audit-round-1",
+    (ResearchGuidance("bridge-lemma", "Investigate an intermediate equality", f"{PROOF_ID}/c-1"),),
+    workspace_id=WORKSPACE,
+    preconditions=Preconditions(expected_revision=revision),
+)
+queued = await handle.wait(timeout=10)
+cycle = await client.proof_cycle(PROOF_ID, workspace_id=WORKSPACE, category="research-move")
+result = await cycle.wait(timeout=10)
+print(queued.result["research_move_ids"], result.mathematical_disposition)
+```
+
+Persist a prepared `QueueResearchMoves` request with its request ID before submission when retry identity must survive a coordinator restart. Category values are `formal-run`, `research-move`, and `critic-task`. The selected cycle still uses the trusted scheduler and lease; a category with no available worker or backend returns an explicit blocked disposition.
+
 For a later intentional creation, choose a new proof ID and a new checkpoint file. For a retry of the same intent, reuse the saved `ActionRequest`. On ambiguous delivery, `SubmissionUncertain.request` also retains that exact request. An operation can be reattached with `client.attach(OperationRef.from_dict(saved_ref))`; handles are observations and `wait()` timing out does not cancel server work.
 
 ## Connect OmegaClaw
@@ -124,6 +158,9 @@ The installer registers the `persistent_atp` plugin in that Omega copy, installs
 | `formal-resume(proof, run, budget, workspace)` | `FormalResume` with parsed bounded JSON budget |
 | `statement-align(proof, claim, lean_source, workspace)` | `StatementAlign` with a content-addressed Lean source artifact |
 | `lemma-bridge(proof, obstruction, workspace)` | `LemmaBridge` |
+| `coordination-page(proof, cursor, page_size, workspace)` | Read one pinned `CoordinationPage`; use an empty cursor for the first page |
+| `proof-cycle-selected(proof, category, workspace)` | `SelectedProofCycle`, routed by the trusted scheduler |
+| `queue-research-moves(proof, intent_key, moves, expected_revision, workspace)` | `QueueResearchMoves` with a JSON list of typed guidance |
 
 For `statement-align`, upload the Lean source through a trusted facility first. The local CLI command is:
 
@@ -142,6 +179,6 @@ It returns an `artifact_ref` hash to pass as `lean_source`. The bridge does not 
 .venv/bin/python -m pytest -q tests/omegaclaw_runtime/test_omega_process.py
 ```
 
-The last test starts an actual pinned Omega/PeTTa process, loads all nine skills, sends a tool call through the client, reference receiver, service and commit gate, then checks that the next model request contains the committed digest. Its DeepSeek endpoint is a local mock; it is not a live model call. The test requires the pinned checkouts and `janus_swi`; it skips explicitly when those are absent. Check `.venv/bin/python -m omegaclaw.cli doctor --profile deepseek --require` before attempting a separate live DeepSeek run.
+The last test starts an actual pinned Omega/PeTTa process, loads the nine proof skills and three coordination skills, sends a tool call through the client, reference receiver, service and commit gate, then checks that the next model request contains the committed digest. It also queues guidance and selects its research frontier category through MeTTa. Its DeepSeek endpoint is a local mock; it is not a live model call. The test requires the pinned checkouts and `janus_swi`; it skips explicitly when those are absent. Check `.venv/bin/python -m omegaclaw.cli doctor --profile deepseek --require` before attempting a separate live DeepSeek run.
 
 The receiver and client report operation lifecycle separately from mathematical disposition and `formal_verified`. `succeeded` means an operation returned a valid result; it does not mean that the literal target was proved. Production readiness additionally requires the real artifact/MORK path, a real ATP executor and independent Lean replay.
