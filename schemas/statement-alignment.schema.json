@@ -64,7 +64,7 @@
     },
     "relation": {
       "description": "Direction of mismatch between informal claim and formal statement.",
-      "enum": ["exact", "strengthening", "weakening", "reformulation"]
+      "enum": ["exact", "strengthening", "weakening", "reformulation", "mismatch"]
     },
     "reviewer": {
       "type": "string",

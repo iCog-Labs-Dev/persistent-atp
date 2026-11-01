@@ -98,6 +98,67 @@ class TestFrontier(SchedulerCase):
         self.assertEqual(moves, set())
 
 
+class ContractOnlyView:
+    """Exposes the `ReadView` methods and nothing else: no `.nodes`, no `.edges`.
+
+    A live MORK view has no such dictionaries, so frontier construction must
+    work through the enumeration methods alone.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def snapshot(self, proof_id):
+        revision, snapshot = self._inner.snapshot(proof_id)
+        return revision, ContractOnlyView(snapshot)
+
+    def node(self, node_id):
+        return self._inner.node(node_id)
+
+    def edge(self, edge_id):
+        return self._inner.edge(edge_id)
+
+    def edges_from(self, node_id, rel_type):
+        return self._inner.edges_from(node_id, rel_type)
+
+    def edges_to(self, node_id, rel_type):
+        return self._inner.edges_to(node_id, rel_type)
+
+    def list_nodes(self, proof_id, label=None):
+        return self._inner.list_nodes(proof_id, label)
+
+    def list_edges(self, proof_id, rel_type=None):
+        return self._inner.list_edges(proof_id, rel_type)
+
+
+class TestFrontierThroughTheReadViewContract(unittest.TestCase):
+    def setUp(self):
+        self.store = JournalStore()
+
+    def frontier(self, view):
+        scheduler = GlobalScheduler(view, self.store, clock=lambda: 1000.0)
+        return {candidate.move_id for candidate in scheduler.build_frontier("p1")}
+
+    def test_the_wrapper_really_has_no_dictionaries(self):
+        view = ContractOnlyView(fixture_view())
+        self.assertFalse(hasattr(view, "nodes"))
+        self.assertFalse(hasattr(view, "edges"))
+
+    def test_frontier_construction_needs_only_the_contract(self):
+        self.assertEqual(self.frontier(ContractOnlyView(fixture_view())), ELIGIBLE)
+
+    def test_the_result_matches_the_in_memory_view(self):
+        self.assertEqual(
+            self.frontier(ContractOnlyView(fixture_view())), self.frontier(fixture_view())
+        )
+
+    def test_another_proofs_nodes_never_reach_the_frontier(self):
+        view = fixture_view()
+        view.add_node("p2/rs-1", "ResearchState", {"status": "open"})
+        view.add_node("p2/rm-1", "ResearchMove", {"status": "queued"})
+        self.assertEqual(self.frontier(ContractOnlyView(view)), ELIGIBLE)
+
+        
 class TestLeaseNext(SchedulerCase):
     def test_lease_next_returns_a_schema_shaped_lease(self):
         from mathproof.schemas import validate

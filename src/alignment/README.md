@@ -48,7 +48,7 @@ Every review systematically checks:
 3. **Hidden Assumptions**: Detects unstated assumptions of finiteness, non-emptiness, or decidability.
 4. **Universe & Typeclasses**: Checks appropriateness of Lean typeclass instances (`[Group G]`, `[Field K]`).
 5. **Classical vs. Constructive**: Checks whether noncomputable classical logic changes the claim's content.
-6. **Relative Strength**: Classifies theorem strength as `exact`, `strengthening`, `weakening`, or `reformulation`.
+6. **Relative Strength**: Classifies the relation as `exact`, `strengthening`, `weakening`, `reformulation`, or `mismatch`.
 7. **Definition Faithfulness**: Ensures Lean library definitions match the intended mathematical concepts.
 8. **Target Implication**: Confirms that proving the formal theorem directly implies the informal claim.
 

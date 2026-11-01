@@ -2,22 +2,16 @@
 test_projector.py — Tests for the MORK projector (journal -> <proof_id>.metta)
 """
 
-import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from projector import project_event_journal, project_journal_to_file
-from projector.writer import DEFAULT_OUTPUT_DIR
+from mork.projector import project_event_journal, project_journal_to_file
+from mork.projector.writer import DEFAULT_OUTPUT_DIR
 
 JOURNAL_PATH = (
     Path(__file__).resolve().parents[2] / "event_journals" / "event_journal.json"
-
-
 )
 
 
@@ -237,6 +231,48 @@ class TestProjectorCore(unittest.TestCase):
             '(rev-edge "test" "m1" "PROPOSES" "s1" "e1")', blob
         )
 
+    def test_removed_state_edge_does_not_leave_derived_state_id(self):
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Move", "id": "test/m1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+            ]),
+            (2, [{"op": "remove_edge", "rel": "PROPOSES", "edge_id": "test/e1"}]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"state_id"', blob)
+
+    def test_ambiguous_state_edges_do_not_invent_a_state_id(self):
+        journal = make_journal(
+            (1, [
+                {"op": "upsert_node", "label": "Move", "id": "test/m1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s1",
+                 "dst": "test/m1", "edge_id": "test/e1"},
+                {"op": "add_edge", "rel": "PROPOSES", "src": "test/s2",
+                 "dst": "test/m1", "edge_id": "test/e2"},
+            ]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"state_id"', blob)
+
+    def test_readding_an_edge_id_replaces_its_atom_family(self):
+        journal = make_journal(
+            (1, [{
+                "op": "add_edge", "rel": "OLD", "src": "test/a",
+                "dst": "test/b", "edge_id": "test/e1", "fields": {"old": 1},
+            }]),
+            (2, [{
+                "op": "add_edge", "rel": "NEW", "src": "test/c",
+                "dst": "test/d", "edge_id": "test/e1", "fields": {"new": 2},
+            }]),
+        )
+        blob = "\n".join(project_event_journal(journal))
+        self.assertNotIn('"OLD"', blob)
+        self.assertNotIn('"old"', blob)
+        self.assertIn('(edge "test" "e1" "NEW" "c" "d")', blob)
+        self.assertIn('(efield "test" "e1" "new" 2)', blob)
+
 
 class TestProjectJournalToFile(unittest.TestCase):
     """End-to-end: real journal -> .metta file named after the proof."""
@@ -270,7 +306,7 @@ class TestProjectJournalToFile(unittest.TestCase):
 
     def test_default_output_dir_is_mork_proofs(self):
         self.assertEqual(DEFAULT_OUTPUT_DIR.name, "proofs")
-        with patch("projector.writer.DEFAULT_OUTPUT_DIR", self.out_dir):
+        with patch("mork.projector.writer.DEFAULT_OUTPUT_DIR", self.out_dir):
             out_path = project_journal_to_file(JOURNAL_PATH)
         self.assertEqual(out_path.parent, self.out_dir)
 
