@@ -32,6 +32,9 @@ real-atp = [
     "mathematics-ai-atp",
 ]
 
+[project.scripts]
+persistent-atp = "coordinator.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src", "mork" = "mork"}
 

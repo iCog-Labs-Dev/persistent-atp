@@ -51,14 +51,27 @@ The graph state is a cache (Section 2.3, invariant 6). It holds round counters, 
 
 ## Running
 
-The core needs only the commit gate and the scheduler. The graph needs the optional extra:
+The core needs only the commit gate and the scheduler. The graph and CLI run command need the optional extra:
 
 ```
 uv sync --extra coordinator
-python -m pytest src/coordinator/tests
+.venv/bin/python -m coordinator init --journal ./proof.sqlite --proof-id p1 \
+  --statement 'For all n : Nat, n + 0 = n' \
+  --first-task 'Find a testable induction step'
+.venv/bin/python -m coordinator status --journal ./proof.sqlite --proof-id p1
+.venv/bin/python -m coordinator run --journal ./proof.sqlite --proof-id p1 --rounds 3
 ```
 
-`test_graph.py` is skipped when LangGraph is not installed.
+The run command reads `GEMINI_API_KEY` from the environment or `.env`. It runs the real research and critic workers. Pass `--lean-project /path/to/lean/project` to also run the formalizer, Lean statement checker and LLM alignment reviewer. To use live MORK projection, run the command through `scripts/with-mork.sh` and add `--backend mork`:
+
+```
+scripts/with-mork.sh .venv/bin/python -m coordinator run \
+  --journal ./proof.sqlite --proof-id p1 --backend mork --rounds 3
+```
+
+`init` accepts repeatable `--assumption` arguments and commits the literal theorem, assumptions and first research task through the gate. `status` reads and verifies the SQLite journal without an LLM or MORK. `run` prints the outcome, round reports, escalations, milestones and journal revision as JSON. It does not run formal ATP or independent replay, so its outcome is a workflow status, not a verified proof. The design's formal-run and replay CLI demo is still follow-up work.
+
+Run `python -m pytest src/coordinator/tests` for tests; graph tests are skipped when LangGraph is not installed, and live MORK tests are skipped when the library is unavailable.
 
 ## Not yet covered
 

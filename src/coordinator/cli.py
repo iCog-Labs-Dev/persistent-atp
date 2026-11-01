@@ -1,0 +1,203 @@
+"""Small journal-backed command line entry point for coordinator runs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Sequence
+
+from alignment.reviewer import LLMAlignmentReviewer
+from alignment.worker import AlignmentWorker
+from commit_gate.gate import CommitGate
+from commit_gate.ops import AddEdge, UpsertNode
+from commit_gate.proposal import Proposal
+from commit_gate.state import MemoryView
+from commit_gate.store import JournalStore
+from mathproof.dispatch import ScriptedDispatcher
+from mathproof.lean_statement import LeanStatementChecker
+from mathproof.workers import CriticWorker, FormalizerWorker, ResearchWorker
+from mork.backend import MorkUnavailable
+from shared.llm_client import GeminiLLMClient, LLMClientProtocol
+
+from .portfolio import AGENT_PORTFOLIO, PORTFOLIO, frontier_by_category
+from .workspace import ProofWorkspace, project
+
+
+def initialize(
+    journal: Path, proof_id: str, statement: str, first_task: str,
+    assumptions: Sequence[str] = (),
+) -> int:
+    """Seed one theorem and its first research move through the commit gate."""
+    if not statement.strip() or not first_task.strip():
+        raise ValueError("statement and first task must be nonempty")
+    if any(not item.strip() for item in assumptions):
+        raise ValueError("assumptions must be nonempty")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    store = JournalStore(str(journal))
+    if store.head(proof_id)[0] != 0:
+        raise ValueError(f"proof {proof_id!r} already has journal events")
+    claim = f"{proof_id}/theorem"
+    state = f"{proof_id}/rs-1"
+    move = f"{proof_id}/rm-1"
+    lease_id = f"{proof_id}/init"
+    token = store.acquire_lease(proof_id, lease_id, actor="init", worker_class="maintenance")
+    try:
+        result = CommitGate(MemoryView(), store).commit(Proposal(
+            proof_id=proof_id,
+            actor="init",
+            worker_class="maintenance",
+            base_revision=0,
+            lease_id=lease_id,
+            fencing_token=token,
+            ops=(
+                UpsertNode("Proof", f"{proof_id}/proof", {
+                    "title": statement.strip(), "assumptions": list(assumptions),
+                }),
+                UpsertNode("Claim", claim, {
+                    "status": "conjectural", "claim_text": statement.strip(),
+                    "assumptions": list(assumptions),
+                }),
+                UpsertNode("ResearchState", state, {"status": "open"}),
+                UpsertNode("ResearchMove", move, {
+                    "status": "queued", "state_id": state, "detail": first_task.strip(),
+                }),
+                AddEdge("HAS_TARGET", f"{proof_id}/proof", claim, f"{proof_id}/target"),
+                AddEdge("PROPOSES", state, move, f"{proof_id}/first-proposal"),
+                AddEdge("MOVE_TARGETS", move, claim, f"{proof_id}/first-target"),
+            ),
+        ))
+    finally:
+        store.release_lease(proof_id, lease_id, fencing_token=token)
+    if not result.accepted:
+        raise ValueError("initial proposal rejected: " + ", ".join(
+            rejection.reason.value for rejection in result.rejections
+        ))
+    return result.revision
+
+
+def inspect(journal: Path, proof_id: str) -> dict:
+    """Read the durable journal without needing MORK or an LLM."""
+    if not journal.is_file():
+        raise ValueError(f"journal does not exist: {journal}")
+    store = JournalStore(str(journal))
+    view = MemoryView()
+    revision = project(view, store, proof_id)
+    if revision == 0:
+        raise ValueError(f"proof {proof_id!r} has no journal events")
+    from .progress import read_proof
+
+    reading = read_proof(view, proof_id, revision)
+    return {
+        "proof_id": proof_id,
+        "revision": revision,
+        "verified_chain": store.verify_chain(proof_id),
+        "progress": list(reading.progress),
+        "frontier": frontier_by_category(
+            ProofWorkspace(proof_id, lambda: JournalStore(str(journal)), ScriptedDispatcher({}), view=view),
+            store,
+        ),
+    }
+
+
+def run_proof(
+    journal: Path,
+    proof_id: str,
+    *,
+    rounds: int,
+    backend: str,
+    lean_project: Path | None,
+    llm: LLMClientProtocol | None = None,
+) -> dict:
+    """Run configured agents over one proof, then summarize journal state."""
+    if rounds < 1:
+        raise ValueError("rounds must be positive")
+    if not journal.is_file() or JournalStore(str(journal)).head(proof_id)[0] == 0:
+        raise ValueError(f"proof {proof_id!r} has no journal events")
+    if backend == "mork":
+        from mork.backend import MorkSpace, MorkView
+        view = MorkView(MorkSpace())
+    elif backend == "memory":
+        view = MemoryView()
+    else:
+        raise ValueError(f"unknown backend: {backend}")
+    if lean_project is not None and not lean_project.is_dir():
+        raise ValueError(f"Lean project does not exist: {lean_project}")
+
+    try:
+        from .graph import Coordinator
+    except ImportError as exc:
+        if exc.name and exc.name.startswith("langgraph"):
+            raise ValueError("install the coordinator extra to run: uv sync --extra coordinator") from exc
+        raise
+    client = llm or GeminiLLMClient()
+    handlers = {
+        "llm-research": ResearchWorker(client).run,
+        "critic": CriticWorker(client).run,
+    }
+    adapters = {}
+    if lean_project is not None:
+        handlers["formalizer"] = FormalizerWorker(client).run
+        adapters = {
+            "alignment-reviewer": AlignmentWorker(
+                actor="alignment-reviewer",
+                reviewer=LLMAlignmentReviewer(client),
+            ),
+            "lean-statement-checker": LeanStatementChecker(lean_project),
+        }
+        slots = tuple(slot for slot in AGENT_PORTFOLIO if slot.category != "formal-run")
+    else:
+        slots = tuple(slot for slot in PORTFOLIO if slot.category != "formal-run")
+
+    workspace = ProofWorkspace(
+        proof_id=proof_id,
+        open_store=lambda: JournalStore(str(journal)),
+        dispatcher=ScriptedDispatcher(handlers),
+        adapters=adapters,
+        view=view,
+    )
+    result = Coordinator([workspace], max_rounds=rounds, slots=slots).run()
+    return {
+        **inspect(journal, proof_id),
+        "outcome": result["outcome"],
+        "rounds": result["round"],
+        "slots": [slot.role for slot in slots],
+        "reports": result["reports"],
+        "escalations": result["escalations"],
+        "milestones": result["milestones"],
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="persistent-atp")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("init", "status", "run"):
+        command = commands.add_parser(name)
+        command.add_argument("--journal", type=Path, required=True)
+        command.add_argument("--proof-id", required=True)
+        if name == "init":
+            command.add_argument("--statement", required=True)
+            command.add_argument("--first-task", default="Investigate the theorem and propose a testable next step")
+            command.add_argument("--assumption", action="append", default=[])
+        if name == "run":
+            command.add_argument("--rounds", type=int, default=3)
+            command.add_argument("--backend", choices=("memory", "mork"), default="memory")
+            command.add_argument("--lean-project", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "init":
+            output = {"proof_id": args.proof_id, "revision": initialize(
+                args.journal, args.proof_id, args.statement, args.first_task,
+                args.assumption,
+            )}
+        elif args.command == "status":
+            output = inspect(args.journal, args.proof_id)
+        else:
+            output = run_proof(
+                args.journal, args.proof_id, rounds=args.rounds,
+                backend=args.backend, lean_project=args.lean_project,
+            )
+    except (ValueError, OSError, MorkUnavailable) as exc:
+        parser.exit(1, f"{parser.prog}: {exc}\n")
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0
