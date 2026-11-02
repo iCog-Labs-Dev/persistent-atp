@@ -4,7 +4,7 @@ import unittest
 
 from commit_gate.state import MemoryView
 
-from coordinator.mechanisms import MECHANISM_FIELDS, check_mechanisms, mechanism_moves
+from coordinator.langgraph.mechanisms import MECHANISM_FIELDS, check_mechanisms, mechanism_moves
 
 TECHNIQUES = ("induction", "generating-functions", "probabilistic", "extremal", "algebraic")
 

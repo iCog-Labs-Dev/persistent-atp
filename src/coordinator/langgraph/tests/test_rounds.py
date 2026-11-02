@@ -9,9 +9,9 @@ import unittest
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 
-from coordinator.escalate import COORDINATOR_EDGES, COORDINATOR_LABELS
-from coordinator.policy import BRIDGE_LEMMA, FIVE_MECHANISMS, GLOBAL_AUDIT, REPAIR
-from coordinator.rounds import ACTIVE, PARKED, SOLVED, STALLED, assess, new_track, work
+from coordinator.langgraph.escalate import COORDINATOR_EDGES, COORDINATOR_LABELS
+from coordinator.langgraph.policy import BRIDGE_LEMMA, FIVE_MECHANISMS, GLOBAL_AUDIT, REPAIR
+from coordinator.langgraph.rounds import ACTIVE, PARKED, SOLVED, STALLED, assess, new_track, work
 
 from .fixtures import JournalCase, aligned_claim, critic, declaration, explorer
 

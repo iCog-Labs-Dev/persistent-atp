@@ -1621,11 +1621,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-coordinator = [
-    { name = "langgraph" },
-]
 dev = [
     { name = "pytest" },
+]
+langgraph = [
+    { name = "langgraph" },
 ]
 real-atp = [
     { name = "mathematics-ai-atp" },
@@ -1634,14 +1634,14 @@ real-atp = [
 [package.metadata]
 requires-dist = [
     { name = "jsonschema", specifier = ">=4.0" },
-    { name = "langgraph", marker = "extra == 'coordinator'", specifier = ">=1.0" },
+    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0" },
     { name = "mathematics-ai-atp", marker = "extra == 'real-atp'", git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" },
     { name = "neo4j", specifier = ">=5.14" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
 ]
-provides-extras = ["dev", "coordinator", "real-atp"]
+provides-extras = ["dev", "langgraph", "real-atp"]
 
 [[package]]
 name = "pluggy"

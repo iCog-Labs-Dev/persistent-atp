@@ -15,7 +15,7 @@ from commit_gate.store import JournalStore
 from mathproof.dispatch import ScriptedDispatcher
 from mathproof.formal_atp import FakeFormalATP
 
-from coordinator.workspace import ProofWorkspace, project
+from coordinator.langgraph.workspace import ProofWorkspace, project
 
 
 def declaration(proof_id: str, serial: int = 1, status: str = "aligned") -> UpsertNode:

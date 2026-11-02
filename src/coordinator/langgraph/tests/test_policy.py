@@ -4,7 +4,7 @@ import unittest
 
 from commit_gate.state import MemoryView
 
-from coordinator.policy import (
+from coordinator.langgraph.policy import (
     ALIGNMENT_REVIEW,
     BRIDGE_LEMMA,
     DIVERSIFY,
@@ -14,7 +14,7 @@ from coordinator.policy import (
     StagnationPolicy,
     classify,
 )
-from coordinator.progress import ProofReading, read_proof
+from coordinator.langgraph.progress import ProofReading, read_proof
 
 
 def proof() -> MemoryView:

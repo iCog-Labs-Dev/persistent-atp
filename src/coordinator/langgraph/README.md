@@ -1,6 +1,6 @@
 # Coordinator
 
-This directory contains the proof-cycle coordinator: the outer loop that runs rounds of dispatch cycles over one or more proofs, tracks their progress from committed state, and applies the stagnation policy of the architecture (Sections 10.2–10.5, 12.1). It is a LangGraph prototype of the coordinator role, built on the scheduler, dispatcher and commit gate; it replaces none of them.
+This directory contains the LangGraph proof-cycle coordinator: the outer loop that runs rounds of dispatch cycles over one or more proofs, tracks their progress from committed state, and applies the stagnation policy of the architecture (Sections 10.2–10.5, 12.1). It is a LangGraph prototype of the coordinator role, built on the scheduler, dispatcher and commit gate; it replaces none of them.
 
 ## What a round does
 
@@ -54,8 +54,8 @@ The graph state is a cache (Section 2.3, invariant 6). It holds round counters, 
 The core needs only the commit gate and the scheduler. The graph needs the optional extra:
 
 ```
-uv sync --extra coordinator
-python -m pytest src/coordinator/tests
+uv sync --extra langgraph
+python -m pytest src/coordinator/langgraph/tests
 ```
 
 `test_graph.py` is skipped when LangGraph is not installed.

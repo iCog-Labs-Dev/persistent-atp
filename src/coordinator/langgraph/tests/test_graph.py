@@ -12,12 +12,12 @@ try:
 except ImportError:  # pragma: no cover - exercised only without the extra
     InMemorySaver = None
 
-from coordinator.policy import BRIDGE_LEMMA, FIVE_MECHANISMS, GLOBAL_AUDIT, StagnationPolicy
+from coordinator.langgraph.policy import BRIDGE_LEMMA, FIVE_MECHANISMS, GLOBAL_AUDIT, StagnationPolicy
 
 from .fixtures import JournalCase, aligned_claim, critic, declaration, explorer
 
 if InMemorySaver is not None:
-    from coordinator.graph import BUDGET_EXHAUSTED, HALTED, Coordinator
+    from coordinator.langgraph.graph import BUDGET_EXHAUSTED, HALTED, Coordinator
 
 
 @unittest.skipIf(InMemorySaver is None, "langgraph is not installed")
