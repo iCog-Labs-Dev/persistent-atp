@@ -1,6 +1,7 @@
 *__pycache__
 .venv/
 .env
+.mork-ffi-src/
 *.egg-info/
 *.png
 *.dot

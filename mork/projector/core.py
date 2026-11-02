@@ -35,34 +35,22 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import defaultdict
 from typing import Any, Dict, List
+
+from mork.atoms import (
+    edge_atoms,
+    encode,
+    extract_local_id,
+    extract_proof_id,
+    node_atoms,
+    to_add_command,
+)
 
 
 def sanitize_value(value: Any) -> str:
-    """Sanitize a value for use in MORK atom syntax."""
-    if value is None:
-        return '""'
-    if isinstance(value, bool):
-        return str(value).lower()
-    if isinstance(value, (int, float)):
-        return str(value)
-    # Escape quotes and wrap in quotes
-    str_val = str(value).replace('"', '\\"')
-    return f'"{str_val}"'
-
-
-def extract_proof_id(node_id: str) -> str:
-    """Extract proof_id from a node id (format: proof_id/local_id)."""
-    if "/" in node_id:
-        return node_id.split("/")[0]
-    return node_id
-
-
-def extract_local_id(node_id: str) -> str:
-    """Extract local id from a node id (format: proof_id/local_id)."""
-    if "/" in node_id:
-        return node_id.split("/", 1)[1]
-    return node_id
+    """Backward-compatible name for the canonical atom-slot encoder."""
+    return encode(value)
 
 
 class Projector:
@@ -78,9 +66,8 @@ class Projector:
 
     def __init__(self):
         self.nodes: Dict[str, Dict[str, Any]] = {}  # node_id -> {label, fields}
-        self.edges: List[Dict[str, Any]] = []
+        self.edges: Dict[str, Dict[str, Any]] = {}
         self.node_state_map: Dict[str, str] = {}  # node_id -> state_local_id
-        self.removed_edge_ids: set = set()  # edge_ids retracted by remove_edge
 
     def process_event_journal(self, journal_data: Dict[str, Any]) -> List[str]:
         """Process the entire journal and return MORK commands."""
@@ -102,9 +89,7 @@ class Projector:
         for node_id, node_data in self.nodes.items():
             commands.extend(self._node_to_atoms(node_id, node_data))
 
-        for edge in self.edges:
-            if edge.get("edge_id", "") in self.removed_edge_ids:
-                continue
+        for edge in self.edges.values():
             commands.extend(self._edge_to_atoms(edge))
 
         return commands
@@ -132,15 +117,16 @@ class Projector:
             field_name = op.get("field", "")
             self.nodes[node_id]["fields"][field_name] = op.get("value")
         elif op_type == "add_edge":
-            self.edges.append({
+            edge_id = op.get("edge_id", "")
+            self.edges[edge_id] = {
                 "rel": op.get("rel", "RELATED"),
                 "src": op.get("src", ""),
                 "dst": op.get("dst", ""),
-                "edge_id": op.get("edge_id", ""),
+                "edge_id": edge_id,
                 "fields": dict(op.get("fields") or {}),
-            })
+            }
         elif op_type == "remove_edge":
-            self.removed_edge_ids.add(op.get("edge_id", ""))
+            self.edges.pop(op.get("edge_id", ""), None)
         else:
             print(f"projector: ignoring unknown op {op_type!r}", file=sys.stderr)
 
@@ -153,53 +139,37 @@ class Projector:
 
         The inferred id is emitted as a regular `state_id` field atom.
         """
-        for edge in self.edges:
+        candidates: dict[str, set[str]] = defaultdict(set)
+        for edge in self.edges.values():
             rel = edge.get("rel", "")
             src = edge.get("src", "")
             dst = edge.get("dst", "")
 
-            if rel == "PROPOSES":
-                # src is the state that proposes the move (dst)
-                state_local_id = extract_local_id(src)
-                self.node_state_map[dst] = state_local_id
+            if rel == "PROPOSES" and self.nodes.get(dst, {}).get("label") == "Move":
+                candidates[dst].add(extract_local_id(src))
+            elif rel == "ON_STATE" and self.nodes.get(src, {}).get("label") == "Attempt":
+                candidates[src].add(extract_local_id(dst))
 
-            elif rel == "ON_STATE":
-                # src is attempt, dst is state
-                state_local_id = extract_local_id(dst)
-                self.node_state_map[src] = state_local_id
+        self.node_state_map = {
+            node_id: next(iter(state_ids))
+            for node_id, state_ids in candidates.items()
+            if len(state_ids) == 1
+        }
 
     def _node_to_atoms(self, node_id: str, node_data: Dict[str, Any]) -> List[str]:
         """Convert a node to its node atom plus one field atom per field."""
         label = node_data.get("label", "Node")
         fields = node_data.get("fields", {})
 
-        proof_id = extract_proof_id(node_id)
-        local_id = extract_local_id(node_id)
-
-        atoms = [
-            f'!(add-atom &mork (node "{proof_id}" "{local_id}" {sanitize_value(label)}))'
+        return [
+            to_add_command(atom)
+            for atom in node_atoms(
+                node_id,
+                label,
+                fields,
+                derived_state_id=self.node_state_map.get(node_id),
+            )
         ]
-
-        # Layer scoping: all event-journal nodes are committed atoms.
-        atoms.append(
-            f'!(add-atom &mork (layer "{proof_id}" "{local_id}" "committed"))'
-        )
-
-        # Inject the inferred state reference as a regular field atom
-        state_id = self.node_state_map.get(node_id)
-        if state_id is not None:
-            atoms.append(
-                f'!(add-atom &mork (field "{proof_id}" "{local_id}" '
-                f'"state_id" "{state_id}"))'
-            )
-
-        for field_name, value in fields.items():
-            atoms.append(
-                f'!(add-atom &mork (field "{proof_id}" "{local_id}" '
-                f'{sanitize_value(field_name)} {sanitize_value(value)}))'
-            )
-
-        return atoms
 
     def _edge_to_atoms(self, edge: Dict[str, Any]) -> List[str]:
         """Convert an edge to its forward + reverse atoms plus efields.
@@ -217,30 +187,10 @@ class Projector:
         edge_id = edge.get("edge_id", "")
         fields = edge.get("fields", {})
 
-        proof_id = extract_proof_id(edge_id)
-        local_edge_id = extract_local_id(edge_id)
-        local_src = extract_local_id(src)
-        local_dst = extract_local_id(dst)
-
-        atoms = [
-            # Forward edge
-            f'!(add-atom &mork (edge "{proof_id}" "{local_edge_id}" '
-            f'{sanitize_value(rel)} "{local_src}" "{local_dst}"))',
-            # Reverse edge 
-            f'!(add-atom &mork (rev-edge "{proof_id}" "{local_dst}" '
-            f'{sanitize_value(rel)} "{local_src}" "{local_edge_id}"))',
-            # Edge layer
-            f'!(add-atom &mork (layer "{proof_id}" '
-            f'"edge:{local_edge_id}" "committed"))',
+        return [
+            to_add_command(atom)
+            for atom in edge_atoms(rel, src, dst, edge_id, fields)
         ]
-
-        for field_name, value in fields.items():
-            atoms.append(
-                f'!(add-atom &mork (efield "{proof_id}" "{local_edge_id}" '
-                f'{sanitize_value(field_name)} {sanitize_value(value)}))'
-            )
-
-        return atoms
 
 
 def project_event_journal(journal_data: Dict[str, Any]) -> List[str]:

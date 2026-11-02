@@ -244,6 +244,7 @@ class GlobalScheduler:
 
     def lease_best_global_move(
         self, proof_id: str, ttl_seconds: float = 600.0,
+        *, category: str | None = None,
     ) -> Lease | None:
         """Lease the highest-ranked free move to its required worker class.
 
@@ -252,9 +253,13 @@ class GlobalScheduler:
         currently routable move is free, never proof completion. Journal
         revision races still raise `ConcurrencyError` from `claim_next`.
         """
+        if category is not None and category not in CATEGORY_WORKER_CLASS:
+            raise ValueError(f"unknown frontier category {category!r}")
         revision, frontier = self._snapshot_frontier(proof_id)
         scored: list[tuple[float, Candidate, str, dict[str, float]]] = []
         for candidate in frontier:
+            if category is not None and candidate.category != category:
+                continue
             try:
                 worker_class = CATEGORY_WORKER_CLASS[candidate.category]
             except KeyError as exc:
@@ -345,7 +350,7 @@ class GlobalScheduler:
             )
         events = self._store.read_events_between(proof_id, view_revision, revision)
         ops = tuple(op for event in events for op in Proposal.from_dict(event).ops)
-        node_ids = dict.fromkeys(self._node_ids(snapshot))
+        node_ids = dict.fromkeys(self._node_ids(snapshot, proof_id))
         node_ids.update((op.node_id, None) for op in ops if isinstance(op, UpsertNode))
         view = JournalOverlayView(snapshot, revision, ops)
         return revision, self._build_frontier(proof_id, view, node_ids)
@@ -495,15 +500,8 @@ class GlobalScheduler:
         return {"policy_name": self._policy.name, "weights": dict(self._policy.weights)}
 
     # -- helpers ---------------------------------------------------------------
-
-    def _node_ids(self, view: ReadView) -> list[str]:
-        nodes = getattr(view, "nodes", None)
-        if nodes is None:
-            raise TypeError(
-                "frontier construction needs a view exposing known node ids "
-                "(MemoryView provides `.nodes`; Neo4j adapters should query directly)"
-            )
-        return list(nodes.keys())
+    def _node_ids(self, view: ReadView, proof_id: str) -> list[str]:
+        return [record.node_id for record in view.list_nodes(proof_id)]
 
     def _has_favorable_verdict(self, view: ReadView, claim_id: str) -> bool:
         for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):
