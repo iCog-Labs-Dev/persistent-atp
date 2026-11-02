@@ -62,8 +62,8 @@ def result_to_proposal(
       checkpoint/certificate/obstruction ops.
     * ``critic``     -- a verdict becomes the critic's Attempt plus its
       REVIEWS_CLAIM edge (and the claim promotion when favorable).
-    * ``llm-research``/``hyperon`` -- a proposed research move becomes a
-      queued ResearchMove under its parent state.
+    * ``llm-research``/``hyperon`` -- proposed research moves become queued
+      ResearchMoves under their parent state.
     """
     worker_class = lease.worker_class
     if worker_class == "formal-atp":
@@ -79,6 +79,7 @@ def result_to_proposal(
             result,
             proof_id=lease.proof_id,
             view=view,
+            leased_move_id=lease.selected_move_id,
         )
     # The gate binds a leased proposal to its holder and move, so both come
     # from the lease the scheduler issued, never from what the worker reports.
@@ -288,18 +289,21 @@ def formal_result_to_ops(
 def critic_result_to_ops(
     result: Mapping[str, Any], *, claim_id: str, attempt_id: str
 ) -> list[Any]:
-    """A critic verdict: the Attempt, its review edge, maybe the promotion."""
+    """A critic verdict: the Attempt, its review edge, maybe the promotion.
+
+    An ``earliest_gap`` -- the first step the critic could not justify -- is
+    kept on the Attempt, where a repair of the claim starts from.
+    """
     verdict = result["verdict"]
+    fields = {
+        "actor": result.get("actor", "critic"),
+        "worker_class": "critic",
+        "status": verdict,
+    }
+    if result.get("earliest_gap"):
+        fields["earliest_gap"] = result["earliest_gap"]
     ops: list[Any] = [
-        UpsertNode(
-            "Attempt",
-            attempt_id,
-            {
-                "actor": result.get("actor", "critic"),
-                "worker_class": "critic",
-                "status": verdict,
-            },
-        ),
+        UpsertNode("Attempt", attempt_id, fields),
         AddEdge(
             "REVIEWS_CLAIM",
             attempt_id,
@@ -315,21 +319,41 @@ def critic_result_to_ops(
 
 
 def research_result_to_ops(
-    result: Mapping[str, Any], *, proof_id: str, view: ReadView
+    result: Mapping[str, Any],
+    *,
+    proof_id: str,
+    view: ReadView,
+    leased_move_id: str | None = None,
 ) -> list[Any]:
-    """An explorer outcome: a queued ResearchMove under a parent state."""
+    """An explorer outcome: queued ResearchMoves under a parent state.
+
+    A result names one move by ``detail``, or several under ``moves`` (a
+    five-mechanism answer, Section 10.5), each carrying its own fields.
+    ``move_status`` reports what became of the leased move itself, so a move
+    that has been worked leaves the frontier instead of being leased again.
+    """
     parent_state_id = result["parent_state_id"]
+    proposed = result.get("moves")
+    if proposed is None:
+        proposed = [{"move_id": result.get("move_id"), "detail": result.get("detail", "")}]
     serial = _next_serial(view, "rm")
-    move_id = result.get("move_id") or f"{proof_id}/rm-{serial}"
-    detail = result.get("detail", "")
-    return [
-        UpsertNode(
-            "ResearchMove",
-            move_id,
-            {"status": "queued", "detail": detail},
-        ),
-        AddEdge("PROPOSES", parent_state_id, move_id, f"{move_id}-proposed"),
-    ]
+    ops: list[Any] = []
+    for entry in proposed:
+        fields = {
+            key: value
+            for key, value in entry.items()
+            if key not in ("move_id", "status")
+        }
+        fields.setdefault("detail", "")
+        move_id = entry.get("move_id") or f"{proof_id}/rm-{serial}"
+        serial += 1
+        ops.append(UpsertNode("ResearchMove", move_id, {"status": "queued", **fields}))
+        ops.append(AddEdge("PROPOSES", parent_state_id, move_id, f"{move_id}-proposed"))
+
+    leased = view.node(leased_move_id) if leased_move_id else None
+    if result.get("move_status") and leased is not None and leased.label == "ResearchMove":
+        _advance_status(ops, "ResearchMove", leased, {"status": result["move_status"]})
+    return ops
 
 
 # -- helpers --------------------------------------------------------------------
