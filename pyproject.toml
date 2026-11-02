@@ -28,10 +28,11 @@ real-atp = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "src", "mork" = "mork"}
+package-dir = {"" = "src", "mork" = "mork", "persistent_atp_client" = "packages/persistent-atp-client/src/persistent_atp_client"}
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src", ".", "packages/persistent-atp-client/src"]
+namespaces = false
 include = [
     "alignment*",
     "artifacts*",
@@ -39,10 +40,14 @@ include = [
     "mathproof*",
     "shared*",
     "mork*",
+    "persistent_atp_client*",
 ]
 
+[tool.setuptools.package-data]
+persistent_atp_client = ["py.typed", "schemas/*.json"]
+
 [tool.pytest.ini_options]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.
 testpaths = [
     "src/commit_gate/tests",
@@ -50,6 +55,7 @@ testpaths = [
     "src/mathproof/tests",
     "src/alignment/tests",
     "src/artifacts/tests",
+    "packages/persistent-atp-client/tests",
     "mork/projector/tests",
     "mork/visualizer/tests",
     "mork/tests",
