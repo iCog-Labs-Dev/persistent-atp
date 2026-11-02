@@ -1,0 +1,11 @@
+{
+  "task_id": "task-7",
+  "proof_id": "p1",
+  "base_revision": 12,
+  "packet_kind": "research",
+  "worker_class": "llm-research",
+  "text_budget": {
+    "max_tokens": 1200
+  },
+  "formal_limits": null
+}
