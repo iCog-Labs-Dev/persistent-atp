@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import time
 import uuid
 from datetime import datetime
@@ -30,6 +31,11 @@ def _response(value, cls):
     if not isinstance(value, cls):
         raise ReceiverProtocolError(f"receiver must return {cls.__name__}")
     return value
+
+
+def _duration(value, name):
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
 
 
 def _admission(receipt, workspace_id, request_id, expected=None):
@@ -234,8 +240,8 @@ class OperationHandle:
         return result
 
     async def wait(self, *, timeout: float, poll_interval: float = 0.1) -> OperationSnapshot:
-        if timeout <= 0 or poll_interval <= 0:
-            raise ValueError("timeout and poll_interval must be positive")
+        _duration(timeout, "timeout")
+        _duration(poll_interval, "poll_interval")
         end = time.monotonic() + timeout
         while True:
             left = end - time.monotonic()
@@ -250,13 +256,22 @@ class OperationHandle:
             await asyncio.sleep(min(poll_interval, max(0, end - time.monotonic())))
 
     async def events(self, *, cursor: str | None = None, poll_interval: float = 0.1) -> AsyncIterator[Event]:
+        _duration(poll_interval, "poll_interval")
         seen: set[str] = set()
         refreshed = False
         last_sequence = -1
         last_observation_version = -1
         while True:
             try:
-                page, next_cursor = await self._client._port.read_events(self.ref, cursor)
+                response = await self._client._port.read_events(self.ref, cursor)
+                if not isinstance(response, tuple) or len(response) != 2:
+                    raise ReceiverProtocolError("invalid event page")
+                page, next_cursor = response
+                if not isinstance(page, tuple) or not all(isinstance(event, Event) for event in page):
+                    raise ReceiverProtocolError("invalid event records")
+                if next_cursor is not None and (not isinstance(next_cursor, str)
+                        or not 1 <= len(next_cursor) <= 128 or any(ord(c) < 32 for c in next_cursor)):
+                    raise ReceiverProtocolError("invalid event cursor")
             except CursorExpired:
                 if refreshed:
                     raise
@@ -265,19 +280,23 @@ class OperationHandle:
                 refreshed = True
                 continue
             refreshed = False
+            emitted = False
             for event in page:
                 if event.operation_ref != self.ref:
-                    raise ValueError("out-of-scope event")
+                    raise ReceiverProtocolError("out-of-scope event")
                 if event.event_id not in seen:
                     if event.sequence <= last_sequence or event.observation_version < last_observation_version:
-                        raise ValueError("receiver event sequence or observation regressed")
+                        raise ReceiverProtocolError("receiver event sequence or observation regressed")
                     last_sequence = event.sequence
                     last_observation_version = event.observation_version
                     seen.add(event.event_id)
+                    emitted = True
                     yield event
             if next_cursor is not None:
                 cursor = next_cursor
-            elif not page:
+            elif emitted:
+                cursor = page[-1].cursor
+            if not emitted:
                 if (await self.snapshot()).lifecycle in TERMINAL_LIFECYCLES:
                     return
                 await asyncio.sleep(poll_interval)
