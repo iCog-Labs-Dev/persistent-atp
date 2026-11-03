@@ -12,6 +12,7 @@ from persistent_atp_client import (
     FormalResume, FormalSearch, LemmaBridge, OperationRef, OperationSnapshot,
     ProofAudit, ProofCreate, ProofCycle, ProofExport, ProofStatus, StatementAlign,
     SyncClient,
+    ProjectDigest,
 )
 from persistent_atp_client.codecs import canonical_json, fingerprint, request_from_dict, request_from_json, to_dict
 from persistent_atp_client.errors import HashMismatch, SubmissionUncertain
@@ -79,7 +80,8 @@ class ScriptedPort:
         return self.snapshot
 
     async def read_status(self, **kwargs):
-        return kwargs
+        return ProjectDigest(kwargs["workspace_id"], kwargs["proof_id"], 1, HASH, 1,
+            ArtifactRef(HASH), "True", "provisional", False, "scripted status", "scripted-test")
 
     async def put_artifact(self, source, **_):
         self.uploaded = source
@@ -164,5 +166,5 @@ def test_named_methods_share_preparation_and_submission_path():
         assert [item.action.kind for item in port.requests] == [
             "proof-create", "proof-cycle", "proof-audit", "proof-export",
             "formal-search", "formal-resume", "statement-align", "lemma-bridge"]
-        assert (await client.proof_status("p1", workspace_id="w"))["proof_id"] == "p1"
+        assert (await client.proof_status("p1", workspace_id="w")).proof_id == "p1"
     asyncio.run(scenario())

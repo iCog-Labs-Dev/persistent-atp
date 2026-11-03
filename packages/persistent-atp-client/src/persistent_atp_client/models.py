@@ -298,6 +298,14 @@ class Admission:
             raise ValueError("accepted admission requires an operation reference")
         if not self.accepted and self.operation_ref is not None:
             raise ValueError("rejected admission cannot contain an operation reference")
+        for ref in (self.operation_ref, self.coalesced_to):
+            if ref is not None and not isinstance(ref, OperationRef):
+                raise TypeError("admission references must be OperationRef")
+        if (self.operation_ref is not None and self.coalesced_to is not None
+                and self.operation_ref.workspace_id != self.coalesced_to.workspace_id):
+            raise ValueError("coalesced operation belongs to another workspace")
+        if self.error_code is not None:
+            _identifier(self.error_code, "error_code")
 
 
 LIFECYCLES = frozenset(("queued", "running", "waiting-on-review", "waiting-on-dependency", "waiting-on-resource", "cancelling", "succeeded", "failed", "cancelled"))
@@ -320,6 +328,8 @@ class OperationSnapshot:
     result: dict[str, Any] | None = None
 
     def __post_init__(self):
+        if not isinstance(self.ref, OperationRef):
+            raise TypeError("ref must be OperationRef")
         _identifier(self.request_id, "request_id")
         if type(self.observation_version) is not int or self.observation_version < 0:
             raise ValueError("observation_version must be nonnegative")
@@ -331,6 +341,17 @@ class OperationSnapshot:
             raise ValueError("projection_watermark must be nonnegative")
         if self.journal_hash is not None:
             _hash(self.journal_hash, "journal_hash")
+        if (self.project_revision is not None and self.projection_watermark is not None
+                and self.projection_watermark > self.project_revision):
+            raise ValueError("projection watermark exceeds project revision")
+        for name in ("proof_id", "execution_phase", "mathematical_disposition"):
+            if getattr(self, name) is not None:
+                _identifier(getattr(self, name), name)
+        if not isinstance(self.evidence_artifacts, tuple) or not all(
+                isinstance(ref, ArtifactRef) for ref in self.evidence_artifacts):
+            raise TypeError("evidence_artifacts must be typed artifact references")
+        if self.result is not None and not isinstance(self.result, dict):
+            raise TypeError("result must be an object or null")
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +380,12 @@ class ProjectDigest:
             raise ValueError("formal_verified must be boolean")
         if not isinstance(self.literal_target, str) or not self.literal_target:
             raise ValueError("literal_target must be exact nonempty text")
+        if not isinstance(self.target_artifact, ArtifactRef):
+            raise TypeError("target_artifact must be ArtifactRef")
+        _identifier(self.claim_status, "claim_status")
+        _identifier(self.component_mode, "component_mode")
+        if not isinstance(self.summary, str):
+            raise TypeError("summary must be text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +451,11 @@ class Event:
         _identifier(self.cursor, "cursor")
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("sequence must be nonnegative")
+        if type(self.observation_version) is not int or self.observation_version < 0:
+            raise ValueError("observation_version must be nonnegative")
+        if not isinstance(self.operation_ref, OperationRef):
+            raise TypeError("operation_ref must be OperationRef")
+        _identifier(self.event_type, "event_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +468,13 @@ class CapabilitySet:
     receiver_mode: str = "unavailable"
 
     def __post_init__(self):
+        if not isinstance(self.actions, frozenset) or not all(isinstance(action, str) for action in self.actions):
+            raise TypeError("actions must be a frozenset of strings")
+        if not isinstance(self.controls, frozenset) or not all(isinstance(control, str) for control in self.controls):
+            raise TypeError("controls must be a frozenset of strings")
+        if type(self.independent_replay) is not bool:
+            raise TypeError("independent_replay must be boolean")
+        _identifier(self.receiver_mode, "receiver_mode")
         if self.contract_version not in {"2.0", "2.1"}:
             raise ValueError("unsupported contract version")
         supported = BASE_ACTION_TYPES.keys() if self.contract_version == "2.0" else ACTION_TYPES.keys()
