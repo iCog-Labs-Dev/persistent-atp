@@ -8,7 +8,7 @@ Omega/PeTTa skill → Omega bridge → persistent_atp_client → ReceiverPort
                            persistent-ATP receiver → service → commit gate
 ```
 
-The client has no database, Omega, or LangGraph dependency. Python 3.11 or later is required. The original nine actions retain contract `2.0`; coordinator reads and actions use capability-gated contract `2.1`.
+The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The package version is `0.2.0`; the original nine actions retain contract `2.0`, and coordinator reads and actions use capability-gated contract `2.1`.
 
 The receiver and Omega commands below require `feat/omegaclaw-integration`; this branch supplies the standalone library and its contract tests.
 
@@ -18,6 +18,7 @@ From the persistent-atp repository root:
 
 ```bash
 .venv/bin/python -m ensurepip --upgrade
+UV_CACHE_DIR=tmp/uv-cache uv pip install -e 'packages/persistent-atp-client[http]'
 UV_CACHE_DIR=tmp/uv-cache uv pip install -e .
 
 export PERSISTENT_ATP_OMEGA_TOKEN='replace-with-a-secret-at-least-16-characters'
@@ -184,3 +185,50 @@ It returns an `artifact_ref` hash to pass as `lean_source`. The bridge does not 
 The last test starts an actual pinned Omega/PeTTa process, loads the nine proof skills and three coordination skills, sends a tool call through the client, reference receiver, service and commit gate, then checks that the next model request contains the committed digest. It also queues guidance and selects its research frontier category through MeTTa. Its DeepSeek endpoint is a local mock; it is not a live model call. The test requires the pinned checkouts and `janus_swi`; it skips explicitly when those are absent. Check `.venv/bin/python -m omegaclaw.cli doctor --profile deepseek --require` before attempting a separate live DeepSeek run.
 
 The receiver and client report operation lifecycle separately from mathematical disposition and `formal_verified`. `succeeded` means an operation returned a valid result; it does not mean that the literal target was proved. Production readiness additionally requires the real artifact/MORK path, a real ATP executor and independent Lean replay.
+
+## Client reliability and migration from 0.1
+
+Install `persistent-atp-client[http]` wherever `HTTPReceiverAdapter` runs, including an external plugin's Python environment. A source copy of the client alone does not install the HTTP extra. Missing `httpx` raises an explicit installation error; there is no synchronous transport fallback. Local/test adapters and offline request preparation remain dependency-free.
+
+The HTTP adapter now performs cooperative asynchronous I/O, with a total per-request timeout covering connection and response-body consumption. Each HTTP request closes its own connections, allowing `SyncClient` reuse across separate event loops. This sacrifices persistent connection pooling. Environment proxy settings and redirects are disabled; embedded URL credentials are rejected. Credentials remain in authorization headers and are not included in response diagnostics.
+
+`handle.wait(timeout=...)` stops observation at the caller deadline without requesting remote cancellation. A prepared request's optional absolute `deadline` also bounds capability negotiation, submission and reconciliation together, using a local monotonic budget. Expiry before submission raises `StalePrecondition`; expiry after delivery may raise `SubmissionUncertain`, retaining the original request. Do not create a new request ID in response to uncertainty. Reconcile or resubmit the saved request deliberately. A trusted local port must itself be cooperative; the SDK cannot interrupt synchronous blocking service code.
+
+Malformed acknowledgments, invalid admission identities and transport failures trigger lookup under the same request identity. A successful authoritative lookup may recover an operation. A failed or malformed lookup remains uncertain, preserving the prepared request rather than manufacturing a new operation.
+
+Read responses are validated for DTO type, requested workspace/proof identity, and requested revision where applicable. Capability flags require actual booleans, and response metadata and nested references are checked. Malformed or inconsistent responses raise `ReceiverProtocolError` from `persistent_atp_client.errors` (also a `ValueError` for compatibility). HTTP JSON rejects duplicate keys and nonfinite values. Local implementations of `ReceiverPort.read_status` must return `ProjectDigest`, rather than an unchecked dictionary.
+
+Event streams deduplicate notifications, verify sequence/scope, wait between empty or duplicate-only pages, and finish after observing a terminal operation with no new events. Retaining a cursor on an empty page no longer causes a busy loop. Cancelling a consumer leaves receiver execution untouched.
+
+Artifact transfer remains whole-byte and is limited to 16 MiB before base64 encoding. HTTP responses have a 24 MiB decoded-envelope limit, accommodating a maximum-size artifact's JSON/base64 representation. The receiver can impose a smaller request limit; negotiated limits, byte streaming and server retention guarantees are not implemented here. HTTP controls remain explicitly unsupported. This release changes client behavior and installation requirements, not the mathematical authority of the receiver.
+
+## SDK-only verification
+
+```bash
+UV_CACHE_DIR=tmp/uv-cache uv pip install -e 'packages/persistent-atp-client[dev]'
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  packages/persistent-atp-client/tests
+```
+
+HTTP tests require the `[http]` or `[dev]` extra. They exercise the real async adapter/codec with scripted transport faults; these tests do not establish proof or replay readiness.
+
+The optional reference-receiver test requires a running receiver from the companion integration branch:
+
+```bash
+export PERSISTENT_ATP_CLIENT_TEST_URL=http://127.0.0.1:8765
+export PERSISTENT_ATP_CLIENT_TEST_TOKEN="$PERSISTENT_ATP_OMEGA_TOKEN"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  packages/persistent-atp-client/tests/test_reference_receiver.py
+```
+
+That test verifies reference artifact upload/download, idempotent admission, a scripted critic cycle, terminal event consumption, guidance, consistent pagination and operation reattachment. It skips explicitly when no receiver URL is configured. Durable service guarantees still belong to the receiver, and service changes are outside this client-only branch.
+
+Recorded verification for 0.2.0 on Python 3.13.5 with httpx 0.28.1:
+
+- Package baseline: 22 passed. After fixes: 67 passed and one unconfigured reference-receiver test skipped.
+- With a reference receiver configured, the package suite passed all 68 tests from outside the repository working directory.
+- Reopening the existing reference receiver against the same state preserved artifact bytes, journal revision/hash, all three operation records, and projected graph records. This was a connection/service-state reopen check, not a process-kill recovery test.
+- A fresh non-editable core wheel installation outside the checkout prepared requests and loaded all three schema resources without httpx installed. HTTP construction failed explicitly until the `[http]` extra was installed; installing that extra also succeeded.
+- Full branch baseline: 526 passed, 15 failed, 78 skipped, 116 subtests passed. After fixes: 571 passed, 15 failed, 79 skipped, 116 subtests passed. The additional skip is the opt-in receiver test. All 15 failures remain PostgreSQL artifact authentication failures for the configured `user` at `127.0.0.1:5432`.
+
+The live verification used the existing receiver from `feat/omegaclaw-integration` without modifying it: real commit gate and SQLite journal/operation records, reference filesystem artifact storage, and a scripted critic. It did not exercise production PostgreSQL/MORK persistence, Omega/PeTTa processes, real ATP execution or independent Lean replay. Those results must not be inferred from SDK conformance tests.
