@@ -7,7 +7,7 @@ import json
 import math
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from .codecs import fingerprint
@@ -15,6 +15,7 @@ from .errors import (
     AdmissionRejected, CursorExpired, HashMismatch, ObservationTimeout, SubmissionUncertain,
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
     ReceiverProtocolError,
+    StalePrecondition,
 )
 from .models import (
     ACTION_TYPES, COORDINATION_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
@@ -36,6 +37,12 @@ def _response(value, cls):
 def _duration(value, name):
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be finite and positive")
+
+
+async def _before(awaitable, deadline):
+    if deadline is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout=max(0, deadline - time.monotonic()))
 
 
 def _admission(receipt, workspace_id, request_id, expected=None):
@@ -80,16 +87,25 @@ class AsyncClient:
             raise RuntimeError("client is closed")
         if not isinstance(request, ActionRequest):
             raise TypeError("submit requires a prepared ActionRequest")
-        caps = await self.capabilities(contract_version=request.contract_version)
+        end = None
+        if request.deadline is not None:
+            left = (request.deadline - datetime.now(timezone.utc)).total_seconds()
+            if left <= 0:
+                raise StalePrecondition("request deadline elapsed before submission", request_id=request.request_id)
+            end = time.monotonic() + left
+        try:
+            caps = await _before(self.capabilities(contract_version=request.contract_version), end)
+        except TimeoutError as exc:
+            raise StalePrecondition("request deadline elapsed before submission", request_id=request.request_id) from exc
         if request.action.kind not in caps.actions:
             raise UnsupportedCapability(f"{request.action.kind} is unavailable", request_id=request.request_id)
         expected = fingerprint(request)
         try:
-            receipt = await self._port.submit(request)
+            receipt = await _before(self._port.submit(request), end)
             _admission(receipt, request.workspace_id, request.request_id, expected)
         except (TimeoutError, ConnectionError, TransientUnavailable, ReceiverProtocolError, json.JSONDecodeError) as exc:
             try:
-                receipt = await self._port.lookup_request(request.workspace_id, request.request_id)
+                receipt = await _before(self._port.lookup_request(request.workspace_id, request.request_id), end)
                 if receipt is not None:
                     _admission(receipt, request.workspace_id, request.request_id, expected)
             except (TimeoutError, ConnectionError, TransientUnavailable, ReceiverProtocolError, json.JSONDecodeError) as lookup_exc:
