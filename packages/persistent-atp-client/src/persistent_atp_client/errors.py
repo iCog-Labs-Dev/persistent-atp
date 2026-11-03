@@ -15,6 +15,9 @@ class ClientError(Exception):
 class InvalidRequest(ClientError): code = "INVALID_REQUEST"
 class UnsupportedContract(ClientError): code = "UNSUPPORTED_CONTRACT"
 class UnsupportedCapability(ClientError): code = "UNSUPPORTED_CAPABILITY"
+class ReceiverProtocolError(ClientError, ValueError):
+    """The receiver returned malformed or inconsistent contract data."""
+    code = "RECEIVER_PROTOCOL_ERROR"
 class Unauthenticated(ClientError): code = "UNAUTHENTICATED"
 class Forbidden(ClientError): code = "FORBIDDEN"
 class IdempotencyConflict(ClientError): code = "IDEMPOTENCY_CONFLICT"

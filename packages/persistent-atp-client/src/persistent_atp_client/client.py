@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 import uuid
 from datetime import datetime
@@ -12,15 +13,33 @@ from .codecs import fingerprint
 from .errors import (
     AdmissionRejected, CursorExpired, HashMismatch, ObservationTimeout, SubmissionUncertain,
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
+    ReceiverProtocolError,
 )
 from .models import (
     ACTION_TYPES, COORDINATION_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
     LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
-    SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES,
+    SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
+    CoordinationPage, ProjectDigest,
 )
 from .ports import ReceiverPort
+
+
+def _response(value, cls):
+    if not isinstance(value, cls):
+        raise ReceiverProtocolError(f"receiver must return {cls.__name__}")
+    return value
+
+
+def _admission(receipt, workspace_id, request_id, expected=None):
+    _response(receipt, Admission)
+    if receipt.request_id != request_id or (expected is not None and receipt.fingerprint != expected):
+        raise ReceiverProtocolError("receiver admission identity mismatch", request_id=request_id)
+    for ref in (receipt.operation_ref, receipt.coalesced_to):
+        if ref is not None and ref.workspace_id != workspace_id:
+            raise ReceiverProtocolError("receiver admission workspace mismatch", request_id=request_id)
+    return receipt
 
 
 class AsyncClient:
@@ -45,6 +64,7 @@ class AsyncClient:
     async def capabilities(self, *, contract_version: str = "2.0"):
         caps = await (self._port.capabilities() if contract_version == "2.0"
                       else self._port.capabilities(contract_version=contract_version))
+        _response(caps, CapabilitySet)
         if caps.contract_version != contract_version:
             raise UnsupportedContract(f"receiver does not support contract {contract_version}")
         return caps
@@ -60,19 +80,18 @@ class AsyncClient:
         expected = fingerprint(request)
         try:
             receipt = await self._port.submit(request)
-        except (TimeoutError, ConnectionError, TransientUnavailable) as exc:
+            _admission(receipt, request.workspace_id, request.request_id, expected)
+        except (TimeoutError, ConnectionError, TransientUnavailable, ReceiverProtocolError, json.JSONDecodeError) as exc:
             try:
                 receipt = await self._port.lookup_request(request.workspace_id, request.request_id)
-            except (TimeoutError, ConnectionError, TransientUnavailable) as lookup_exc:
+                if receipt is not None:
+                    _admission(receipt, request.workspace_id, request.request_id, expected)
+            except (TimeoutError, ConnectionError, TransientUnavailable, ReceiverProtocolError, json.JSONDecodeError) as lookup_exc:
                 raise SubmissionUncertain("submission and lookup unavailable", request=request) from lookup_exc
             if receipt is None:
                 raise SubmissionUncertain("authoritative lookup found no admission; retry the same prepared request", request=request) from exc
-        if not isinstance(receipt, Admission) or receipt.request_id != request.request_id or receipt.fingerprint != expected:
-            raise ValueError("receiver admission identity mismatch")
         if not receipt.accepted:
             raise AdmissionRejected(receipt)
-        if receipt.operation_ref.workspace_id != request.workspace_id:
-            raise ValueError("receiver admission workspace mismatch")
         return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
 
     async def submit_action(self, action, *, workspace_id: str, preconditions: Preconditions | None = None,
@@ -103,8 +122,11 @@ class AsyncClient:
         caps = await self.capabilities(contract_version="2.1")
         if "coordination-read" not in caps.controls:
             raise UnsupportedCapability("coordination-read is unavailable")
-        return await self._port.read_coordination(workspace_id=workspace_id, proof_id=proof_id,
-                                                   cursor=cursor, page_size=page_size)
+        page = _response(await self._port.read_coordination(workspace_id=workspace_id, proof_id=proof_id,
+                                                   cursor=cursor, page_size=page_size), CoordinationPage)
+        if page.workspace_id != workspace_id or page.proof_id != proof_id:
+            raise ReceiverProtocolError("coordination page belongs to another workspace or proof")
+        return page
 
     async def proof_status(self, proof_id: str, *, workspace_id: str, at_revision: int | None = None):
         return await self.status(workspace_id=workspace_id, proof_id=proof_id, at_revision=at_revision)
@@ -132,20 +154,39 @@ class AsyncClient:
         return await self.submit_action(LemmaBridge(proof_id, obstruction_id), workspace_id=workspace_id, **request_options)
 
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:
-        return await self._port.lookup_request(workspace_id, request_id)
+        receipt = await self._port.lookup_request(workspace_id, request_id)
+        return _admission(receipt, workspace_id, request_id) if receipt is not None else None
 
     def attach(self, operation_ref: OperationRef) -> "OperationHandle":
         if not isinstance(operation_ref, OperationRef):
             raise TypeError("attach requires OperationRef")
         return OperationHandle(self, operation_ref)
 
-    async def status(self, *, workspace_id: str, proof_id: str, at_revision: int | None = None) -> Any:
-        return await self._port.read_status(workspace_id=workspace_id, proof_id=proof_id, at_revision=at_revision)
+    async def status(self, *, workspace_id: str, proof_id: str, at_revision: int | None = None) -> ProjectDigest:
+        result = _response(await self._port.read_status(workspace_id=workspace_id,
+            proof_id=proof_id, at_revision=at_revision), ProjectDigest)
+        if result.workspace_id != workspace_id or result.proof_id != proof_id:
+            raise ReceiverProtocolError("status belongs to another workspace or proof")
+        if at_revision is not None and result.revision != at_revision:
+            raise ReceiverProtocolError("status revision differs from the requested revision")
+        return result
 
     async def list_operations(self, *, workspace_id: str, proof_id: str | None = None,
                               active_only: bool = True, cursor: str | None = None):
-        return await self._port.list_operations(workspace_id=workspace_id, proof_id=proof_id,
+        results = await self._port.list_operations(workspace_id=workspace_id, proof_id=proof_id,
                                                 active_only=active_only, cursor=cursor)
+        if not isinstance(results, tuple):
+            raise ReceiverProtocolError("operation list must be a tuple")
+        seen = set()
+        for result in results:
+            _response(result, OperationSnapshot)
+            if (result.ref.workspace_id != workspace_id
+                    or (proof_id is not None and result.proof_id != proof_id)):
+                raise ReceiverProtocolError("operation list contains an out-of-scope operation")
+            if result.ref in seen:
+                raise ReceiverProtocolError("operation list contains duplicate references")
+            seen.add(result.ref)
+        return results
 
     async def put_artifact(self, source: bytes, *, workspace_id: str, media_type: str,
                            expected_hash: str | None = None) -> ArtifactRef:
@@ -184,11 +225,11 @@ class OperationHandle:
     async def snapshot(self) -> OperationSnapshot:
         result = await self._client._port.get_operation(self.ref)
         if not isinstance(result, OperationSnapshot) or result.ref != self.ref:
-            raise ValueError("receiver returned a mismatched operation")
+            raise ReceiverProtocolError("receiver returned a mismatched operation")
         if self._request_id is not None and result.request_id != self._request_id:
-            raise ValueError("receiver changed operation request identity")
+            raise ReceiverProtocolError("receiver changed operation request identity")
         if result.observation_version < self._last_version:
-            raise ValueError("receiver observation version regressed")
+            raise ReceiverProtocolError("receiver observation version regressed")
         self._last_version = result.observation_version
         return result
 
