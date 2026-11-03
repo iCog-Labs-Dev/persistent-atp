@@ -28,11 +28,10 @@ real-atp = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "src", "mork" = "mork", "persistent_atp_client" = "packages/persistent-atp-client/src/persistent_atp_client"}
+package-dir = {"" = "src", "mork" = "mork"}
 
 [tool.setuptools.packages.find]
-where = ["src", ".", "packages/persistent-atp-client/src"]
-namespaces = false
+where = ["src", "."]
 include = [
     "alignment*",
     "artifacts*",
@@ -41,11 +40,7 @@ include = [
     "mathproof*",
     "shared*",
     "mork*",
-    "persistent_atp_client*",
 ]
-
-[tool.setuptools.package-data]
-persistent_atp_client = ["py.typed", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
