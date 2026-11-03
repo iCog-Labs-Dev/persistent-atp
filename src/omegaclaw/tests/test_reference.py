@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+import httpx
 
 from omegaclaw.api import serve
 from omegaclaw.jobs import RequestConflict
@@ -448,10 +449,10 @@ def test_o20_timeout_is_error_with_one_bounded_attempt(monkeypatch):
     module_spec.loader.exec_module(bridge)
     monkeypatch.setenv("PERSISTENT_ATP_OMEGA_TOKEN", "long-test-token-for-reference")
     calls = []
-    def timeout(*args, **kwargs):
+    async def timeout(*args, **kwargs):
         calls.append(1)
-        raise TimeoutError("offline")
-    monkeypatch.setattr(bridge.urllib.request, "urlopen", timeout)
+        raise httpx.ConnectTimeout("offline")
+    monkeypatch.setattr(httpx.AsyncClient, "send", timeout)
     result = json.loads(bridge.proof_status("p1", "reference"))
     assert result["transport_status"] == "error"
     assert result["error_code"] == "API_UNAVAILABLE"

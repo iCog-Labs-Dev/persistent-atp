@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import urllib.request  # Existing fault-injection tests patch this module.
 
 from persistent_atp_client import (
     AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -57,7 +58,19 @@ def doctor(profile: str) -> dict:
                 blockers.append("PeTTa checkout has the wrong revision")
             if shutil.which("swipl") is None:
                 blockers.append("SWI-Prolog is unavailable")
-            petta_python = os.environ.get("PETTA_PYTHON", "/usr/bin/python3")
+            petta_python = os.environ.get("PETTA_PYTHON", sys.executable)
+            try:
+                probe = subprocess.run([petta_python, "-c",
+                    "import json,sys; print(json.dumps(list(sys.version_info[:3])))"],
+                    capture_output=True, text=True)
+                version = json.loads(probe.stdout)
+                if (probe.returncode or not isinstance(version, list) or len(version) != 3
+                        or not all(type(part) is int and part >= 0 for part in version)):
+                    raise ValueError("invalid Python version probe")
+                if tuple(version[:2]) < (3, 11):
+                    blockers.append("PeTTa Python must be >=3.11 for persistent-atp-client; set PETTA_PYTHON to a supported interpreter")
+            except (OSError, ValueError, TypeError):
+                blockers.append(f"cannot determine supported Python version for {petta_python}")
             try:
                 janus_ready = subprocess.run([petta_python, "-c", "import janus_swi"], capture_output=True).returncode == 0
             except OSError:

@@ -9,6 +9,7 @@ description = "A durable, race-safe metagraph memory system for long-horizon aut
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "persistent-atp-client[http]>=0.2.0,<0.3",
     "python-dotenv>=1.0",
     "neo4j>=5.14",
     "psycopg[binary]>=3.3.6",
@@ -79,4 +80,5 @@ testpaths = [
 ]
 
 [tool.uv.sources]
+persistent-atp-client = { path = "packages/persistent-atp-client", editable = true }
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }

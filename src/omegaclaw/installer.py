@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from importlib.resources import files
 from pathlib import Path
 import re
 import shutil
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-CLIENT_ROOT = PACKAGE_ROOT.parents[1] / "packages" / "persistent-atp-client" / "src" / "persistent_atp_client"
+CLIENT_ROOT = Path(str(files("persistent_atp_client")))
 PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
                 "deepseek_provider.py", "coordinator-policy.txt")
 # Omega's core registry is named providers.py. Install the package module under
@@ -66,7 +67,7 @@ def install(omega_root: Path) -> dict:
     for name, origin in files.items():
         shutil.copy2(origin, plugin_dir / name)
     if not CLIENT_ROOT.is_dir():
-        raise ValueError("standalone persistent-atp-client source is required for Omega installation")
+        raise ValueError("installed persistent-atp-client package files are required for Omega installation")
     shutil.copytree(CLIENT_ROOT, plugin_dir / "persistent_atp_client", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     if updated_catalogue != original_catalogue:
