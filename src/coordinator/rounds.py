@@ -70,6 +70,12 @@ def assess(
         frontier = frontier_by_category(workspace, store)
         earlier = _reading_from(report["before"], revision)
         milestones = _progress_milestones(proof_id, earlier, reading)
+        for slot in report["slots"]:
+            if error := slot.get("error"):
+                milestones.append(
+                    f"{proof_id}: {slot['slot']} worker failed with "
+                    f"{error['type']}: {error['message']}"
+                )
         stalled_rounds = 0 if reading.advanced_from(earlier) else track["stalled_rounds"] + 1
         if reading.awaiting_replay and not track["awaiting_replay"]:
             milestones.append(f"{proof_id}: a certificate awaits replay; formal search pauses")

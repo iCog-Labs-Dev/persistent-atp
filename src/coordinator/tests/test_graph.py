@@ -7,6 +7,10 @@ import json
 import threading
 import unittest
 
+from commit_gate.ops import AddEdge, UpsertNode
+from mathproof.workers import ResearchWorker
+from shared.llm_client import MockLLMClient
+
 try:
     from langgraph.checkpoint.memory import InMemorySaver
 except ImportError:  # pragma: no cover - exercised only without the extra
@@ -22,6 +26,47 @@ if InMemorySaver is not None:
 
 @unittest.skipIf(InMemorySaver is None, "langgraph is not installed")
 class TestDryRun(JournalCase):
+    def test_invalid_worker_output_is_reported_and_retried(self):
+        self.seed(
+            "p1",
+            UpsertNode("ResearchState", "p1/rs-1", {"status": "open"}),
+            UpsertNode("ResearchMove", "p1/rm-1", {
+                "status": "queued", "state_id": "p1/rs-1", "detail": "Try induction",
+            }),
+            AddEdge("PROPOSES", "p1/rs-1", "p1/rm-1", "p1/proposes-1"),
+            AddEdge("MOVE_TARGETS", "p1/rm-1", "p1/theorem", "p1/targets-1"),
+        )
+        llm = MockLLMClient(responses=[
+            {
+                "moves": [{
+                    "detail": "Check the Lean statement",
+                    "why_it_helps": "It tests the translation",
+                    "first_test": "Ask Lean to elaborate it",
+                    "technique_tag": "formalization",
+                    "prerequisite_claim_ids": [],
+                    "action": {
+                        "kind": "lean_statement_check",
+                        "declaration_id": "p1/fd-missing",
+                    },
+                }],
+                "reasoning": "Check the statement first",
+            },
+            {"moves": [], "reasoning": "No justified move remains"},
+        ])
+        workspace = self.workspace(
+            "p1", handlers={"llm-research": ResearchWorker(llm).run}
+        )
+
+        final = Coordinator([workspace], max_rounds=2).run()
+
+        first, second = final["reports"]
+        self.assertEqual(first["slots"][0]["error"]["type"], "ValueError")
+        self.assertIn("unknown draft declaration", first["slots"][0]["error"]["message"])
+        self.assertTrue(second["slots"][0]["accepted"])
+        self.assertTrue(any("explore worker failed" in message for message in final["milestones"]))
+        self.assertEqual(self.view_of("p1").node("p1/rm-1").fields["status"], "exhausted")
+        self.assertFalse(self.open_store().active_leases("p1"))
+
     def test_a_stagnated_search_escalates_until_a_human_must_decide(self):
         """The Section 16.9 dry run: the fake ATP stagnates and escalation fires."""
         self.seed("p1", declaration("p1"))

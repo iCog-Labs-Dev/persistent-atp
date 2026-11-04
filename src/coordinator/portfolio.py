@@ -98,6 +98,7 @@ def run_portfolio(
             adapters=workspace.adapters,
             worker_class=slot.worker_class,
             maintenance=lambda proposal, commit: project(workspace.view, store, proof_id),
+            capture_dispatch_errors=True,
         )
         reports.append(_slot_report(slot, digest))
     project(workspace.view, store, proof_id)
@@ -105,7 +106,7 @@ def run_portfolio(
 
 
 def _slot_report(slot: Slot, digest: CycleDigest) -> dict[str, Any]:
-    return {
+    report = {
         "slot": slot.role,
         "worker_class": slot.worker_class,
         "move_id": digest.selected_move_id,
@@ -113,3 +114,6 @@ def _slot_report(slot: Slot, digest: CycleDigest) -> dict[str, Any]:
         "revision": digest.revision,
         "rejections": [rejection.reason.value for rejection in digest.rejections],
     }
+    if digest.error is not None:
+        report["error"] = {"type": digest.error_type, "message": digest.error}
+    return report

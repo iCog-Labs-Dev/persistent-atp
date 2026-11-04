@@ -35,6 +35,8 @@ class CycleDigest:
     revision: int | None = None
     rejections: tuple = field(default=())
     audit_recommended: bool = False
+    error_type: str | None = None
+    error: str | None = None
 
     @classmethod
     def empty_frontier(cls) -> "CycleDigest":
@@ -73,6 +75,7 @@ def run_cycle(
     ttl_seconds: float = 600.0,
     maintenance: Callable[[Any, CommitResult], None] | None = None,
     search_policy: str = "gnn-pln-best-first-v1",
+    capture_dispatch_errors: bool = False,
 ) -> CycleDigest:
     """Lease the best move, run it under its worker class, commit the result.
 
@@ -98,13 +101,25 @@ def run_cycle(
     keep_lease = False
     try:
         current = _view_at_lease(lease, view, gate)
-        result, proposal = _dispatch(
-            lease,
-            view=current,
-            dispatcher=dispatcher,
-            adapters=adapters or {},
-            search_policy=search_policy,
-        )
+        try:
+            result, proposal = _dispatch(
+                lease,
+                view=current,
+                dispatcher=dispatcher,
+                adapters=adapters or {},
+                search_policy=search_policy,
+            )
+        except Exception as exc:
+            if not capture_dispatch_errors:
+                raise
+            message = " ".join(str(exc).split()) or type(exc).__name__
+            return CycleDigest(
+                lease_issued=True,
+                selected_move_id=lease.selected_move_id,
+                worker_class=lease.worker_class,
+                error_type=type(exc).__name__,
+                error=message[:1000],
+            )
         commit = gate.commit(proposal)
         scheduler.update_statistics(commit, category)
         if commit.accepted:

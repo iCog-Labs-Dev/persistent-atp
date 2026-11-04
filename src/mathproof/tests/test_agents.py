@@ -267,3 +267,16 @@ def test_invalid_worker_output_releases_lease_without_journal_write():
         )
     assert store.head("p1")[0] == 0
     assert store.active_leases("p1") == []
+
+    captured = run_cycle(
+        "p1", view=view, gate=CommitGate(view, store),
+        scheduler=GlobalScheduler(view, store),
+        dispatcher=ScriptedDispatcher({"llm-research": bad.run}),
+        worker_class="llm-research", category="research-move",
+        capture_dispatch_errors=True,
+    )
+    assert captured.accepted is False
+    assert captured.error_type == "ValueError"
+    assert "unknown prerequisite" in captured.error
+    assert store.head("p1")[0] == 0
+    assert store.active_leases("p1") == []
