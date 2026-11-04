@@ -9,19 +9,25 @@ from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from mathproof.worker_context import compile_context
 from mathproof.cycle import run_cycle
-from mathproof.dispatch import ScriptedDispatcher
+from mathproof.dispatch import ScriptedDispatcher, result_to_proposal
 from mathproof.scheduler import GlobalScheduler
 from mathproof.workers import CriticWorker, ResearchWorker
 from shared.llm_client import MockLLMClient
 
 
-def seed(view: MemoryView, proof_id: str, *, argument: str | None = None) -> None:
+def seed(
+    view: MemoryView,
+    proof_id: str,
+    *,
+    argument: str | None = None,
+    claim_status: str = "provisional",
+) -> None:
     view.add_node(f"{proof_id}/rs-1", "ResearchState", {"status": "open"})
     view.add_node(f"{proof_id}/rm-1", "ResearchMove", {
         "status": "queued", "detail": "Investigate addition by zero",
         "state_id": f"{proof_id}/rs-1",
     })
-    claim_fields = {"status": "provisional", "claim_text": "For all n : Nat, n + 0 = n"}
+    claim_fields = {"status": claim_status, "claim_text": "For all n : Nat, n + 0 = n"}
     if argument is not None:
         claim_fields["proof_sketch"] = argument
     view.add_node(f"{proof_id}/c-1", "Claim", claim_fields)
@@ -52,6 +58,7 @@ def test_compiler_scopes_context_and_preserves_theorem_target():
     )
     packet = compile_context(lease, view)
     assert packet["theorem"]["target_claims"] == [{"id": "p1/c-1"}]
+    assert packet["target_claim"]["fields"]["status"] == "provisional"
     assert packet["theorem"]["statement"] == "For all n : Nat, n + 0 = n"
     assert "For all n : Nat, n + 0 = n" in packet["context_text"]
     assert "n is a natural number" in packet["context_text"]
@@ -123,6 +130,89 @@ def test_research_and_critic_run_through_one_cycle_without_promoting_claim():
     assert attempt.fields["context_digest"]
     assert attempt.fields["model_output"]["earliest_gap"] == attempt.fields["earliest_gap"]
     assert "p1/c-1" in critic_llm.history[0][1]
+
+
+def test_research_argument_promotes_exact_target_and_unlocks_critic():
+    proof_id = "p1"
+    view, store = MemoryView(), JournalStore()
+    seed(view, proof_id, claim_status="conjectural")
+    research = ResearchWorker(MockLLMClient(default_json={
+        "moves": [],
+        "candidate_argument": {
+            "claim_id": "p1/c-1",
+            "argument": "Induct on n; zero is immediate and congrArg Nat.succ closes the successor case.",
+            "prerequisite_claim_ids": [],
+        },
+        "reasoning": "The selected induction move yields a complete reviewable argument.",
+    }))
+    critic = CriticWorker(MockLLMClient(default_json={
+        "verdict": "supported",
+        "reasoning": "The base and successor cases cover every natural number.",
+        "earliest_gap": None,
+        "repair": None,
+        "evidence_ids": [],
+    }))
+    dispatcher = ScriptedDispatcher({
+        "llm-research": research.run,
+        "critic": critic.run,
+    })
+    gate = CommitGate(view, store)
+    scheduler = GlobalScheduler(view, store)
+    maintenance = lambda proposal, commit: view.apply_journal_event(
+        store, proof_id, commit.revision
+    )
+
+    developed = run_cycle(
+        proof_id, view=view, gate=gate, scheduler=scheduler, dispatcher=dispatcher,
+        worker_class="llm-research", category="research-move", maintenance=maintenance,
+    )
+
+    assert developed.accepted, developed.rejections
+    claim = view.node("p1/c-1")
+    assert claim.fields["status"] == "provisional"
+    assert "congrArg Nat.succ" in claim.fields["argument"]
+    assert claim.fields["argument_source_move_id"] == "p1/rm-1"
+    assert view.node("p1/rm-1").fields["status"] == "closed"
+    assert [
+        candidate.move_id for candidate in scheduler.build_frontier(proof_id)
+        if candidate.category == "critic-task"
+    ] == ["p1/c-1"]
+
+    reviewed = run_cycle(
+        proof_id, view=view, gate=gate, scheduler=scheduler, dispatcher=dispatcher,
+        worker_class="critic", category="critic-task", maintenance=maintenance,
+    )
+    assert reviewed.accepted, reviewed.rejections
+    assert view.node("p1/at-1").fields["status"] == "supported"
+    assert store.verify_chain(proof_id) == 2
+
+
+def test_research_argument_converter_binds_to_the_leased_target():
+    view = MemoryView()
+    seed(view, "p1", claim_status="conjectural")
+    view.add_node("p1/c-2", "Claim", {
+        "status": "conjectural", "claim_text": "An unrelated claim",
+    })
+    lease = SimpleNamespace(
+        proof_id="p1", actor="research-1", worker_class="llm-research",
+        selected_move_id="p1/rm-1", base_revision=0, lease_id="p1/ls-1",
+        fencing_token=1,
+    )
+    result = {
+        "parent_state_id": "p1/rs-1",
+        "moves": [],
+        "candidate_argument": {
+            "claim_id": "p1/c-2", "argument": "Invented support",
+            "prerequisite_claim_ids": [],
+        },
+        "target_claim_ids": ["p1/c-2"],
+        "move_status": "closed",
+    }
+
+    with pytest.raises(ValueError, match="conjectural leased target"):
+        result_to_proposal(result, lease, view)
+
+    assert view.node("p1/c-2").fields["status"] == "conjectural"
 
 
 def test_research_alternatives_create_conjunctive_subgoals():

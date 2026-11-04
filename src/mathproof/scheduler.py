@@ -347,6 +347,17 @@ class GlobalScheduler:
                                 features={"verification_value": 0.8, "formalization_readiness": 0.8},
                             ))
                         continue
+                    if targets and all(
+                        (target := nodes.get(target_id)) is not None
+                        and target.label == "Claim"
+                        and target.fields.get("status") in {
+                            ClaimStatus.CRITIC_ACCEPTED.value,
+                            ClaimStatus.FORMALLY_CLOSED.value,
+                            ClaimStatus.LEAN_VERIFIED.value,
+                        }
+                        for target_id in targets
+                    ):
+                        continue
                     candidates.append(
                         Candidate(
                             move_id=edge.dst_id,

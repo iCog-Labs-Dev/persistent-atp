@@ -23,7 +23,9 @@ Then pass `dispatcher` to `mathproof.cycle.run_cycle` with a `GlobalScheduler` a
 
 The compiler uses `ReadView.list_nodes`, so memory and MORK receive the same proof-scoped packet shape. The theorem kernel includes committed `Proof` targets and aligned declarations when present, or the selected move's target claim when no `Proof` node exists. Missing theorem data is not invented. Broader retrieval, tool calls, artifact storage for large outputs, and coordinator policy remain separate work.
 
-An alternative can name up to three AND subgoals. Each subgoal becomes a conjectural `Claim` with its own `ResearchState` and queued `ResearchMove`. `REQUIRES_SUBGOAL` links the alternative to each child move; multiple alternatives may share one identical subgoal. The alternative is marked closed because its planning step finished, not because the claim was proved. A child can be decomposed again up to depth two. The formal ATP and Lean replay remain responsible for actual proof closure.
+An alternative can name up to three AND subgoals. Each subgoal becomes a conjectural `Claim` with its own `ResearchState` and queued `ResearchMove`. `REQUIRES_SUBGOAL` links the alternative to each child move; multiple alternatives may share one identical subgoal. The alternative is marked closed because its planning step finished, not because the claim was proved. A child can be decomposed again up to depth two.
+
+When a selected investigation yields a complete structured argument for its exact conjectural target, the researcher records that argument and promotes the claim to `provisional`. This is only a handoff to independent criticism. It does not make the claim accepted or formally verified. The formal ATP and Lean replay remain responsible for actual proof closure.
 
 ## Formalization before ATP
 

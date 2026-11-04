@@ -11,11 +11,11 @@ from commit_gate.vocab import WorkerClass
 from shared.llm_client import LLMClientProtocol
 
 
-FORMALIZER_PROMPT = """You translate one mathematical claim into a Lean 4 proposition, not a proof. Preserve every quantifier, domain, hypothesis, and definition in the supplied claim and theorem context. Use only dependencies already verified in the packet. Do not weaken the claim to True, add axioms, or invent definitions, imports, or lemma names. If the statement cannot be faithfully translated with the available context, explain the blocker and return null for lean_type.
+FORMALIZER_PROMPT = """You translate one mathematical claim into a Lean 4 proposition, not a proof. Preserve every quantifier, domain, hypothesis, and definition in the supplied claim and theorem context. Use only dependencies already verified in the packet. Do not weaken the claim to True, add axioms, or invent definitions, imports, or lemma names. Prefer Lean core syntax such as Nat over notation such as ℕ that requires an additional module. Return at least one import; use Init when core Lean is sufficient, and name another module only when the statement actually requires it. If the statement cannot be faithfully translated with the available context, explain the blocker and return null for lean_type.
 
 Return one JSON object with exactly: {"lean_type": string|null, "imports": [string], "reasoning": string}. lean_type is a proposition expression, not a complete theorem or tactic script. Imports must be known Lean modules; do not include code in them. Never emit sorry or admit."""
 
-PROMPT_VERSION = "formalizer-v1"
+PROMPT_VERSION = "formalizer-v2"
 _IMPORT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*$")
 _UNSAFE = re.compile(r"\b(?:sorry|admit|axiom|unsafe|run_tac|set_option|by)\b|#|;|\n", re.I)
 

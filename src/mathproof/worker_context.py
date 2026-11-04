@@ -164,6 +164,9 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
     targets = [e.dst_id for e in view.edges_from(move.node_id, "MOVE_TARGETS") if belongs_to_proof(e.dst_id, lease.proof_id)]
     if len(targets) != 1:
         raise ValueError("research move needs exactly one theorem target")
+    target_claim = view.node(targets[0])
+    if target_claim is None or target_claim.label != "Claim":
+        raise ValueError("research move target is not a committed claim")
     request = CompileRequest(
         task_id=lease.lease_id, proof_id=lease.proof_id,
         base_revision=lease.base_revision, packet_kind=PacketKind.RESEARCH,
@@ -210,6 +213,7 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
             "id": parents[0],
             "branch_depth": view.node(parents[0]).fields.get("branch_depth", 0),
         },
+        "target_claim": _node_payload(target_claim),
         "theorem": {
             "target_claims": [{"id": targets[0]}],
             "statement": kernel.statement,

@@ -64,7 +64,8 @@ def result_to_proposal(
       closes its requesting action.
     * ``formalizer`` -- a Lean proposition becomes a draft FormalDeclaration.
     * ``llm-research``/``hyperon`` -- a proposed research move becomes a
-      queued ResearchMove under its parent state.
+      queued ResearchMove, or a structured argument makes its exact target
+      provisional for independent criticism.
     """
     worker_class = lease.worker_class
     if worker_class == "formalizer":
@@ -408,14 +409,73 @@ def research_result_to_ops(
     depth = parent_state.fields.get("branch_depth", 0)
     if type(depth) is not int or depth < 0 or depth > 2:
         raise ValueError("research state has invalid branch depth")
+    leased = view.node(leased_move_id) if leased_move_id else None
     proposed = result.get("moves")
     if proposed is None:
         proposed = [{"move_id": result.get("move_id"), "detail": result.get("detail", "")}]
+    ops: list[Any] = []
+    candidate = result.get("candidate_argument")
+    if candidate is not None:
+        if proposed:
+            raise ValueError("research argument cannot also propose new moves")
+        if not isinstance(candidate, Mapping) or set(candidate) != {
+            "claim_id", "argument", "prerequisite_claim_ids"
+        }:
+            raise ValueError("research argument has the wrong fields")
+        claim_id = candidate["claim_id"]
+        claim = view.node(claim_id) if isinstance(claim_id, str) else None
+        targets = set(result.get("target_claim_ids", ()))
+        leased_targets = {
+            edge.dst_id for edge in view.edges_from(leased.node_id, "MOVE_TARGETS")
+        } if leased is not None and leased.label == "ResearchMove" else set()
+        if (
+            claim is None
+            or claim.label != "Claim"
+            or not claim_id.startswith(f"{proof_id}/")
+            or claim_id not in targets
+            or leased_targets != {claim_id}
+            or claim.fields.get("status") != "conjectural"
+        ):
+            raise ValueError("research argument does not name its conjectural leased target")
+        argument = candidate["argument"]
+        prerequisites = candidate["prerequisite_claim_ids"]
+        if not isinstance(argument, str) or not argument.strip():
+            raise ValueError("research argument must be nonempty")
+        if not isinstance(prerequisites, list):
+            raise ValueError("research argument prerequisites must be a list")
+        dependencies = []
+        for dependency_id in prerequisites:
+            dependency = view.node(dependency_id) if isinstance(dependency_id, str) else None
+            if (
+                dependency is None
+                or dependency.label != "Claim"
+                or not dependency_id.startswith(f"{proof_id}/")
+                or dependency_id == claim_id
+            ):
+                raise ValueError("research argument cites an unknown or circular prerequisite claim")
+            if dependency_id not in dependencies:
+                dependencies.append(dependency_id)
+        ops.extend((
+            SetField("Claim", claim_id, "argument", argument.strip(), prior=claim.fields.get("argument")),
+            SetField("Claim", claim_id, "argument_source_move_id", leased_move_id,
+                     prior=claim.fields.get("argument_source_move_id")),
+            SetField("Claim", claim_id, "argument_context_digest", result.get("context_digest"),
+                     prior=claim.fields.get("argument_context_digest")),
+            SetField("Claim", claim_id, "status", "provisional", prior="conjectural"),
+        ))
+        existing_dependencies = {
+            edge.dst_id for edge in view.edges_from(claim_id, "DEPENDS_ON")
+        }
+        for index, dependency_id in enumerate(dependencies):
+            if dependency_id not in existing_dependencies:
+                ops.append(AddEdge(
+                    "DEPENDS_ON", claim_id, dependency_id,
+                    f"{claim_id}-research-dependency-{index}",
+                ))
     serial = _next_serial(view, "rm", proof_id)
     claim_serial = _next_serial(view, "c", proof_id)
     state_serial = _next_serial(view, "rs", proof_id)
     shared_subgoals: dict[str, str] = {}
-    ops: list[Any] = []
     for entry in proposed:
         move_id = entry.get("move_id") or f"{proof_id}/rm-{serial}"
         serial += 1
@@ -469,7 +529,6 @@ def research_result_to_ops(
                 f"{move_id}-subgoal-{index}", {"why_needed": why.strip()},
             ))
 
-    leased = view.node(leased_move_id) if leased_move_id else None
     if leased is not None and leased.label == "ResearchMove":
         if result.get("move_status"):
             _advance_status(ops, "ResearchMove", leased, {"status": result["move_status"]})

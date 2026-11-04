@@ -113,3 +113,56 @@ def test_lean_project_enables_formalizer_and_alignment_workers(tmp_path, monkeyp
     project(view, store, proof_id)
     assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"
     assert len(llm.history) == 4
+
+
+def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, monkeypatch):
+    pytest.importorskip("langgraph")
+    from mathproof.lean_statement import StatementCheck
+    from coordinator import cli
+
+    class Checked:
+        def __init__(self, project):
+            assert project == tmp_path
+
+        def check(self, lean_type, imports):
+            assert lean_type == "True" and imports == ["Init"]
+            return StatementCheck(True, "elaborated")
+
+    monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    journal = tmp_path / "integrated.sqlite"
+    proof_id = "integrated-cli"
+    initialize(journal, proof_id, "True", "Give a complete argument for the theorem")
+    llm = MockLLMClient(responses=[
+        {
+            "moves": [],
+            "candidate_argument": {
+                "claim_id": f"{proof_id}/theorem",
+                "argument": "True.intro is a direct witness of True.",
+                "prerequisite_claim_ids": [],
+            },
+            "reasoning": "The theorem has a direct complete argument.",
+        },
+        {
+            "verdict": "supported", "reasoning": "True.intro establishes True",
+            "earliest_gap": None, "repair": None, "evidence_ids": [],
+        },
+        {"lean_type": "True", "imports": ["Init"], "reasoning": "Literal statement"},
+        {"verdict": "aligned", "relation": "exact", "reasoning": "Both state True"},
+    ])
+
+    result = run_proof(
+        journal, proof_id, rounds=2, backend="memory", lean_project=tmp_path, llm=llm,
+    )
+
+    assert [slot["slot"] for slot in result["reports"][0]["slots"]] == ["explore"]
+    assert [slot["slot"] for slot in result["reports"][1]["slots"]] == [
+        "critic", "formalize", "alignment",
+    ]
+    view = MemoryView()
+    project(view, JournalStore(str(journal)), proof_id)
+    claim = view.node(f"{proof_id}/theorem")
+    assert claim.fields["status"] == "provisional"
+    assert claim.fields["argument"] == "True.intro is a direct witness of True."
+    assert view.node(f"{proof_id}/at-1").fields["status"] == "supported"
+    assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"
+    assert len(llm.history) == 4

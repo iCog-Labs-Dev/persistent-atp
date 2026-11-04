@@ -97,6 +97,16 @@ class TestFrontier(SchedulerCase):
         moves = {c.move_id for c in self.scheduler().build_frontier("p2")}
         self.assertEqual(moves, set())
 
+    def test_research_move_is_retired_from_frontier_when_its_target_is_settled(self):
+        self.view.add_node("p1/c-4", "Claim", {"status": "critic-accepted"})
+        self.view.add_edge("MOVE_TARGETS", "p1/rm-1", "p1/c-4", "p1/e-target-4")
+
+        moves = {
+            candidate.move_id for candidate in self.scheduler().build_frontier("p1")
+        }
+
+        self.assertNotIn("p1/rm-1", moves)
+
 
 class ContractOnlyView:
     """Exposes the `ReadView` methods and nothing else: no `.nodes`, no `.edges`.
