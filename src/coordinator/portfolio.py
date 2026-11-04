@@ -77,6 +77,7 @@ def run_portfolio(
     store: JournalStore,
     *,
     slots: tuple[Slot, ...] = PORTFOLIO,
+    round_number: int | None = None,
 ) -> list[dict[str, Any]]:
     """Run one cycle per slot that has work; report each as plain data."""
     proof_id = workspace.proof_id
@@ -85,10 +86,23 @@ def run_portfolio(
     for slot in slots:
         project(workspace.view, store, proof_id)
         if not frontier_by_category(workspace, store).get(slot.category):
+            workspace.emit(
+                "slot_skipped", round=round_number, slot=slot.role,
+                worker_class=slot.worker_class, reason="empty_frontier",
+            )
             continue
+        workspace.emit(
+            "slot_started", round=round_number, slot=slot.role,
+            worker_class=slot.worker_class,
+        )
         scheduler = SlotScheduler(
             workspace.view, store, category=slot.category, statistics=workspace.statistics
         )
+        def emit(event: str, fields: Mapping[str, Any]) -> None:
+            workspace.emit(
+                event, round=round_number, slot=slot.role, **dict(fields)
+            )
+
         digest = run_cycle(
             proof_id,
             view=workspace.view,
@@ -99,8 +113,23 @@ def run_portfolio(
             worker_class=slot.worker_class,
             maintenance=lambda proposal, commit: project(workspace.view, store, proof_id),
             capture_dispatch_errors=True,
+            event_sink=emit,
         )
-        reports.append(_slot_report(slot, digest))
+        report = _slot_report(slot, digest)
+        reports.append(report)
+        workspace.emit(
+            "slot_completed",
+            round=round_number,
+            slot=slot.role,
+            worker_class=slot.worker_class,
+            move_id=digest.selected_move_id,
+            revision=digest.revision,
+            status=(
+                "failed" if digest.error is not None
+                else "accepted" if digest.accepted
+                else "rejected"
+            ),
+        )
     project(workspace.view, store, proof_id)
     return reports
 

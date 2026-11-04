@@ -9,6 +9,7 @@ cue to audit or expand (Section 10.4).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -76,13 +77,16 @@ def run_cycle(
     maintenance: Callable[[Any, CommitResult], None] | None = None,
     search_policy: str = "gnn-pln-best-first-v1",
     capture_dispatch_errors: bool = False,
+    event_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> CycleDigest:
     """Lease the best move, run it under its worker class, commit the result.
 
     ``actor`` is the worker the lease is issued to; it defaults to the worker
     class when the caller runs one anonymous worker per class.
     """
-    gate.catch_up(proof_id)
+    replayed = gate.catch_up(proof_id)
+    if replayed:
+        _emit(event_sink, "projection_caught_up", replayed=replayed.get(proof_id, 0))
     if category is None:
         category = {
             "llm-research": "research-move",
@@ -97,10 +101,27 @@ def run_cycle(
         actor=actor or worker_class, category=category,
     )
     if lease is None:
+        _emit(event_sink, "frontier_empty", worker_class=worker_class, category=category)
         return CycleDigest.empty_frontier()
+    _emit(
+        event_sink,
+        "lease_issued",
+        lease_id=lease.lease_id,
+        move_id=lease.selected_move_id,
+        worker_class=lease.worker_class,
+        base_revision=lease.base_revision,
+    )
     keep_lease = False
     try:
         current = _view_at_lease(lease, view, gate)
+        worker_started = time.perf_counter()
+        _emit(
+            event_sink,
+            "worker_started",
+            lease_id=lease.lease_id,
+            move_id=lease.selected_move_id,
+            worker_class=lease.worker_class,
+        )
         try:
             result, proposal = _dispatch(
                 lease,
@@ -108,11 +129,22 @@ def run_cycle(
                 dispatcher=dispatcher,
                 adapters=adapters or {},
                 search_policy=search_policy,
+                event_sink=event_sink,
             )
         except Exception as exc:
+            message = " ".join(str(exc).split()) or type(exc).__name__
+            _emit(
+                event_sink,
+                "worker_failed",
+                lease_id=lease.lease_id,
+                move_id=lease.selected_move_id,
+                worker_class=lease.worker_class,
+                duration_ms=round((time.perf_counter() - worker_started) * 1000, 3),
+                error_type=type(exc).__name__,
+                message=message[:1000],
+            )
             if not capture_dispatch_errors:
                 raise
-            message = " ".join(str(exc).split()) or type(exc).__name__
             return CycleDigest(
                 lease_issued=True,
                 selected_move_id=lease.selected_move_id,
@@ -120,11 +152,43 @@ def run_cycle(
                 error_type=type(exc).__name__,
                 error=message[:1000],
             )
+        _emit(
+            event_sink,
+            "worker_completed",
+            lease_id=lease.lease_id,
+            move_id=lease.selected_move_id,
+            worker_class=lease.worker_class,
+            duration_ms=round((time.perf_counter() - worker_started) * 1000, 3),
+        )
         commit = gate.commit(proposal)
+        if commit.accepted:
+            _emit(
+                event_sink,
+                "proposal_accepted",
+                lease_id=lease.lease_id,
+                move_id=lease.selected_move_id,
+                worker_class=lease.worker_class,
+                revision=commit.revision,
+            )
+        else:
+            _emit(
+                event_sink,
+                "proposal_rejected",
+                lease_id=lease.lease_id,
+                move_id=lease.selected_move_id,
+                worker_class=lease.worker_class,
+                reasons=[rejection.reason.value for rejection in commit.rejections],
+            )
         scheduler.update_statistics(commit, category)
         if commit.accepted:
             if maintenance is not None:
                 maintenance(proposal, commit)
+            _emit(
+                event_sink,
+                "projection_updated",
+                revision=commit.revision,
+                backend=type(view).__name__,
+            )
             keep_lease = not result.get("terminal", True)
         return CycleDigest(
             lease_issued=True,
@@ -136,7 +200,17 @@ def run_cycle(
         )
     finally:
         if not keep_lease:
-            scheduler.release(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
+            released = scheduler.release(
+                proof_id, lease.lease_id, fencing_token=lease.fencing_token
+            )
+            _emit(
+                event_sink,
+                "lease_released",
+                lease_id=lease.lease_id,
+                move_id=lease.selected_move_id,
+                worker_class=lease.worker_class,
+                released=released,
+            )
 
 
 def _view_at_lease(lease: Lease, view: ReadView, gate: CommitGate) -> ReadView:
@@ -157,6 +231,7 @@ def _dispatch(
     dispatcher: Dispatcher,
     adapters: Mapping[str, Any],
     search_policy: str,
+    event_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> tuple[Mapping[str, Any], Any]:
     """Run the worker and bind its output into a gate-ready Proposal."""
     if lease.worker_class == "formal-atp":
@@ -172,6 +247,7 @@ def _dispatch(
             if resuming
             else f"{lease.proof_id}/{IdType.FORMAL_RUN.value}-{_next_run(view, lease.proof_id)}",
         )
+        _emit(event_sink, "context_compiled", role="formal-atp")
         result = (
             adapter.formal_search_resume(request["run_id"])
             if resuming
@@ -183,6 +259,10 @@ def _dispatch(
         if checker is None:
             raise ValueError("statement check needs a Lean checker")
         packet = compile_context(lease, view)
+        _emit(
+            event_sink, "context_compiled", role=packet.get("role"),
+            context_digest=packet.get("manifest_digest"),
+        )
         declaration = packet["declaration"]
         fields = declaration["fields"]
         checked = checker.check(fields["lean_type"], fields["imports"])
@@ -209,6 +289,10 @@ def _dispatch(
         if worker.actor != lease.actor:
             raise ValueError("alignment worker actor differs from its lease")
         packet = compile_context(lease, view)
+        _emit(
+            event_sink, "context_compiled", role=packet.get("role"),
+            context_digest=packet.get("manifest_digest"),
+        )
         claim, declaration = packet["claim"], packet["declaration"]
         fields = declaration["fields"]
         checked = checker.check(fields["lean_type"], fields["imports"])
@@ -243,12 +327,25 @@ def _dispatch(
         return {"verdict": review.verdict.value, "statement_checked": checked.ok}, proposal
     else:
         packet = compile_context(lease, view)
+        _emit(
+            event_sink, "context_compiled", role=packet.get("role"),
+            context_digest=packet.get("manifest_digest"),
+        )
         result = dict(dispatcher.run(lease, packet))
 
     attempt_serial = _next_attempt(view, lease.proof_id)
     attempt_id = f"{lease.proof_id}/{IdType.ATTEMPT.value}-{attempt_serial}"
     proposal = result_to_proposal(result, lease, view, attempt_id=attempt_id)
     return result, proposal
+
+
+def _emit(
+    sink: Callable[[str, Mapping[str, Any]], None] | None,
+    event: str,
+    **fields: Any,
+) -> None:
+    if sink is not None:
+        sink(event, fields)
 
 
 def _next_attempt(view: ReadView, proof_id: str) -> int:

@@ -66,10 +66,11 @@ The run command reads `GEMINI_API_KEY` from the environment or `.env`. It runs t
 
 ```
 scripts/with-mork.sh .venv/bin/python -m coordinator run \
-  --journal ./proof.sqlite --proof-id p1 --backend mork --rounds 3
+  --journal ./proof.sqlite --proof-id p1 --backend mork --rounds 3 \
+  --verbose --log-file ./runs/p1-events.jsonl
 ```
 
-`init` accepts repeatable `--assumption` arguments and commits the literal theorem, assumptions and first research task through the gate. `status` reads and verifies the SQLite journal without an LLM or MORK. `run` prints the outcome, round reports, escalations, milestones and journal revision as JSON. It does not run formal ATP or independent replay, so its outcome is a workflow status, not a verified proof. The design's formal-run and replay CLI demo is still follow-up work.
+`init` accepts repeatable `--assumption` arguments and commits the literal theorem, assumptions and first research task through the gate. `status` reads and verifies the SQLite journal without an LLM or MORK. `run` prints the outcome, round reports, escalations, milestones and journal revision as JSON. `--verbose` writes concise live progress to stderr, leaving stdout machine-readable; `--log-file` appends the same events as JSONL. Runtime logs contain identifiers, timings, digests and outcomes, not prompts or model responses, and never replace the durable journal. The command does not run formal ATP or independent replay, so its outcome is a workflow status, not a verified proof. The design's formal-run and replay CLI demo is still follow-up work.
 
 Run `python -m pytest src/coordinator/tests` for tests; graph tests are skipped when LangGraph is not installed, and live MORK tests are skipped when the library is unavailable.
 

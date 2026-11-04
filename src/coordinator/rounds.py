@@ -41,12 +41,23 @@ def work(
         store = workspace.open_store()
         revision = project(workspace.view, store, workspace.proof_id)
         before = read_proof(workspace.view, workspace.proof_id, revision)
-        return {
+        workspace.emit(
+            "round_started", round=round_number, revision=revision,
+            progress=list(before.progress),
+        )
+        report = {
             "proof_id": workspace.proof_id,
             "round": round_number,
             "before": list(before.progress),
-            "slots": run_portfolio(workspace, store, slots=slots),
+            "slots": run_portfolio(
+                workspace, store, slots=slots, round_number=round_number
+            ),
         }
+        workspace.emit(
+            "round_work_completed", round=round_number,
+            attempted_slots=len(report["slots"]),
+        )
+        return report
 
 
 def assess(
@@ -116,16 +127,22 @@ def assess(
                     f"{proof_id}: nothing left to lease and every escalation is on record; "
                     "needs a human decision"
                 )
-        return (
-            {
-                "status": status,
-                "progress": list(reading.progress),
-                "stalled_rounds": stalled_rounds,
-                "awaiting_replay": reading.awaiting_replay,
-            },
-            committed,
-            milestones,
+        updated = {
+            "status": status,
+            "progress": list(reading.progress),
+            "stalled_rounds": stalled_rounds,
+            "awaiting_replay": reading.awaiting_replay,
+        }
+        workspace.emit(
+            "round_completed",
+            round=round_number,
+            revision=project(workspace.view, store, proof_id),
+            status=status,
+            progress=list(reading.progress),
+            frontier=frontier_by_category(workspace, store),
+            escalations=len(committed),
         )
+        return updated, committed, milestones
 
 
 def _reading_from(progress: list[int], revision: int) -> ProofReading:

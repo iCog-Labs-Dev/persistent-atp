@@ -21,6 +21,7 @@ from mork.backend import MorkUnavailable
 from shared.llm_client import GeminiLLMClient, LLMClientProtocol
 
 from .portfolio import AGENT_PORTFOLIO, PORTFOLIO, frontier_by_category
+from .runlog import EventSink, RunLogger
 from .workspace import ProofWorkspace, project
 
 
@@ -108,6 +109,8 @@ def run_proof(
     backend: str,
     lean_project: Path | None,
     llm: LLMClientProtocol | None = None,
+    event_sink: EventSink | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -155,9 +158,27 @@ def run_proof(
         dispatcher=ScriptedDispatcher(handlers),
         adapters=adapters,
         view=view,
+        event_sink=event_sink,
     )
-    result = Coordinator([workspace], max_rounds=rounds, slots=slots).run()
-    return {
+    if event_sink is not None:
+        event_sink("run_started", {
+            "proof_id": proof_id,
+            "backend": backend,
+            "max_rounds": rounds,
+            "journal": str(journal),
+            "slots": [slot.role for slot in slots],
+        })
+    try:
+        result = Coordinator([workspace], max_rounds=rounds, slots=slots).run()
+    except Exception as exc:
+        if event_sink is not None:
+            event_sink("run_failed", {
+                "proof_id": proof_id,
+                "error_type": type(exc).__name__,
+                "message": (" ".join(str(exc).split()) or type(exc).__name__)[:1000],
+            })
+        raise
+    output = {
         **inspect(journal, proof_id),
         "outcome": result["outcome"],
         "rounds": result["round"],
@@ -166,6 +187,17 @@ def run_proof(
         "escalations": result["escalations"],
         "milestones": result["milestones"],
     }
+    if run_id is not None:
+        output["run_id"] = run_id
+    if event_sink is not None:
+        event_sink("run_completed", {
+            "proof_id": proof_id,
+            "outcome": output["outcome"],
+            "rounds": output["rounds"],
+            "revision": output["revision"],
+            "progress": output["progress"],
+        })
+    return output
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -183,6 +215,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.add_argument("--rounds", type=int, default=3)
             command.add_argument("--backend", choices=("memory", "mork"), default="memory")
             command.add_argument("--lean-project", type=Path)
+            command.add_argument(
+                "--verbose", action="store_true",
+                help="print live progress events to stderr",
+            )
+            command.add_argument(
+                "--log-file", type=Path,
+                help="append structured runtime events as JSONL",
+            )
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
@@ -193,10 +233,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "status":
             output = inspect(args.journal, args.proof_id)
         else:
-            output = run_proof(
-                args.journal, args.proof_id, rounds=args.rounds,
-                backend=args.backend, lean_project=args.lean_project,
-            )
+            with RunLogger(verbose=args.verbose, log_file=args.log_file) as run_log:
+                output = run_proof(
+                    args.journal, args.proof_id, rounds=args.rounds,
+                    backend=args.backend, lean_project=args.lean_project,
+                    event_sink=run_log.emit, run_id=run_log.run_id,
+                )
     except (ValueError, OSError, MorkUnavailable) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")
     print(json.dumps(output, indent=2, sort_keys=True))
