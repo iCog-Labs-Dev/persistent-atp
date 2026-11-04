@@ -149,9 +149,11 @@ def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, mo
         {"lean_type": "True", "imports": ["Init"], "reasoning": "Literal statement"},
         {"verdict": "aligned", "relation": "exact", "reasoning": "Both state True"},
     ])
+    events = []
 
     result = run_proof(
         journal, proof_id, rounds=2, backend="memory", lean_project=tmp_path, llm=llm,
+        event_sink=lambda event, fields: events.append({"event": event, **fields}),
     )
 
     assert [slot["slot"] for slot in result["reports"][0]["slots"]] == ["explore"]
@@ -166,3 +168,12 @@ def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, mo
     assert view.node(f"{proof_id}/at-1").fields["status"] == "supported"
     assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"
     assert len(llm.history) == 4
+    completed = [event for event in events if event["event"] == "worker_completed"]
+    assert next(
+        event for event in completed if event["worker_class"] == "formalizer"
+    )["result"] == "formal_declaration_drafted"
+    alignment = next(
+        event for event in completed if event["worker_class"] == "alignment-reviewer"
+    )
+    assert alignment["verdict"] == "aligned"
+    assert alignment["statement_checked"] is True

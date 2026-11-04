@@ -61,7 +61,10 @@ class RunLogger:
         order = (
             "proof_id", "backend", "round", "slot", "worker_class", "role",
             "move_id", "base_revision", "revision", "status", "outcome",
-            "duration_ms", "reason", "error_type", "message",
+            "result", "verdict", "statement_checked", "success", "lean_name",
+            "imports", "proposed_moves", "move_status", "evidence_count",
+            "created", "status_changes", "progress", "frontier", "escalations",
+            "status_reason", "duration_ms", "reason", "error_type", "message",
         )
         details = " ".join(
             f"{name}={record[name]}" for name in order if record.get(name) is not None

@@ -115,14 +115,21 @@ def assess(
             milestones.append(f"{proof_id}: escalation proposal rejected ({reasons})")
 
         status = ACTIVE
+        status_reason = "runnable_work_remains"
         if reading.solved:
             status = SOLVED
+            status_reason = "all_declarations_replayed"
             milestones.append(f"{proof_id}: solved; every declaration replayed")
-        elif not any(frontier_by_category(workspace, store).get(slot.category) for slot in slots):
+        remaining_frontier = frontier_by_category(workspace, store)
+        if status != SOLVED and not any(
+            remaining_frontier.get(slot.category) for slot in slots
+        ):
             if reading.awaiting_replay:
                 status = PARKED
+                status_reason = "certificate_awaiting_replay"
             else:
                 status = STALLED
+                status_reason = "no_runnable_frontier_for_configured_workers"
                 milestones.append(
                     f"{proof_id}: nothing left to lease and every escalation is on record; "
                     "needs a human decision"
@@ -138,8 +145,9 @@ def assess(
             round=round_number,
             revision=project(workspace.view, store, proof_id),
             status=status,
+            status_reason=status_reason,
             progress=list(reading.progress),
-            frontier=frontier_by_category(workspace, store),
+            frontier=remaining_frontier,
             escalations=len(committed),
         )
         return updated, committed, milestones

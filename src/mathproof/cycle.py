@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from commit_gate.gate import CommitGate, CommitResult
+from commit_gate.ops import SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.canon import content_hash
 from commit_gate.state import JournalOverlayView, ReadView
@@ -159,8 +160,10 @@ def run_cycle(
             move_id=lease.selected_move_id,
             worker_class=lease.worker_class,
             duration_ms=round((time.perf_counter() - worker_started) * 1000, 3),
+            **_result_summary(lease.worker_class, result),
         )
         commit = gate.commit(proposal)
+        proposal_summary = _proposal_summary(proposal)
         if commit.accepted:
             _emit(
                 event_sink,
@@ -169,6 +172,7 @@ def run_cycle(
                 move_id=lease.selected_move_id,
                 worker_class=lease.worker_class,
                 revision=commit.revision,
+                **proposal_summary,
             )
         else:
             _emit(
@@ -178,6 +182,7 @@ def run_cycle(
                 move_id=lease.selected_move_id,
                 worker_class=lease.worker_class,
                 reasons=[rejection.reason.value for rejection in commit.rejections],
+                **proposal_summary,
             )
         scheduler.update_statistics(commit, category)
         if commit.accepted:
@@ -346,6 +351,65 @@ def _emit(
 ) -> None:
     if sink is not None:
         sink(event, fields)
+
+
+def _result_summary(worker_class: str, result: Mapping[str, Any]) -> dict[str, Any]:
+    """Safe semantic summary: no prompts, arguments, or model output."""
+    if worker_class in {"llm-research", "hyperon"}:
+        candidate = result.get("candidate_argument")
+        return {
+            "result": "candidate_argument" if candidate else "research_moves",
+            "proposed_moves": len(result.get("moves", ())),
+            "move_status": result.get("move_status"),
+        }
+    if worker_class == "critic":
+        return {
+            "result": "claim_review",
+            "verdict": result.get("verdict"),
+            "reported_verdict": result.get("reported_verdict"),
+            "evidence_count": len(result.get("evidence_ids", ())),
+        }
+    if worker_class == "formalizer":
+        return {
+            "result": "formal_declaration_drafted",
+            "lean_name": result.get("lean_name"),
+            "imports": result.get("imports"),
+        }
+    if worker_class == "alignment-reviewer":
+        return {
+            "result": "alignment_review",
+            "verdict": result.get("verdict"),
+            "statement_checked": result.get("statement_checked"),
+        }
+    if worker_class == "experiment":
+        return {
+            "result": "statement_check",
+            "success": result.get("success"),
+        }
+    if worker_class == "formal-atp":
+        return {
+            "result": "formal_search",
+            "status": result.get("status") or result.get("disposition"),
+        }
+    return {"result": "completed"}
+
+
+def _proposal_summary(proposal: Proposal) -> dict[str, Any]:
+    created = [
+        f"{op.label}:{op.node_id}"
+        for op in proposal.ops
+        if isinstance(op, UpsertNode)
+    ]
+    status_changes = [
+        f"{op.label}:{op.node_id}={op.value}"
+        for op in proposal.ops
+        if isinstance(op, SetField) and op.field == "status"
+    ]
+    return {
+        "created": created,
+        "status_changes": status_changes,
+        "operation_count": len(proposal.ops),
+    }
 
 
 def _next_attempt(view: ReadView, proof_id: str) -> int:

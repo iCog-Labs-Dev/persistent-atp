@@ -6,7 +6,7 @@ import json
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from coordinator import cli
-from coordinator.cli import initialize
+from coordinator.cli import _outcome_reason, initialize
 from coordinator.portfolio import Slot
 from coordinator.rounds import work
 from coordinator.runlog import RunLogger
@@ -75,6 +75,12 @@ def test_one_round_emits_the_runtime_handoff_without_prompt_content(tmp_path):
     ]
     context = next(event for event in events if event["event"] == "context_compiled")
     assert context["context_digest"].startswith("sha256:")
+    completed = next(event for event in events if event["event"] == "worker_completed")
+    assert completed["result"] == "research_moves"
+    assert completed["proposed_moves"] == 0
+    assert completed["move_status"] == "exhausted"
+    accepted = next(event for event in events if event["event"] == "proposal_accepted")
+    assert accepted["status_changes"] == ["ResearchMove:p1/rm-1=exhausted"]
     serialized = json.dumps(events)
     assert "system_prompt" not in serialized
     assert "user_prompt" not in serialized
@@ -111,3 +117,11 @@ def test_cli_keeps_result_on_stdout_and_progress_on_stderr(
         "run_started", "run_completed",
     ]
     assert "[run_started] proof_id=p1 backend=memory" in captured.err
+
+
+def test_halted_outcome_explains_the_missing_next_stage():
+    reason = _outcome_reason("halted", {"p1": {"status": "stalled"}})
+
+    assert "no runnable work" in reason
+    assert "formal ATP" in reason
+    assert "certificate replay" in reason

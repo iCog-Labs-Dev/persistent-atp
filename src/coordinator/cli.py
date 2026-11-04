@@ -178,9 +178,12 @@ def run_proof(
                 "message": (" ".join(str(exc).split()) or type(exc).__name__)[:1000],
             })
         raise
+    summary = inspect(journal, proof_id)
+    outcome_reason = _outcome_reason(result["outcome"], result["tracks"])
     output = {
-        **inspect(journal, proof_id),
+        **summary,
         "outcome": result["outcome"],
+        "outcome_reason": outcome_reason,
         "rounds": result["round"],
         "slots": [slot.role for slot in slots],
         "reports": result["reports"],
@@ -193,11 +196,28 @@ def run_proof(
         event_sink("run_completed", {
             "proof_id": proof_id,
             "outcome": output["outcome"],
+            "reason": outcome_reason,
             "rounds": output["rounds"],
             "revision": output["revision"],
             "progress": output["progress"],
         })
     return output
+
+
+def _outcome_reason(outcome: str, tracks: dict) -> str:
+    statuses = {track.get("status") for track in tracks.values()}
+    if outcome == "solved":
+        return "all proofs have replayed declarations"
+    if outcome == "budget-exhausted":
+        return "the configured round budget was exhausted while work remained"
+    if statuses == {"parked"}:
+        return "proof certificates are waiting for replay"
+    if "stalled" in statuses:
+        return (
+            "no runnable work remains for the configured agents; "
+            "formal ATP and certificate replay are not configured by this command"
+        )
+    return "no proof remains active"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
