@@ -333,11 +333,15 @@ class FakeFormalATP(FormalATPAdapter):
         self,
         plan: Mapping[str, Iterable[str | Mapping[str, Any]]] | None = None,
         replay_fn: ReplayFn | None = None,
+        default_disposition: str | None = None,
     ):
+        if default_disposition is not None and default_disposition not in EMITTABLE_DISPOSITIONS:
+            raise ValueError(f"fake cannot emit disposition {default_disposition!r}")
         self._scripts = {run: deque(script) for run, script in (plan or {}).items()}
         self._latest: dict[str, Mapping[str, Any]] = {}
         self._cancelled: set[str] = set()
         self._replay = replay_fn or stub_replay("verified")
+        self._default_disposition = default_disposition
 
     # -- search lifecycle -------------------------------------------------
 
@@ -351,6 +355,10 @@ class FakeFormalATP(FormalATPAdapter):
         run_id = request["run_id"]
         script = self._scripts.get(run_id)
         if not script:
+            if self._default_disposition is not None:
+                result = build_result(self._default_disposition, request)
+                self._latest[run_id] = result
+                return result
             result = build_result(RunDisposition.INVALID_REQUEST.value, request)
             result["artifacts"][0]["note"] = f"no script for run {run_id!r}"
             return result
@@ -383,7 +391,10 @@ class FakeFormalATP(FormalATPAdapter):
     def formal_replay(
         self, certificate: Mapping[str, Any], environment_hash: str
     ) -> Mapping[str, Any]:
-        return self._replay(certificate, environment_hash)
+        result = dict(self._replay(certificate, environment_hash))
+        result.setdefault("sorry_detected", False)
+        result["simulated"] = True
+        return result
 
     # -- internals -----------------------------------------------------------
 

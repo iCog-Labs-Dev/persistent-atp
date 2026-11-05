@@ -90,7 +90,7 @@ def test_draft_then_review_does_not_verify_claim():
     assert review.accepted, review.rejections
     assert view.node("p1/fd-1").fields["status"] == "aligned"
     assert view.node("p1/al-1").fields["statement_checked"] is True
-    assert view.node("p1/c-1").fields["status"] == "provisional"
+    assert view.node("p1/c-1").fields["status"] == "critic-accepted"
     assert not [c for c in scheduler.build_frontier("p1") if c.category == "formal-run"]
     view.add_node("p1/env-1", "Environment", {"lake_manifest_hash": "sha256:" + "11" * 32})
     view.add_edge("PINNED_ENVIRONMENT", "p1/fd-1", "p1/env-1", "p1/pin")

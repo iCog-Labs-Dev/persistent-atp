@@ -117,6 +117,7 @@ WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
     WorkerClass.FORMALIZER.value: frozenset({"FormalDeclaration"}),
     WorkerClass.FORMAL_ATP.value: frozenset(
         {
+            "FormalDeclaration",
             "FormalState",
             "TacticApplication",
             "FormalRun",
@@ -418,6 +419,19 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
         ):
             yield Rejection(Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
                             "formalizer may only create draft declarations", index)
+        if worker_class == WorkerClass.FORMAL_ATP.value and (
+            (isinstance(op, UpsertNode) and op.label == "FormalDeclaration")
+            or (
+                isinstance(op, SetField)
+                and op.label == "FormalDeclaration"
+                and (op.field != "status" or op.value not in {"searching", "certificate-produced"})
+            )
+        ):
+            yield Rejection(
+                Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+                "formal ATP may only advance declaration search status",
+                index,
+            )
         if worker_class == WorkerClass.ALIGNMENT_REVIEWER.value and (
             (isinstance(op, UpsertNode) and op.label == "FormalDeclaration")
             or (isinstance(op, SetField) and op.label == "FormalDeclaration"

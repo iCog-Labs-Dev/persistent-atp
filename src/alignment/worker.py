@@ -41,6 +41,7 @@ def build_alignment_proposal(
     selected_move_id: str | None = None,
     statement_checked: bool = False,
     lean_diagnostics: str = "",
+    promote_claim: bool = False,
 ) -> Proposal:
     """Build a CommitGate Proposal recording the alignment review outcome."""
     ops: list[Op] = []
@@ -76,6 +77,11 @@ def build_alignment_proposal(
                 label="FormalDeclaration", node_id=request.declaration_id,
                 field="status", value="aligned", prior="draft",
             ))
+            if promote_claim:
+                ops.append(SetField(
+                    label="Claim", node_id=request.claim_id,
+                    field="status", value="critic-accepted", prior="provisional",
+                ))
         ops.append(
             AddEdge(
                 rel_type="ALIGNS_DECLARATION",

@@ -21,6 +21,7 @@ from mathproof.cycle import CycleDigest, run_cycle
 from mathproof.scheduler import Candidate, GlobalScheduler, SchedulerStatistics
 
 from .environment import pin_aligned_declarations
+from .replay import finalize_accepted_replay
 from .workspace import ProofWorkspace, project
 
 __all__ = ["Slot", "PORTFOLIO", "AGENT_PORTFOLIO", "SlotScheduler", "frontier_by_category", "run_portfolio"]
@@ -44,6 +45,7 @@ AGENT_PORTFOLIO = (
     Slot("formalize", "formalization-task", "formalizer"),
     Slot("alignment", "alignment-task", "alignment-reviewer"),
     Slot("exploit", "formal-run", "formal-atp"),
+    Slot("replay", "replay-task", "replayer"),
     Slot("explore", "research-move", "llm-research"),
     Slot("statement-check", "statement-check", "experiment"),
 )
@@ -87,6 +89,7 @@ def run_portfolio(
     for slot in slots:
         project(workspace.view, store, proof_id)
         _pin_environment(workspace, store)
+        _finalize_replay(workspace, store)
         if not frontier_by_category(workspace, store).get(slot.category):
             workspace.emit(
                 "slot_skipped", round=round_number, slot=slot.role,
@@ -134,6 +137,7 @@ def run_portfolio(
         )
     project(workspace.view, store, proof_id)
     _pin_environment(workspace, store)
+    _finalize_replay(workspace, store)
     return reports
 
 
@@ -158,6 +162,19 @@ def _pin_environment(workspace: ProofWorkspace, store: JournalStore) -> None:
         revision=result.revision,
         environment_hash=workspace.environment.environment_hash,
     )
+
+
+def _finalize_replay(workspace: ProofWorkspace, store: JournalStore) -> None:
+    result = finalize_accepted_replay(
+        workspace.proof_id, view=workspace.view, store=store
+    )
+    if result is None:
+        return
+    if not result.accepted:
+        reasons = ", ".join(rejection.reason.value for rejection in result.rejections)
+        raise ValueError(f"replay finalization rejected: {reasons}")
+    project(workspace.view, store, workspace.proof_id)
+    workspace.emit("replay_finalized", revision=result.revision)
 
 
 def _slot_report(slot: Slot, digest: CycleDigest) -> dict[str, Any]:

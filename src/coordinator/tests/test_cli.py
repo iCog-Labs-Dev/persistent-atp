@@ -192,3 +192,60 @@ def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, mo
     )
     assert alignment["verdict"] == "aligned"
     assert alignment["statement_checked"] is True
+
+
+def test_fake_formal_mode_completes_certificate_and_replay_cycle(tmp_path, monkeypatch):
+    pytest.importorskip("langgraph")
+    from mathproof.lean_statement import StatementCheck
+    from coordinator import cli
+
+    class Checked:
+        def __init__(self, project):
+            assert project == tmp_path
+
+        def check(self, lean_type, imports):
+            return StatementCheck(lean_type == "True" and imports == ["Init"], "elaborated")
+
+    monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    write_lean_environment(tmp_path)
+    journal = tmp_path / "fake-cycle.sqlite"
+    proof_id = "fake-cycle"
+    initialize(journal, proof_id, "True", "Give a complete argument for True")
+    llm = MockLLMClient(responses=[
+        {
+            "moves": [],
+            "candidate_argument": {
+                "claim_id": f"{proof_id}/theorem",
+                "argument": "True.intro establishes True.",
+                "prerequisite_claim_ids": [],
+            },
+            "reasoning": "The theorem is immediate.",
+        },
+        {
+            "verdict": "supported", "reasoning": "True.intro is sufficient",
+            "earliest_gap": None, "repair": None, "evidence_ids": [],
+        },
+        {"lean_type": "True", "imports": ["Init"], "reasoning": "Literal statement"},
+        {"verdict": "aligned", "relation": "exact", "reasoning": "Both state True"},
+    ])
+
+    result = run_proof(
+        journal, proof_id, rounds=2, backend="memory", lean_project=tmp_path,
+        llm=llm, fake_formal=True,
+    )
+
+    assert result["outcome"] == "simulated-complete"
+    assert result["verification_mode"] == "simulated"
+    assert "real replay is still required" in result["outcome_reason"]
+    view = MemoryView()
+    project(view, JournalStore(str(journal)), proof_id)
+    assert view.node(f"{proof_id}/theorem").fields["status"] == "critic-accepted"
+    assert view.node(f"{proof_id}/fd-1").fields["status"] == "certificate-produced"
+    assert view.node(f"{proof_id}/cert-1").fields["status"] == "replay-pending"
+    replay = view.node(f"{proof_id}/lr-1")
+    assert replay.fields["status"] == "verified"
+    assert replay.fields["simulated"] is True
+    assert view.edges_from(f"{proof_id}/fr-1", "RAN_UNDER")[0].dst_id == f"{proof_id}/env-1"
+    assert view.edges_from(f"{proof_id}/cert-1", "CERTIFICATE_ENVIRONMENT")[0].dst_id == f"{proof_id}/env-1"
+    assert view.edges_from(f"{proof_id}/lr-1", "REPLAY_ENVIRONMENT")[0].dst_id == f"{proof_id}/env-1"
+    assert view.edges_from(f"{proof_id}/theorem", "PROVED_BY")[0].dst_id == f"{proof_id}/cert-1"

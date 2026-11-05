@@ -15,6 +15,7 @@ from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from mathproof.dispatch import ScriptedDispatcher
+from mathproof.formal_atp import FakeFormalATP
 from mathproof.lean_statement import LeanStatementChecker
 from mathproof.workers import CriticWorker, FormalizerWorker, ResearchWorker
 from mork.backend import MorkUnavailable
@@ -90,11 +91,17 @@ def inspect(journal: Path, proof_id: str) -> dict:
     from .progress import read_proof
 
     reading = read_proof(view, proof_id, revision)
+    replays = view.list_nodes(proof_id, "LeanReplay")
     return {
         "proof_id": proof_id,
         "revision": revision,
         "verified_chain": store.verify_chain(proof_id),
         "progress": list(reading.progress),
+        "verification_mode": (
+            "simulated" if any(replay.fields.get("simulated") is True for replay in replays)
+            else "replayed" if replays
+            else "not-replayed"
+        ),
         "frontier": frontier_by_category(
             ProofWorkspace(proof_id, lambda: JournalStore(str(journal)), ScriptedDispatcher({}), view=view),
             store,
@@ -112,6 +119,7 @@ def run_proof(
     llm: LLMClientProtocol | None = None,
     event_sink: EventSink | None = None,
     run_id: str | None = None,
+    fake_formal: bool = False,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -127,6 +135,8 @@ def run_proof(
         raise ValueError(f"unknown backend: {backend}")
     if lean_project is not None and not lean_project.is_dir():
         raise ValueError(f"Lean project does not exist: {lean_project}")
+    if fake_formal and lean_project is None:
+        raise ValueError("--fake-formal requires --lean-project for environment pinning")
 
     try:
         from .graph import Coordinator
@@ -151,9 +161,20 @@ def run_proof(
             ),
             "lean-statement-checker": LeanStatementChecker(lean_project),
         }
-        slots = tuple(slot for slot in AGENT_PORTFOLIO if slot.category != "formal-run")
+        if fake_formal:
+            fake = FakeFormalATP(default_disposition="proved-pending-replay")
+            adapters.update({"formal-atp": fake, "replayer": fake})
+            slots = AGENT_PORTFOLIO
+        else:
+            slots = tuple(
+                slot for slot in AGENT_PORTFOLIO
+                if slot.category not in {"formal-run", "replay-task"}
+            )
     else:
-        slots = tuple(slot for slot in PORTFOLIO if slot.category != "formal-run")
+        slots = tuple(
+            slot for slot in PORTFOLIO
+            if slot.category not in {"formal-run", "replay-task"}
+        )
 
     workspace = ProofWorkspace(
         proof_id=proof_id,
@@ -184,9 +205,15 @@ def run_proof(
         raise
     summary = inspect(journal, proof_id)
     outcome_reason = _outcome_reason(result["outcome"], result["tracks"])
+    reported_outcome = result["outcome"]
+    if fake_formal and summary["verification_mode"] == "simulated":
+        reported_outcome = "simulated-complete"
+        outcome_reason = (
+            "the fake ATP and fake replay completed; a real replay is still required"
+        )
     output = {
         **summary,
-        "outcome": result["outcome"],
+        "outcome": reported_outcome,
         "outcome_reason": outcome_reason,
         "rounds": result["round"],
         "slots": [slot.role for slot in slots],
@@ -240,6 +267,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.add_argument("--backend", choices=("memory", "mork"), default="memory")
             command.add_argument("--lean-project", type=Path)
             command.add_argument(
+                "--fake-formal", action="store_true",
+                help="exercise fake ATP and replay; never reports a real verified proof",
+            )
+            command.add_argument(
                 "--verbose", action="store_true",
                 help="print live progress events to stderr",
             )
@@ -262,6 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.journal, args.proof_id, rounds=args.rounds,
                     backend=args.backend, lean_project=args.lean_project,
                     event_sink=run_log.emit, run_id=run_log.run_id,
+                    fake_formal=args.fake_formal,
                 )
     except (ValueError, OSError, MorkUnavailable) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")

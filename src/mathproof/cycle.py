@@ -52,6 +52,8 @@ def category_of(move_id: str, worker_class: str | None = None) -> str:
         return "formalization-task"
     if worker_class == "alignment-reviewer" and local.startswith("fd-"):
         return "alignment-task"
+    if worker_class == "replayer" and local.startswith("cert-"):
+        return "replay-task"
     if worker_class == "experiment" and local.startswith(("rm-", "at-")):
         return "statement-check"
     if local.startswith("rm-"):
@@ -96,6 +98,7 @@ def run_cycle(
             "formalizer": "formalization-task",
             "alignment-reviewer": "alignment-task",
             "formal-atp": "formal-run",
+            "replayer": "replay-task",
         }.get(worker_class)
     lease = scheduler.lease_next(
         proof_id, worker_class, ttl_seconds=ttl_seconds,
@@ -253,12 +256,46 @@ def _dispatch(
             else f"{lease.proof_id}/{IdType.FORMAL_RUN.value}-{_next_run(view, lease.proof_id)}",
         )
         _emit(event_sink, "context_compiled", role="formal-atp")
-        result = (
+        result = dict(
             adapter.formal_search_resume(request["run_id"])
             if resuming
             else adapter.formal_search_start(request)
         )
         result["proof_id"] = lease.proof_id
+        result["actor"] = lease.actor
+        from .soundness import validate_formal_search_result
+        violations = (
+            validate_formal_search_result(
+                result, pinned_environment_hash=request["environment_hash"]
+            )
+            if request["environment_hash"]
+            else ()
+        )
+        if violations:
+            raise ValueError(
+                "invalid formal search result: "
+                + "; ".join(violation.reason.value for violation in violations)
+            )
+        result["environment_id"] = request["environment_id"]
+        result["claim_id"] = request["claim_id"]
+    elif lease.worker_class == "replayer":
+        adapter = adapters.get("replayer")
+        if adapter is None:
+            raise ValueError("no replay adapter registered")
+        certificate = view.node(lease.selected_move_id)
+        if certificate is None or certificate.label != "Certificate":
+            raise ValueError("replay target is not a certificate")
+        environment_edges = view.edges_from(certificate.node_id, "CERTIFICATE_ENVIRONMENT")
+        if len(environment_edges) != 1:
+            raise ValueError("certificate has no unique environment binding")
+        environment = view.node(environment_edges[0].dst_id)
+        if environment is None or not environment.fields.get("environment_hash"):
+            raise ValueError("certificate environment is missing")
+        _emit(event_sink, "context_compiled", role="replayer")
+        result = dict(adapter.formal_replay(
+            {"certificate_id": certificate.node_id, **dict(certificate.fields)},
+            environment.fields["environment_hash"],
+        ))
     elif lease.worker_class == "experiment":
         checker = adapters.get("lean-statement-checker")
         if checker is None:
@@ -322,12 +359,20 @@ def _dispatch(
             )
         from .dispatch import _next_serial
         alignment_id = f"{lease.proof_id}/al-{_next_serial(view, 'al', lease.proof_id)}"
+        promote_claim = claim["fields"].get("status") == "provisional" and any(
+            (attempt := view.node(edge.src_id)) is not None
+            and attempt.label == "Attempt"
+            and attempt.fields.get("worker_class") == "critic"
+            and attempt.fields.get("status") in {"supported", "critic-accepted"}
+            for edge in view.edges_to(claim["id"], "REVIEWS_CLAIM")
+        )
         proposal = build_alignment_proposal(
             proof_id=lease.proof_id, alignment_id=alignment_id,
             request=request, result=review, actor=worker.actor,
             base_revision=lease.base_revision, lease_id=lease.lease_id,
             fencing_token=lease.fencing_token, selected_move_id=lease.selected_move_id,
             statement_checked=checked.ok, lean_diagnostics=checked.diagnostics,
+            promote_claim=promote_claim,
         )
         return {"verdict": review.verdict.value, "statement_checked": checked.ok}, proposal
     else:
@@ -390,6 +435,12 @@ def _result_summary(worker_class: str, result: Mapping[str, Any]) -> dict[str, A
         return {
             "result": "formal_search",
             "status": result.get("status") or result.get("disposition"),
+        }
+    if worker_class == "replayer":
+        return {
+            "result": "certificate_replay",
+            "status": result.get("status"),
+            "simulated": bool(result.get("simulated", False)),
         }
     return {"result": "completed"}
 

@@ -85,6 +85,7 @@ CATEGORY_WORKER_CLASS = {
     "formalization-task": WorkerClass.FORMALIZER.value,
     "alignment-task": WorkerClass.ALIGNMENT_REVIEWER.value,
     "formal-run": WorkerClass.FORMAL_ATP.value,
+    "replay-task": WorkerClass.REPLAYER.value,
     "critic-task": WorkerClass.CRITIC.value,
 }
 
@@ -94,7 +95,7 @@ class Candidate:
     """One frontier entry: what could be worked on next, and why."""
 
     move_id: str
-    category: str  # research-move | formal-run | critic-task
+    category: str  # research-move | formal-run | replay-task | critic-task
     detail: str
     features: Mapping[str, float] = field(default_factory=dict)
     conflict_ids: tuple[str, ...] = ()
@@ -456,6 +457,23 @@ class GlobalScheduler:
                             },
                         )
                     )
+
+            elif record.label == "Certificate" and record.fields.get("status") == "candidate":
+                if len(view.edges_from(node_id, "CERTIFICATE_ENVIRONMENT")) != 1:
+                    continue
+                candidates.append(Candidate(
+                    move_id=node_id,
+                    category="replay-task",
+                    detail="candidate certificate awaiting independent replay",
+                    conflict_ids=tuple(
+                        edge.dst_id for edge in view.edges_from(node_id, "CERTIFIES")
+                    ),
+                    features={
+                        "verification_value": 1.0,
+                        "formalization_readiness": 1.0,
+                        "estimated_cost": 1.0,
+                    },
+                ))
 
             # Critic tasks: provisional claims with no favorable verdict (3.3).
             elif record.label == "Claim":

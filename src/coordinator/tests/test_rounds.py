@@ -12,6 +12,8 @@ from commit_gate.proposal import Proposal
 from coordinator.escalate import COORDINATOR_EDGES, COORDINATOR_LABELS
 from coordinator.policy import BRIDGE_LEMMA, FIVE_MECHANISMS, GLOBAL_AUDIT, REPAIR
 from coordinator.rounds import ACTIVE, PARKED, SOLVED, STALLED, assess, new_track, work
+from coordinator.portfolio import Slot
+from mathproof.formal_atp import FakeFormalATP
 
 from .fixtures import JournalCase, aligned_claim, critic, declaration, explorer
 
@@ -88,6 +90,30 @@ class TestPortfolio(RoundCase):
         # No stall rule fires after verified gain; the audit is only the
         # empty frontier's cue to expand (the run ended budget-exhausted).
         self.assertEqual([e["rule"] for e in raised], [GLOBAL_AUDIT])
+
+    def test_fake_replay_is_recorded_but_does_not_verify_the_proof(self):
+        self.seed(
+            "p1",
+            declaration("p1", status="certificate-produced"),
+            *aligned_claim("p1"),
+            *candidate_certificate("p1"),
+        )
+        workspace = self.workspace("p1")
+        workspace.adapters = {"replayer": FakeFormalATP()}
+
+        report = work(
+            workspace,
+            1,
+            slots=(Slot("replay", "replay-task", "replayer"),),
+        )
+
+        self.assertTrue(report["slots"][0]["accepted"])
+        view = self.view_of("p1")
+        self.assertEqual(view.node("p1/cert-1").fields["status"], "replay-pending")
+        self.assertEqual(view.node("p1/fd-1").fields["status"], "certificate-produced")
+        replay = view.node("p1/lr-1")
+        self.assertEqual(replay.fields["status"], "verified")
+        self.assertTrue(replay.fields["simulated"])
 
 
 class TestEscalation(RoundCase):

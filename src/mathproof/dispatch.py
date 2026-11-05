@@ -74,6 +74,8 @@ def result_to_proposal(
         ops = statement_check_result_to_ops(result, lease, view)
     elif worker_class == "formal-atp":
         ops = formal_result_to_ops(result, view)
+    elif worker_class == "replayer":
+        ops = replay_result_to_ops(result, lease, view)
     elif worker_class == "critic":
         ops = critic_result_to_ops(
             {**result, "actor": lease.actor},
@@ -176,6 +178,12 @@ def formal_result_to_ops(
     result already committed leaves committed state unchanged.
     """
     ops: list[Any] = []
+    closed_states = {
+        edge["source_state_id"]
+        for edge in result.get("tactic_edges", [])
+        if not edge.get("produced_goal_ids")
+        and edge.get("executor_result") == "lean-accepted"
+    }
 
     for state in result.get("states", []):
         fields = {
@@ -183,6 +191,8 @@ def formal_result_to_ops(
             for key, value in state.items()
             if key not in ("state_id",) and value is not None
         }
+        if state["state_id"] in closed_states:
+            fields["status"] = "formally-closed"
         existing = view.node(state["state_id"])
         if existing is None:
             ops.append(UpsertNode("FormalState", state["state_id"], fields))
@@ -193,7 +203,12 @@ def formal_result_to_ops(
     disposition = result.get("disposition")
     if run_id is not None:
         existing_run = view.node(run_id)
-        run_fields = {"actor": result.get("actor", "formal-atp"), "status": disposition}
+        run_fields = {
+            "actor": result.get("actor", "formal-atp"),
+            "status": disposition,
+            "environment_hash": result.get("environment_hash"),
+        }
+        run_fields = {key: value for key, value in run_fields.items() if value is not None}
         if existing_run is None:
             ops.append(UpsertNode("FormalRun", run_id, run_fields))
         elif disposition:
@@ -209,6 +224,23 @@ def formal_result_to_ops(
             ops.append(
                 AddEdge("SEARCHES", run_id, declaration_id, f"{run_id}-searches")
             )
+        environment_id = result.get("environment_id")
+        if environment_id and not view.edges_from(run_id, "RAN_UNDER"):
+            ops.append(AddEdge("RAN_UNDER", run_id, environment_id, f"{run_id}-environment"))
+
+        declaration = view.node(declaration_id) if declaration_id else None
+        if declaration is not None and declaration.fields.get("status") == "aligned":
+            ops.append(SetField(
+                "FormalDeclaration", declaration_id, "status", "searching", prior="aligned"
+            ))
+            declaration_status = "searching"
+        else:
+            declaration_status = declaration.fields.get("status") if declaration else None
+        if result.get("certificate") and declaration_status == "searching":
+            ops.append(SetField(
+                "FormalDeclaration", declaration_id, "status",
+                "certificate-produced", prior="searching",
+            ))
 
     for edge in result.get("tactic_edges", []):
         tactic_id = edge["tactic_id"]
@@ -297,6 +329,7 @@ def formal_result_to_ops(
                     "actor": result.get("actor", "formal-atp"),
                     "producer_run_id": result["run_id"],
                     "artifact_hash": certificate["artifact_hash"],
+                    "environment_hash": result["environment_hash"],
                     "status": certificate.get("status", "candidate"),
                 },
             )
@@ -319,6 +352,17 @@ def formal_result_to_ops(
                     f"{certificate_id}-certifies",
                 )
             )
+        environment_id = result.get("environment_id")
+        if environment_id:
+            ops.append(AddEdge(
+                "CERTIFICATE_ENVIRONMENT", certificate_id, environment_id,
+                f"{certificate_id}-environment",
+            ))
+        claim_id = result.get("claim_id")
+        if claim_id:
+            ops.append(AddEdge(
+                "PROVED_BY", claim_id, certificate_id, f"{claim_id}-proved-by-{certificate_id.rsplit('/', 1)[-1]}",
+            ))
 
     for obstruction in result.get("obstructions", []):
         obstruction_id = obstruction["obstruction_id"]
@@ -353,6 +397,56 @@ def formal_result_to_ops(
                 )
             )
 
+    return ops
+
+
+def replay_result_to_ops(
+    result: Mapping[str, Any], lease, view: ReadView
+) -> list[Any]:
+    """Record one replay verdict and advance its certificate atomically."""
+    certificate = view.node(lease.selected_move_id)
+    if certificate is None or certificate.label != "Certificate":
+        raise ValueError("replayer needs a committed certificate")
+    if certificate.fields.get("status") != "candidate":
+        raise ValueError("replayer only accepts candidate certificates")
+    environment_edges = view.edges_from(certificate.node_id, "CERTIFICATE_ENVIRONMENT")
+    if len(environment_edges) != 1:
+        raise ValueError("certificate has no unique environment binding")
+    environment_id = environment_edges[0].dst_id
+    environment = view.node(environment_id)
+    if environment is None:
+        raise ValueError("certificate environment is missing")
+    environment_hash = environment.fields.get("environment_hash")
+    if result.get("environment_hash") != environment_hash:
+        raise ValueError("replay result does not match the pinned environment")
+    verdict = result.get("status")
+    if verdict not in {"verified", "rejected"}:
+        raise ValueError("replay result must be verified or rejected")
+
+    replay_id = f"{lease.proof_id}/lr-{_next_serial(view, 'lr', lease.proof_id)}"
+    replay_fields = {
+        "actor": lease.actor,
+        "status": verdict,
+        "sorry_detected": result.get("sorry_detected", False),
+        "environment_hash": environment_hash,
+        "certificate_id": certificate.node_id,
+        "artifact_hash": certificate.fields["artifact_hash"],
+        "simulated": bool(result.get("simulated", False)),
+    }
+    if result.get("rejection_reason"):
+        replay_fields["rejection_reason"] = result["rejection_reason"]
+    ops = [
+        UpsertNode("LeanReplay", replay_id, replay_fields),
+        AddEdge("REPLAYED_BY", certificate.node_id, replay_id, f"{certificate.node_id}-replayed-{replay_id.rsplit('/', 1)[-1]}"),
+        AddEdge("REPLAY_ENVIRONMENT", replay_id, environment_id, f"{replay_id}-environment"),
+        SetField("Certificate", certificate.node_id, "status", "replay-pending", prior="candidate"),
+    ]
+    if not result.get("simulated", False):
+        final_status = "replay-accepted" if verdict == "verified" else "replay-rejected"
+        ops.append(SetField(
+            "Certificate", certificate.node_id, "status",
+            final_status, prior="replay-pending",
+        ))
     return ops
 
 
