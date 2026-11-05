@@ -210,6 +210,8 @@ class GeminiLLMClient:
         timeout_seconds: float = 45.0,
         temperature: float = 0.0,
         max_retries: int = 3,
+        max_output_tokens: int | None = None,
+        json_attempts: int = 2,
     ) -> None:
         self.api_key = (
             api_key
@@ -225,6 +227,17 @@ class GeminiLLMClient:
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
         self.max_retries = max_retries
+        configured_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
+        )
+        if configured_tokens < 1:
+            raise ValueError("Gemini max_output_tokens must be positive")
+        if json_attempts < 1:
+            raise ValueError("Gemini json_attempts must be positive")
+        self.max_output_tokens = configured_tokens
+        self.json_attempts = json_attempts
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         """Call Gemini generateContent endpoint."""
@@ -238,6 +251,7 @@ class GeminiLLMClient:
             "generationConfig": {
                 "temperature": self.temperature,
                 "responseMimeType": "application/json",
+                "maxOutputTokens": self.max_output_tokens,
             },
         }
         if system_prompt.strip():
@@ -260,8 +274,18 @@ class GeminiLLMClient:
                     candidates = res_json.get("candidates", [])
                     if not candidates:
                         raise RuntimeError(f"Gemini returned no candidates: {res_json}")
-                    text = candidates[0]["content"]["parts"][0]["text"]
-                    return str(text)
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text = "".join(
+                        str(part.get("text", ""))
+                        for part in parts
+                        if isinstance(part, dict)
+                    )
+                    if not text:
+                        raise RuntimeError(
+                            f"Gemini returned no text; finish reason: "
+                            f"{candidates[0].get('finishReason', 'unknown')}"
+                        )
+                    return text
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8") if exc.fp else str(exc)
                 last_error = RuntimeError(f"Gemini API error (HTTP {exc.code}): {err_body}")
@@ -280,6 +304,21 @@ class GeminiLLMClient:
     def generate_json(
         self, system_prompt: str, user_prompt: str
     ) -> dict[str, Any]:
-        """Generate response and parse into structured JSON."""
-        raw_text = self.generate(system_prompt, user_prompt)
-        return extract_json_from_text(raw_text)
+        """Generate JSON, retrying when the model returns broken syntax."""
+        last_error: ValueError | None = None
+        retry_instruction = (
+            "\n\nYour previous response was invalid or truncated JSON. Regenerate "
+            "the answer as one compact JSON object with every bracket and string "
+            "closed. Keep reasoning and descriptions concise. Return no markdown."
+        )
+        for attempt in range(self.json_attempts):
+            prompt = system_prompt if attempt == 0 else system_prompt + retry_instruction
+            raw_text = self.generate(prompt, user_prompt)
+            try:
+                return extract_json_from_text(raw_text)
+            except ValueError as exc:
+                last_error = exc
+        raise ValueError(
+            f"Gemini returned invalid JSON after {self.json_attempts} attempts: "
+            f"{last_error}"
+        ) from last_error
