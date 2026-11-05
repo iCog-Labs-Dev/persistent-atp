@@ -403,7 +403,10 @@ class GlobalScheduler:
                 if view.edges_from(node_id, "DRAFTS_CLAIM") and not any(
                     (environment := nodes.get(edge.dst_id)) is not None
                     and environment.label == "Environment"
-                    and environment.fields.get("lake_manifest_hash")
+                    and (
+                        environment.fields.get("environment_hash")
+                        or environment.fields.get("lake_manifest_hash")
+                    )
                     for edge in view.edges_from(node_id, "PINNED_ENVIRONMENT")
                 ):
                     continue

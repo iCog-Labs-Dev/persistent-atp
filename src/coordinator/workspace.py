@@ -18,6 +18,7 @@ from commit_gate.state import MemoryView, ProjectionView, ReadView
 from commit_gate.store import JournalStore
 from mathproof.dispatch import Dispatcher
 from mathproof.scheduler import SchedulerStatistics
+from .environment import LeanEnvironment
 from .runlog import EventSink
 
 __all__ = ["ProofWorkspace", "project"]
@@ -32,6 +33,7 @@ class ProofWorkspace:
     dispatcher: Dispatcher
     adapters: Mapping[str, Any] = field(default_factory=dict)
     view: ReadView = field(default_factory=MemoryView)
+    environment: LeanEnvironment | None = None
     statistics: SchedulerStatistics = field(default_factory=SchedulerStatistics)
     event_sink: EventSink | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)

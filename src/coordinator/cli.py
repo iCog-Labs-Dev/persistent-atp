@@ -20,6 +20,7 @@ from mathproof.workers import CriticWorker, FormalizerWorker, ResearchWorker
 from mork.backend import MorkUnavailable
 from shared.llm_client import GeminiLLMClient, LLMClientProtocol
 
+from .environment import LeanEnvironment
 from .portfolio import AGENT_PORTFOLIO, PORTFOLIO, frontier_by_category
 from .runlog import EventSink, RunLogger
 from .workspace import ProofWorkspace, project
@@ -139,7 +140,9 @@ def run_proof(
         "critic": CriticWorker(client).run,
     }
     adapters = {}
+    environment = None
     if lean_project is not None:
+        environment = LeanEnvironment.discover(lean_project)
         handlers["formalizer"] = FormalizerWorker(client).run
         adapters = {
             "alignment-reviewer": AlignmentWorker(
@@ -158,6 +161,7 @@ def run_proof(
         dispatcher=ScriptedDispatcher(handlers),
         adapters=adapters,
         view=view,
+        environment=environment,
         event_sink=event_sink,
     )
     if event_sink is not None:

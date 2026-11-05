@@ -15,6 +15,14 @@ from coordinator.workspace import project
 from shared.llm_client import MockLLMClient
 
 
+def write_lean_environment(path):
+    (path / "lean-toolchain").write_text("leanprover/lean4:v4.19.0\n", encoding="utf-8")
+    (path / "lakefile.toml").write_text('name = "cli_test"\n', encoding="utf-8")
+    (path / "lake-manifest.json").write_text(
+        json.dumps({"version": "1.1.0", "packages": []}), encoding="utf-8"
+    )
+
+
 def test_init_and_status_are_durable_and_preserve_theorem_kernel(tmp_path, capsys):
     journal = tmp_path / "proof" / "journal.sqlite"
     proof_id = "cli-1"
@@ -77,6 +85,7 @@ def test_lean_project_enables_formalizer_and_alignment_workers(tmp_path, monkeyp
             return StatementCheck(True, "elaborated")
 
     monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    write_lean_environment(tmp_path)
     journal = tmp_path / "journal.sqlite"
     proof_id = "lean-cli"
     initialize(journal, proof_id, "True", "Investigate the theorem")
@@ -112,6 +121,11 @@ def test_lean_project_enables_formalizer_and_alignment_workers(tmp_path, monkeyp
     view = MemoryView()
     project(view, store, proof_id)
     assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"
+    environment = view.node(f"{proof_id}/env-1")
+    assert environment is not None
+    assert environment.fields["toolchain"] == "leanprover/lean4:v4.19.0"
+    assert view.edges_from(f"{proof_id}/fd-1", "PINNED_ENVIRONMENT")[0].dst_id == environment.node_id
+    assert result["frontier"]["formal-run"] == 1
     assert len(llm.history) == 4
 
 
@@ -129,6 +143,7 @@ def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, mo
             return StatementCheck(True, "elaborated")
 
     monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    write_lean_environment(tmp_path)
     journal = tmp_path / "integrated.sqlite"
     proof_id = "integrated-cli"
     initialize(journal, proof_id, "True", "Give a complete argument for the theorem")

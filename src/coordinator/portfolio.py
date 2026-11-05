@@ -20,6 +20,7 @@ from commit_gate.store import JournalStore
 from mathproof.cycle import CycleDigest, run_cycle
 from mathproof.scheduler import Candidate, GlobalScheduler, SchedulerStatistics
 
+from .environment import pin_aligned_declarations
 from .workspace import ProofWorkspace, project
 
 __all__ = ["Slot", "PORTFOLIO", "AGENT_PORTFOLIO", "SlotScheduler", "frontier_by_category", "run_portfolio"]
@@ -85,6 +86,7 @@ def run_portfolio(
     reports = []
     for slot in slots:
         project(workspace.view, store, proof_id)
+        _pin_environment(workspace, store)
         if not frontier_by_category(workspace, store).get(slot.category):
             workspace.emit(
                 "slot_skipped", round=round_number, slot=slot.role,
@@ -131,7 +133,31 @@ def run_portfolio(
             ),
         )
     project(workspace.view, store, proof_id)
+    _pin_environment(workspace, store)
     return reports
+
+
+def _pin_environment(workspace: ProofWorkspace, store: JournalStore) -> None:
+    """Commit infrastructure-owned pins before a formal slot reads its frontier."""
+    if workspace.environment is None:
+        return
+    result = pin_aligned_declarations(
+        workspace.proof_id,
+        workspace.environment,
+        view=workspace.view,
+        store=store,
+    )
+    if result is None:
+        return
+    if not result.accepted:
+        reasons = ", ".join(rejection.reason.value for rejection in result.rejections)
+        raise ValueError(f"environment pin rejected: {reasons}")
+    project(workspace.view, store, workspace.proof_id)
+    workspace.emit(
+        "environment_pinned",
+        revision=result.revision,
+        environment_hash=workspace.environment.environment_hash,
+    )
 
 
 def _slot_report(slot: Slot, digest: CycleDigest) -> dict[str, Any]:

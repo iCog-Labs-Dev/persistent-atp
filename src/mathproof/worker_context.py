@@ -414,7 +414,7 @@ def _pinned_environment(view: ReadView, declaration_id: str) -> dict[str, Any]:
             return {
                 "environment_id": env.node_id,
                 "environment_hash": fields.get(
-                    "lake_manifest_hash", ""
+                    "environment_hash", fields.get("lake_manifest_hash", "")
                 ),
                 "toolchain": fields.get("toolchain"),
             }
