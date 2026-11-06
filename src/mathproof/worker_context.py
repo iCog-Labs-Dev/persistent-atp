@@ -205,6 +205,21 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
         ref.source_id for ref in collected.bundle.sources
         if ref.source_type == "claim" and ref.source_id in included
     )
+    prerequisite_ids = move.fields.get("prerequisite_claim_ids", ())
+    if not isinstance(prerequisite_ids, (list, tuple)):
+        raise ValueError("research move prerequisites must be a list")
+    prerequisite_claims = []
+    for claim_id in prerequisite_ids:
+        claim = view.node(claim_id) if isinstance(claim_id, str) else None
+        if (
+            claim is None or claim.label != "Claim"
+            or not belongs_to_proof(claim.node_id, lease.proof_id)
+        ):
+            raise ValueError("research move names an unknown prerequisite claim")
+        prerequisite_claims.append(_node_payload(claim))
+        if claim.node_id not in claim_ids:
+            claim_ids.append(claim.node_id)
+    claim_ids.sort()
     return {
         "role": "research", "proof_id": lease.proof_id,
         "revision": lease.base_revision, "lease_id": lease.lease_id,
@@ -219,6 +234,7 @@ def _research_packet(lease: Lease, view: ReadView) -> dict[str, Any]:
             "statement": kernel.statement,
         },
         "claims": [{"id": claim_id} for claim_id in claim_ids],
+        "prerequisite_claims": prerequisite_claims,
         "declarations": [{"id": item["id"]} for item in _draft_declarations(view, targets, lease.proof_id)],
         "context_text": compilation.packet.content,
         "manifest_digest": compilation.packet_digest,

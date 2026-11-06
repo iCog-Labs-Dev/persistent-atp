@@ -21,6 +21,7 @@ from mathproof.cycle import CycleDigest, run_cycle
 from mathproof.scheduler import Candidate, GlobalScheduler, SchedulerStatistics
 
 from .environment import pin_aligned_declarations
+from .research import reconcile_research
 from .replay import finalize_accepted_replay
 from .workspace import ProofWorkspace, project
 
@@ -88,6 +89,7 @@ def run_portfolio(
     reports = []
     for slot in slots:
         project(workspace.view, store, proof_id)
+        _reconcile_research(workspace, store)
         _pin_environment(workspace, store)
         _finalize_replay(workspace, store)
         if not frontier_by_category(workspace, store).get(slot.category):
@@ -136,9 +138,21 @@ def run_portfolio(
             ),
         )
     project(workspace.view, store, proof_id)
+    _reconcile_research(workspace, store)
     _pin_environment(workspace, store)
     _finalize_replay(workspace, store)
     return reports
+
+
+def _reconcile_research(workspace: ProofWorkspace, store: JournalStore) -> None:
+    result = reconcile_research(store, workspace.view, workspace.proof_id)
+    if result is None:
+        return
+    if not result.accepted:
+        reasons = ", ".join(rejection.reason.value for rejection in result.rejections)
+        raise ValueError(f"research reconciliation rejected: {reasons}")
+    project(workspace.view, store, workspace.proof_id)
+    workspace.emit("research_reconciled", revision=result.revision)
 
 
 def _pin_environment(workspace: ProofWorkspace, store: JournalStore) -> None:

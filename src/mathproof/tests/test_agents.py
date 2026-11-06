@@ -224,6 +224,7 @@ def test_research_alternatives_create_conjunctive_subgoals():
                 "detail": "Use induction", "why_it_helps": "Split the theorem",
                 "first_test": "Check the base case", "technique_tag": "induction",
                 "prerequisite_claim_ids": [],
+                "unresolved_gap": "The base and successor cases are not established",
                 "subgoals": [
                     {"statement": "Base case", "why_needed": "Induction base"},
                     {"statement": "Successor case", "why_needed": "Induction step"},
@@ -233,6 +234,7 @@ def test_research_alternatives_create_conjunctive_subgoals():
                 "detail": "Use rewriting", "why_it_helps": "Try an equality lemma",
                 "first_test": "Search for a rewrite", "technique_tag": "rewriting",
                 "prerequisite_claim_ids": [],
+                "unresolved_gap": "The needed rewrite lemma has not been established",
                 "subgoals": [{"statement": "Base case", "why_needed": "Shared supporting fact"}],
             },
             {
@@ -270,27 +272,31 @@ def test_research_alternatives_create_conjunctive_subgoals():
     assert "Base case" in child_packet["context_text"]
 
 
-def test_research_cannot_expand_subgoals_beyond_depth_limit():
+def test_maximum_depth_research_terminates_instead_of_branching_again():
     view, store = MemoryView(), JournalStore()
     seed(view, "p1")
     view.set_field("p1/rs-1", "branch_depth", 2)
-    worker = ResearchWorker(MockLLMClient(default_json={
-        "moves": [{
-            "detail": "Split again", "why_it_helps": "Try a smaller lemma",
-            "first_test": "Check the lemma", "technique_tag": "decompose",
-            "prerequisite_claim_ids": [],
-            "subgoals": [{"statement": "A smaller lemma", "why_needed": "Bridge step"}],
-        }],
-        "reasoning": "Further decomposition",
-    }))
-    with pytest.raises(ValueError, match="branch depth"):
-        run_cycle(
-            "p1", view=view, gate=CommitGate(view, store),
-            scheduler=GlobalScheduler(view, store),
-            dispatcher=ScriptedDispatcher({"llm-research": worker.run}),
-        )
-    assert store.head("p1")[0] == 0
-    assert not store.active_leases("p1")
+    worker = ResearchWorker(MockLLMClient(responses=[
+        {
+            "moves": [{
+                "detail": "Think about a smaller lemma", "why_it_helps": "It may help",
+                "first_test": "Inspect it", "technique_tag": "decompose",
+                "prerequisite_claim_ids": [],
+            }],
+            "reasoning": "Continue researching in natural language",
+        },
+        {"moves": [], "reasoning": "This route is exhausted at maximum depth."},
+    ]))
+    result = run_cycle(
+        "p1", view=view, gate=CommitGate(view, store),
+        scheduler=GlobalScheduler(view, store),
+        dispatcher=ScriptedDispatcher({"llm-research": worker.run}),
+        maintenance=lambda proposal, commit: view.apply_journal_event(store, "p1", commit.revision),
+    )
+    assert result.accepted
+    assert view.node("p1/rm-1").fields["status"] == "exhausted"
+    assert worker.llm.history[1][1].endswith("Return one corrected JSON object only.")
+    assert len(view.list_nodes("p1", "ResearchMove")) == 1
 
 
 def test_research_cannot_repeat_its_target_as_a_subgoal():
@@ -306,6 +312,7 @@ def test_research_cannot_repeat_its_target_as_a_subgoal():
             "detail": "Repeat target", "why_it_helps": "Try again",
             "first_test": "Inspect it", "technique_tag": "repeat",
             "prerequisite_claim_ids": [],
+            "unresolved_gap": "No smaller supporting statement is known",
             "subgoals": [{
                 "statement": "For all n : Nat, n + 0 = n", "why_needed": "Circular step",
             }],
@@ -314,6 +321,47 @@ def test_research_cannot_repeat_its_target_as_a_subgoal():
     }))
     with pytest.raises(ValueError, match="repeats the current theorem target"):
         worker.run(lease, packet)
+
+
+def test_research_corrects_duplicate_technique_tags_once():
+    view = MemoryView()
+    seed(view, "p1")
+    lease = SimpleNamespace(
+        proof_id="p1", worker_class="llm-research", selected_move_id="p1/rm-1",
+        base_revision=0, lease_id="p1/ls-1",
+    )
+    packet = compile_context(lease, view)
+    duplicate = {
+        "moves": [
+            {
+                "detail": "Try induction", "why_it_helps": "Expose recursive structure",
+                "first_test": "Check zero", "technique_tag": "induction",
+                "prerequisite_claim_ids": [],
+            },
+            {
+                "detail": "Try another induction", "why_it_helps": "Use a second induction",
+                "first_test": "Check successor", "technique_tag": "induction",
+                "prerequisite_claim_ids": [],
+            },
+        ],
+        "reasoning": "Two variants",
+    }
+    corrected = {
+        "moves": [{
+            "detail": "Try induction", "why_it_helps": "Expose recursive structure",
+            "first_test": "Check zero", "technique_tag": "induction",
+            "prerequisite_claim_ids": [],
+        }],
+        "reasoning": "Use one distinct technique",
+    }
+    llm = MockLLMClient(responses=[duplicate, corrected])
+
+    result = ResearchWorker(llm).run(lease, packet)
+
+    assert result["_agent_validation_status"] == "corrected"
+    assert len(result["moves"]) == 1
+    assert "distinct technique tags" in llm.history[1][1]
+    assert len(llm.history) == 2
 
 
 def test_critic_downgrades_unsupported_opinion_and_rejects_invented_citations():
