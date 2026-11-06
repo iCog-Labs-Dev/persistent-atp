@@ -36,6 +36,7 @@ class ProofWorkspace:
     environment: LeanEnvironment | None = None
     statistics: SchedulerStatistics = field(default_factory=SchedulerStatistics)
     event_sink: EventSink | None = field(default=None, repr=False)
+    log_agent_responses: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def emit(self, event: str, **fields: Any) -> None:

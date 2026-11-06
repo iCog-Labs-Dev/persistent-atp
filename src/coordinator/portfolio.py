@@ -121,6 +121,7 @@ def run_portfolio(
             maintenance=lambda proposal, commit: project(workspace.view, store, proof_id),
             capture_dispatch_errors=True,
             event_sink=emit,
+            log_agent_responses=workspace.log_agent_responses,
         )
         report = _slot_report(slot, digest)
         reports.append(report)

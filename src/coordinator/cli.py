@@ -122,6 +122,7 @@ def run_proof(
     run_id: str | None = None,
     fake_formal: bool = False,
     test_mode: bool = False,
+    log_agent_responses: bool = False,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -191,6 +192,7 @@ def run_proof(
         view=view,
         environment=environment,
         event_sink=event_sink,
+        log_agent_responses=log_agent_responses,
     )
     if event_sink is not None:
         event_sink("run_started", {
@@ -294,6 +296,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--log-file", type=Path,
                 help="append structured runtime events as JSONL",
             )
+            command.add_argument(
+                "--log-agent-responses", action="store_true",
+                help="log normalized agent responses without prompts or context packets",
+            )
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
@@ -311,6 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     event_sink=run_log.emit, run_id=run_log.run_id,
                     fake_formal=args.fake_formal,
                     test_mode=args.test_mode,
+                    log_agent_responses=args.log_agent_responses,
                 )
     except (ValueError, OSError, MorkUnavailable) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")

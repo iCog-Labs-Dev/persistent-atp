@@ -81,6 +81,7 @@ def run_cycle(
     search_policy: str = "gnn-pln-best-first-v1",
     capture_dispatch_errors: bool = False,
     event_sink: Callable[[str, Mapping[str, Any]], None] | None = None,
+    log_agent_responses: bool = False,
 ) -> CycleDigest:
     """Lease the best move, run it under its worker class, commit the result.
 
@@ -137,6 +138,17 @@ def run_cycle(
             )
         except Exception as exc:
             message = " ".join(str(exc).split()) or type(exc).__name__
+            if log_agent_responses and hasattr(exc, "semantic_response"):
+                _emit(
+                    event_sink,
+                    "agent_response",
+                    proof_id=proof_id,
+                    move_id=lease.selected_move_id,
+                    worker_class=lease.worker_class,
+                    validation_status="invalid",
+                    validation_error=getattr(exc, "validation_error", message)[:1000],
+                    response=getattr(exc, "semantic_response"),
+                )
             _emit(
                 event_sink,
                 "worker_failed",
@@ -156,6 +168,18 @@ def run_cycle(
                 error_type=type(exc).__name__,
                 error=message[:1000],
             )
+        if log_agent_responses:
+            semantic = _agent_semantic_response(lease, result, proposal)
+            if semantic is not None:
+                _emit(
+                    event_sink,
+                    "agent_response",
+                    proof_id=proof_id,
+                    move_id=lease.selected_move_id,
+                    worker_class=lease.worker_class,
+                    validation_status=result.get("_agent_validation_status", "valid"),
+                    response=semantic,
+                )
         _emit(
             event_sink,
             "worker_completed",
@@ -374,7 +398,12 @@ def _dispatch(
             statement_checked=checked.ok, lean_diagnostics=checked.diagnostics,
             promote_claim=promote_claim,
         )
-        return {"verdict": review.verdict.value, "statement_checked": checked.ok}, proposal
+        return {
+            "verdict": review.verdict.value,
+            "relation": review.criteria.relation,
+            "reasoning": review.reasoning,
+            "statement_checked": checked.ok,
+        }, proposal
     else:
         packet = compile_context(lease, view)
         _emit(
@@ -443,6 +472,63 @@ def _result_summary(worker_class: str, result: Mapping[str, Any]) -> dict[str, A
             "simulated": bool(result.get("simulated", False)),
         }
     return {"result": "completed"}
+
+
+def _agent_semantic_response(
+    lease: Lease, result: Mapping[str, Any], proposal: Proposal
+) -> dict[str, Any] | None:
+    """Whitelist only normalized agent semantics for optional diagnostics."""
+    worker_class = lease.worker_class
+    if worker_class in {"llm-research", "hyperon"}:
+        return {
+            "reasoning": result.get("reasoning"),
+            "candidate_argument": result.get("candidate_argument"),
+            "moves": [
+                {
+                    key: move[key]
+                    for key in (
+                        "detail", "why_it_helps", "first_test", "technique_tags",
+                        "prerequisite_claim_ids", "unresolved_gap", "subgoals", "action",
+                    )
+                    if key in move
+                }
+                for move in result.get("moves", ())
+                if isinstance(move, Mapping)
+            ],
+        }
+    if worker_class == "critic":
+        return {
+            key: result.get(key)
+            for key in ("verdict", "reasoning", "earliest_gap", "repair", "evidence_ids")
+        }
+    if worker_class == "formalizer":
+        return {
+            key: result.get(key) for key in ("lean_type", "imports", "reasoning")
+        }
+    if worker_class == "alignment-reviewer":
+        return {
+            key: result.get(key) for key in ("verdict", "relation", "reasoning")
+        }
+    if worker_class == "formal-atp":
+        certificate_id = next(
+            (
+                op.node_id for op in proposal.ops
+                if isinstance(op, UpsertNode) and op.label == "Certificate"
+            ),
+            None,
+        )
+        return {
+            "disposition": result.get("disposition") or result.get("status"),
+            "certificate_id": certificate_id,
+        }
+    if worker_class == "replayer":
+        return {
+            "verdict": result.get("status"),
+            "simulated": bool(result.get("simulated", False)),
+            "test_mode": bool(result.get("test_mode", False)),
+            "certificate_id": lease.selected_move_id,
+        }
+    return None
 
 
 def _proposal_summary(proposal: Proposal) -> dict[str, Any]:
