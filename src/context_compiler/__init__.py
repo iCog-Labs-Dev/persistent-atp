@@ -23,6 +23,7 @@ from .formal_runtime import (
     compile_formal_for_lease,
 )
 from .lease_runtime import ContextLeaseCompiler, SchedulerLike
+from .formalization import FormalizationCompilation, compile_formalization
 from .obstruction import (
     ArtifactReader,
     AttemptEvidence,
@@ -74,6 +75,7 @@ __all__ = [
     "FormalLeaseCompiler",
     "FormalRunPreparationRequired",
     "FormalRuntimeConfig",
+    "FormalizationCompilation",
     "MappingArtifactReader",
     "LeaseSnapshotProvider",
     "ObstructionCompilation",
@@ -101,6 +103,7 @@ __all__ = [
     "compile_obstruction_for_lease",
     "compile_formal_for_lease",
     "compile_research_for_lease",
+    "compile_formalization",
     "finalize_packet",
     "resolve_formal_task",
     "resolve_obstruction_task",
