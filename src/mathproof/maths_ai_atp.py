@@ -28,9 +28,8 @@ missing request fields  invalid-request
 ``formal_search_resume`` hands the same goal back to the reasoner -- its
 Thompson-sampler state persists across calls, so a resumed run continues the
 search rather than restarting it blind. ``formal_replay`` delegates to an
-injected verdict function; :mod:`mathproof.replay` provides the real one
-(``lean_replay_fn`` over Pantograph), while the default remains the Phase 0
-stub so test suites stay deterministic without a Lean backend.
+injected independent verifier. Without one, replay rejects the candidate
+instead of claiming verification.
 """
 
 from __future__ import annotations
@@ -318,7 +317,7 @@ class MathsAIFormalATP(FormalATPAdapter):
             reasoner_factory = default_reasoner_factory
         self._reasoner = reasoner
         self._factory = reasoner_factory
-        self._replay = replay_fn or stub_replay("verified")
+        self._replay = replay_fn or stub_replay("rejected")
         self._latest: dict[str, Mapping[str, Any]] = {}
         self._requests: dict[str, Mapping[str, Any]] = {}
         self._cancelled: set[str] = set()
