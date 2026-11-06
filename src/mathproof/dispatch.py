@@ -207,6 +207,7 @@ def formal_result_to_ops(
             "actor": result.get("actor", "formal-atp"),
             "status": disposition,
             "environment_hash": result.get("environment_hash"),
+            "test_mode": bool(result.get("test_mode", False)),
         }
         run_fields = {key: value for key, value in run_fields.items() if value is not None}
         if existing_run is None:
@@ -331,6 +332,7 @@ def formal_result_to_ops(
                     "artifact_hash": certificate["artifact_hash"],
                     "environment_hash": result["environment_hash"],
                     "status": certificate.get("status", "candidate"),
+                    "test_mode": bool(certificate.get("test_mode", False)),
                 },
             )
         )
@@ -432,6 +434,7 @@ def replay_result_to_ops(
         "certificate_id": certificate.node_id,
         "artifact_hash": certificate.fields["artifact_hash"],
         "simulated": bool(result.get("simulated", False)),
+        "test_mode": bool(result.get("test_mode", False)),
     }
     if result.get("rejection_reason"):
         replay_fields["rejection_reason"] = result["rejection_reason"]
@@ -441,7 +444,7 @@ def replay_result_to_ops(
         AddEdge("REPLAY_ENVIRONMENT", replay_id, environment_id, f"{replay_id}-environment"),
         SetField("Certificate", certificate.node_id, "status", "replay-pending", prior="candidate"),
     ]
-    if not result.get("simulated", False):
+    if not result.get("simulated", False) or result.get("test_mode") is True:
         final_status = "replay-accepted" if verdict == "verified" else "replay-rejected"
         ops.append(SetField(
             "Certificate", certificate.node_id, "status",

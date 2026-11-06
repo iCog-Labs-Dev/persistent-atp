@@ -98,7 +98,8 @@ def inspect(journal: Path, proof_id: str) -> dict:
         "verified_chain": store.verify_chain(proof_id),
         "progress": list(reading.progress),
         "verification_mode": (
-            "simulated" if any(replay.fields.get("simulated") is True for replay in replays)
+            "test" if any(replay.fields.get("test_mode") is True for replay in replays)
+            else "simulated" if any(replay.fields.get("simulated") is True for replay in replays)
             else "replayed" if replays
             else "not-replayed"
         ),
@@ -120,6 +121,7 @@ def run_proof(
     event_sink: EventSink | None = None,
     run_id: str | None = None,
     fake_formal: bool = False,
+    test_mode: bool = False,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -135,8 +137,10 @@ def run_proof(
         raise ValueError(f"unknown backend: {backend}")
     if lean_project is not None and not lean_project.is_dir():
         raise ValueError(f"Lean project does not exist: {lean_project}")
-    if fake_formal and lean_project is None:
-        raise ValueError("--fake-formal requires --lean-project for environment pinning")
+    if fake_formal and test_mode:
+        raise ValueError("choose either --fake-formal or --test-mode, not both")
+    if (fake_formal or test_mode) and lean_project is None:
+        raise ValueError("fake formal execution requires --lean-project for environment pinning")
 
     try:
         from .graph import Coordinator
@@ -161,8 +165,11 @@ def run_proof(
             ),
             "lean-statement-checker": LeanStatementChecker(lean_project),
         }
-        if fake_formal:
-            fake = FakeFormalATP(default_disposition="proved-pending-replay")
+        if fake_formal or test_mode:
+            fake = FakeFormalATP(
+                default_disposition="proved-pending-replay",
+                test_mode=test_mode,
+            )
             adapters.update({"formal-atp": fake, "replayer": fake})
             slots = AGENT_PORTFOLIO
         else:
@@ -210,6 +217,11 @@ def run_proof(
         reported_outcome = "simulated-complete"
         outcome_reason = (
             "the fake ATP and fake replay completed; a real replay is still required"
+        )
+    if test_mode and summary["verification_mode"] == "test":
+        reported_outcome = "test-verified"
+        outcome_reason = (
+            "test mode forced fake ATP and replay acceptance; no real Lean proof was verified"
         )
     output = {
         **summary,
@@ -271,6 +283,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 help="exercise fake ATP and replay; never reports a real verified proof",
             )
             command.add_argument(
+                "--test-mode", action="store_true",
+                help="force fake ATP and replay acceptance to test the terminal workflow",
+            )
+            command.add_argument(
                 "--verbose", action="store_true",
                 help="print live progress events to stderr",
             )
@@ -294,6 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     backend=args.backend, lean_project=args.lean_project,
                     event_sink=run_log.emit, run_id=run_log.run_id,
                     fake_formal=args.fake_formal,
+                    test_mode=args.test_mode,
                 )
     except (ValueError, OSError, MorkUnavailable) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")

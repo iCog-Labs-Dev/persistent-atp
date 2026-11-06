@@ -115,6 +115,29 @@ class TestPortfolio(RoundCase):
         self.assertEqual(replay.fields["status"], "verified")
         self.assertTrue(replay.fields["simulated"])
 
+    def test_test_mode_fake_replay_accepts_the_certificate(self):
+        self.seed(
+            "p1",
+            declaration("p1", status="certificate-produced"),
+            *aligned_claim("p1"),
+            *candidate_certificate("p1"),
+        )
+        workspace = self.workspace("p1")
+        workspace.adapters = {"replayer": FakeFormalATP(test_mode=True)}
+
+        report = work(
+            workspace,
+            1,
+            slots=(Slot("replay", "replay-task", "replayer"),),
+        )
+
+        self.assertTrue(report["slots"][0]["accepted"])
+        view = self.view_of("p1")
+        self.assertEqual(view.node("p1/cert-1").fields["status"], "replay-accepted")
+        replay = view.node("p1/lr-1")
+        self.assertEqual(replay.fields["status"], "verified")
+        self.assertTrue(replay.fields["test_mode"])
+
 
 class TestEscalation(RoundCase):
     def test_a_stagnated_search_queues_a_bridge_lemma_through_the_gate(self):

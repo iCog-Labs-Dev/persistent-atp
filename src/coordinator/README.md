@@ -76,6 +76,8 @@ When `--lean-project` is supplied, that project must contain `lean-toolchain`, `
 
 `--fake-formal` explicitly exercises the formal-run, certificate, and replay orchestration without Lean proof search. Its replay record is marked `simulated`, the certificate remains `replay-pending`, and the command reports `simulated-complete`; it never promotes the claim to `lean-verified`. Real formal ATP and independent replay remain follow-up work.
 
+`--test-mode` goes one step further for end-to-end testing: the fake ATP always produces a certificate, the fake replayer always accepts it, and the coordinator reaches its terminal path. The replay, certificate, declaration, formal state, and claim carry test-mode provenance, and the CLI reports `test-verified`, not a real proof result. Do not use journals produced in test mode as proof evidence.
+
 Run `python -m pytest src/coordinator/tests` for tests; graph tests are skipped when LangGraph is not installed, and live MORK tests are skipped when the library is unavailable.
 
 ## Not yet covered

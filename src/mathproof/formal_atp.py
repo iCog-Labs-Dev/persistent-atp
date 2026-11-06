@@ -334,6 +334,7 @@ class FakeFormalATP(FormalATPAdapter):
         plan: Mapping[str, Iterable[str | Mapping[str, Any]]] | None = None,
         replay_fn: ReplayFn | None = None,
         default_disposition: str | None = None,
+        test_mode: bool = False,
     ):
         if default_disposition is not None and default_disposition not in EMITTABLE_DISPOSITIONS:
             raise ValueError(f"fake cannot emit disposition {default_disposition!r}")
@@ -342,6 +343,7 @@ class FakeFormalATP(FormalATPAdapter):
         self._cancelled: set[str] = set()
         self._replay = replay_fn or stub_replay("verified")
         self._default_disposition = default_disposition
+        self._test_mode = test_mode
 
     # -- search lifecycle -------------------------------------------------
 
@@ -357,6 +359,7 @@ class FakeFormalATP(FormalATPAdapter):
         if not script:
             if self._default_disposition is not None:
                 result = build_result(self._default_disposition, request)
+                self._mark_test_result(result)
                 self._latest[run_id] = result
                 return result
             result = build_result(RunDisposition.INVALID_REQUEST.value, request)
@@ -394,6 +397,7 @@ class FakeFormalATP(FormalATPAdapter):
         result = dict(self._replay(certificate, environment_hash))
         result.setdefault("sorry_detected", False)
         result["simulated"] = True
+        result["test_mode"] = self._test_mode
         return result
 
     # -- internals -----------------------------------------------------------
@@ -401,5 +405,14 @@ class FakeFormalATP(FormalATPAdapter):
     def _consume(self, run_id: str, request: Mapping[str, Any]) -> Mapping[str, Any]:
         step = self._scripts[run_id].popleft()
         result = dict(step) if isinstance(step, Mapping) else build_result(step, request)
+        self._mark_test_result(result)
         self._latest[run_id] = result
         return result
+
+    def _mark_test_result(self, result: dict[str, Any]) -> None:
+        if not self._test_mode:
+            return
+        result["test_mode"] = True
+        certificate = result.get("certificate")
+        if isinstance(certificate, dict):
+            certificate["test_mode"] = True

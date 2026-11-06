@@ -31,6 +31,7 @@ def finalize_accepted_replay(
         ]
         if len(declarations) != 1 or not verified:
             continue
+        test_mode = any(replay.fields.get("test_mode") is True for replay in verified)
         declaration = view.node(declarations[0].dst_id)
         if declaration is None or declaration.fields.get("status") == "replay-accepted":
             continue
@@ -53,6 +54,11 @@ def finalize_accepted_replay(
             continue
 
         ops = []
+        if test_mode:
+            ops.append(SetField(
+                "FormalDeclaration", declaration.node_id, "verification_mode",
+                "test", prior=declaration.fields.get("verification_mode"),
+            ))
         declaration_status = declaration.fields.get("status")
         if declaration_status == "certificate-produced":
             ops.append(SetField(
@@ -71,12 +77,22 @@ def finalize_accepted_replay(
             for edge in view.edges_from(run_id, "HAS_ROOT"):
                 root = view.node(edge.dst_id)
                 if root is not None and root.fields.get("status") == "formally-closed":
+                    if test_mode:
+                        ops.append(SetField(
+                            "FormalState", root.node_id, "verification_mode",
+                            "test", prior=root.fields.get("verification_mode"),
+                        ))
                     ops.append(SetField(
                         "FormalState", root.node_id, "status",
                         "lean-verified", prior="formally-closed",
                     ))
 
         claim_status = claim.fields.get("status")
+        if test_mode:
+            ops.append(SetField(
+                "Claim", claim.node_id, "verification_mode",
+                "test", prior=claim.fields.get("verification_mode"),
+            ))
         if claim_status == "critic-accepted":
             ops.append(SetField(
                 "Claim", claim.node_id, "status",

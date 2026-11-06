@@ -249,3 +249,62 @@ def test_fake_formal_mode_completes_certificate_and_replay_cycle(tmp_path, monke
     assert view.edges_from(f"{proof_id}/cert-1", "CERTIFICATE_ENVIRONMENT")[0].dst_id == f"{proof_id}/env-1"
     assert view.edges_from(f"{proof_id}/lr-1", "REPLAY_ENVIRONMENT")[0].dst_id == f"{proof_id}/env-1"
     assert view.edges_from(f"{proof_id}/theorem", "PROVED_BY")[0].dst_id == f"{proof_id}/cert-1"
+
+
+def test_test_mode_reaches_terminal_path_without_claiming_real_verification(tmp_path, monkeypatch):
+    pytest.importorskip("langgraph")
+    from mathproof.lean_statement import StatementCheck
+    from coordinator import cli
+
+    class Checked:
+        def __init__(self, project):
+            assert project == tmp_path
+
+        def check(self, lean_type, imports):
+            return StatementCheck(lean_type == "True" and imports == ["Init"], "elaborated")
+
+    monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    write_lean_environment(tmp_path)
+    journal = tmp_path / "test-mode.sqlite"
+    proof_id = "test-mode"
+    initialize(journal, proof_id, "True", "Give a complete argument for True")
+    llm = MockLLMClient(responses=[
+        {
+            "moves": [],
+            "candidate_argument": {
+                "claim_id": f"{proof_id}/theorem",
+                "argument": "True.intro establishes True.",
+                "prerequisite_claim_ids": [],
+            },
+            "reasoning": "The theorem is immediate.",
+        },
+        {
+            "verdict": "supported", "reasoning": "True.intro is sufficient",
+            "earliest_gap": None, "repair": None, "evidence_ids": [],
+        },
+        {"lean_type": "True", "imports": ["Init"], "reasoning": "Literal statement"},
+        {"verdict": "aligned", "relation": "exact", "reasoning": "Both state True"},
+    ])
+
+    result = run_proof(
+        journal, proof_id, rounds=2, backend="memory", lean_project=tmp_path,
+        llm=llm, test_mode=True,
+    )
+
+    assert result["outcome"] == "test-verified"
+    assert result["verification_mode"] == "test"
+    assert "no real Lean proof" in result["outcome_reason"]
+    view = MemoryView()
+    project(view, JournalStore(str(journal)), proof_id)
+    claim = view.node(f"{proof_id}/theorem")
+    declaration = view.node(f"{proof_id}/fd-1")
+    certificate = view.node(f"{proof_id}/cert-1")
+    replay = view.node(f"{proof_id}/lr-1")
+    assert claim.fields["status"] == "lean-verified"
+    assert claim.fields["verification_mode"] == "test"
+    assert declaration.fields["status"] == "replay-accepted"
+    assert declaration.fields["verification_mode"] == "test"
+    assert certificate.fields["status"] == "replay-accepted"
+    assert certificate.fields["test_mode"] is True
+    assert replay.fields["status"] == "verified"
+    assert replay.fields["test_mode"] is True
