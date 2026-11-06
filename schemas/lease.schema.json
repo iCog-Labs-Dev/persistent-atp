@@ -30,6 +30,7 @@
         "coordinator",
         "llm-research",
         "hyperon",
+        "formalizer",
         "formal-atp",
         "replayer",
         "critic",

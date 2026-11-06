@@ -15,6 +15,7 @@ from .contracts import (
     TheoremKernel,
 )
 from .finalize import finalize_packet
+from .formalization import FormalizationCompilation, compile_formalization
 from .obstruction import (
     ArtifactReader,
     AttemptEvidence,
@@ -42,6 +43,7 @@ __all__ = [
     "FailedState",
     "FormalContextLimits",
     "FormalExecutionLimits",
+    "FormalizationCompilation",
     "MappingArtifactReader",
     "ObstructionCompilation",
     "ObstructionData",
@@ -57,5 +59,6 @@ __all__ = [
     "TheoremKernel",
     "TokenCounter",
     "compile_obstruction",
+    "compile_formalization",
     "finalize_packet",
 ]

@@ -46,6 +46,7 @@ __all__ = [
     "check_vocabulary",
     "check_namespace",
     "check_worker_authority",
+    "check_formalizer_authority",
     "check_subgoal_conservation",
     "check_executor_result",
     "check_annotation_separation",
@@ -125,6 +126,7 @@ WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
             "Environment",
         }
     ),
+    WorkerClass.FORMALIZER.value: frozenset({"FormalDeclaration"}),
     WorkerClass.REPLAYER.value: frozenset({"LeanReplay", "Certificate"}),
     WorkerClass.LLM_RESEARCH.value: frozenset(
         {"Claim", "SpeculativeHypothesis", "ResearchState", "ResearchMove"}
@@ -177,6 +179,7 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
             "HAS_ARTIFACT",
         }
     ),
+    WorkerClass.FORMALIZER.value: frozenset({"DRAFTS_CLAIM"}),
     WorkerClass.REPLAYER.value: frozenset({"REPLAYED_BY", "REPLAY_ENVIRONMENT"}),
     WorkerClass.LLM_RESEARCH.value: frozenset(
         {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
@@ -205,6 +208,7 @@ EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
     "CHECKPOINT_FRONTIER": ("FormalCheckpoint", "FormalState"),
     "RAN_UNDER": ("FormalRun", "Environment"),
     "SEARCHES": ("FormalRun", "FormalDeclaration"),
+    "DRAFTS_CLAIM": ("FormalDeclaration", "Claim"),
     "PRODUCED_CERTIFICATE": ("FormalRun", "Certificate"),
     "CERTIFIES": ("Certificate", "FormalDeclaration"),
     "CERTIFICATE_ENVIRONMENT": ("Certificate", "Environment"),
@@ -243,6 +247,7 @@ def validate_proposal(proposal: Proposal, view: ReadView | None = None) -> list[
     findings.extend(check_vocabulary(proposal))
     findings.extend(check_namespace(proposal))
     findings.extend(check_worker_authority(proposal))
+    findings.extend(check_formalizer_authority(proposal))
     findings.extend(check_subgoal_conservation(proposal))
     findings.extend(check_executor_result(proposal))
     findings.extend(check_annotation_separation(proposal))
@@ -402,6 +407,32 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
                 f"(authority: {sorted(edge_authority)})",
                 index,
             )
+
+
+def check_formalizer_authority(proposal: Proposal) -> Iterator[Rejection]:
+    """Formalizer may add only one draft declaration tied to one claim."""
+    if proposal.worker_class != WorkerClass.FORMALIZER.value:
+        return
+    declarations = [
+        op for op in proposal.ops
+        if isinstance(op, UpsertNode) and op.label == "FormalDeclaration"
+    ]
+    links = [
+        op for op in proposal.ops
+        if isinstance(op, AddEdge) and op.rel_type == "DRAFTS_CLAIM"
+    ]
+    if (
+        len(proposal.ops) != 2
+        or len(declarations) != 1
+        or len(links) != 1
+        or declarations[0].fields.get("status") != DeclarationStatus.DRAFT.value
+        or links[0].src_id != declarations[0].node_id
+        or not links[0].dst_id
+    ):
+        yield Rejection(
+            Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+            "formalizer may only create one draft FormalDeclaration and link it to its Claim",
+        )
 
 
 def _is_content_addressed(identity: Any) -> bool:
