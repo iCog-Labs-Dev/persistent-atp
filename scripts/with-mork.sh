@@ -113,6 +113,7 @@ if [ -z "${MORK_LIBRARY:-}" ]; then
             "$repo"/*/target/"$profile"/"$name"
             "$repo"/../*/target/"$profile"/"$name"
             "$repo"/../*/*/target/"$profile"/"$name"
+            "$repo"/../../PeTTa/mork_ffi/target/"$profile"/"$name"
         )
     done
 
