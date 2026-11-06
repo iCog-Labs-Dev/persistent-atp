@@ -2,7 +2,7 @@
 
 import pytest
 
-from alignment.formalizer import FormalizerWorker
+from alignment.formalizer import FormalizerWorker, LLMFormalizerBackend
 from alignment.llm_client import MockLLMClient
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
@@ -43,7 +43,9 @@ def test_formalizer_emits_one_draft_for_compiled_claim():
         "lean_type": "∀ n : Nat, n = n",
         "notes": "Direct translation",
     })
-    result = FormalizerWorker(client, actor="formalizer-1").run(
+    result = FormalizerWorker(
+        LLMFormalizerBackend(client), actor="formalizer-1"
+    ).run(
         compilation,
         declaration_id="p1/fd-1",
         claim_id="p1/c-1",
@@ -57,6 +59,7 @@ def test_formalizer_emits_one_draft_for_compiled_claim():
     assert result.proposal.ops[0].fields["status"] == "draft"
     assert result.proposal.ops[1].dst_id == "p1/c-1"
     assert compilation.packet_digest.startswith("sha256:")
+    assert result.backend_id == "llm-v1"
 
 
 def test_formalizer_accepts_blank_optional_metadata_from_api():
@@ -67,12 +70,36 @@ def test_formalizer_accepts_blank_optional_metadata_from_api():
         "universe_level": "",
         "notes": "No module or universe needed",
     })
-    result = FormalizerWorker(client, actor="formalizer-1").run(
+    result = FormalizerWorker(
+        LLMFormalizerBackend(client), actor="formalizer-1"
+    ).run(
         _compile(), declaration_id="p1/fd-1", claim_id="p1/c-1",
         base_revision=3, lease_id="p1/ls-1", fencing_token=1,
     )
     assert result.module_path is None
     assert result.universe_level is None
+
+
+def test_formalizer_accepts_replaceable_non_llm_backend():
+    class FakeBackend:
+        backend_id = "fake-v1"
+
+        def formalize(self, compilation):
+            assert compilation.payload["claim"]["id"] == "p1/c-1"
+            return {
+                "lean_name": "from_fake_backend",
+                "lean_type": "∀ n : Nat, n = n",
+                "notes": "No LLM involved",
+            }
+
+    result = FormalizerWorker(FakeBackend(), actor="formalizer-1").run(
+        _compile(), declaration_id="p1/fd-1", claim_id="p1/c-1",
+        base_revision=3, lease_id="p1/ls-1", fencing_token=1,
+    )
+
+    assert result.backend_id == "fake-v1"
+    assert result.lean_name == "from_fake_backend"
+    assert result.proposal.ops[0].fields["lean_type"] == "∀ n : Nat, n = n"
 
 
 def test_compiler_rejects_unverified_dependency():

@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 
-from alignment.formalizer import FormalizerWorker
+from alignment.formalizer import FormalizerWorker, LLMFormalizerBackend
 from alignment.llm_client import GeminiLLMClient, HTTPLLMClient, MockLLMClient
 from commit_gate.state import MemoryView
 from commit_gate.validate import validate_proposal
@@ -106,7 +106,9 @@ def main() -> int:
             model = args.model or os.getenv("GEMINI_MODEL") or "gemini-flash-lite-latest"
             client = GeminiLLMClient(model=model)
 
-    result = FormalizerWorker(client, actor="demo-formalizer").run(
+    result = FormalizerWorker(
+        LLMFormalizerBackend(client), actor="demo-formalizer"
+    ).run(
         compilation,
         declaration_id="demo/fd-1",
         claim_id="demo/c-1",
@@ -123,6 +125,7 @@ def main() -> int:
         "selection_manifest": compilation.manifest,
         "lean_name": result.lean_name,
         "lean_type": result.lean_type,
+        "backend_id": result.backend_id,
         "notes": result.notes,
         "gate_findings": [finding.to_dict() for finding in findings],
         "proposal": result.proposal.to_dict(),

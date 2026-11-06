@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from alignment.formalizer import FormalizerWorker
+from alignment.formalizer import FormalizerWorker, LLMFormalizerBackend
 from alignment.llm_client import GeminiLLMClient, HTTPLLMClient
 from context_compiler import CompileRequest, PacketKind, TextBudget, compile_formalization
 from dotenv import load_dotenv
@@ -232,7 +232,9 @@ def main() -> int:
         client, provider = make_client(args.provider, args.model)
     except ValueError as exc:
         parser.error(str(exc))
-    worker = FormalizerWorker(client, actor="benchmark-formalizer")
+    worker = FormalizerWorker(
+        LLMFormalizerBackend(client), actor="benchmark-formalizer"
+    )
     results = []
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
@@ -261,7 +263,8 @@ def main() -> int:
                 )
                 record.update(status="generated", lean_name=result.lean_name,
                               lean_type=result.lean_type, notes=result.notes,
-                              module_path=result.module_path)
+                              module_path=result.module_path,
+                              backend_id=result.backend_id)
             except Exception as exc:
                 record.update(status="error", error_type=type(exc).__name__, error=safe_error(exc))
             record["seconds"] = round(time.monotonic() - start, 2)

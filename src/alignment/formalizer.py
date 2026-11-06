@@ -1,8 +1,9 @@
-"""LLM-backed informal-to-Lean formalization worker.
+"""Backend-neutral informal-to-Lean formalization worker.
 
 Formalization produces a draft declaration only. Statement alignment and
 Lean replay remain separate, authoritative steps before the declaration can
-be searched or treated as verified.
+be searched or treated as verified. The default backend uses an LLM, while
+the worker owns validation and proposal construction.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
@@ -19,7 +20,13 @@ from context_compiler.formalization import FormalizationCompilation
 
 from .llm_client import LLMClientProtocol, extract_json_from_text
 
-__all__ = ["FormalizationResult", "FormalizerWorker", "FORMALIZER_SYSTEM_PROMPT"]
+__all__ = [
+    "FORMALIZER_SYSTEM_PROMPT",
+    "FormalizationResult",
+    "FormalizerBackend",
+    "FormalizerWorker",
+    "LLMFormalizerBackend",
+]
 
 FORMALIZER_SYSTEM_PROMPT = """You translate an informal mathematical claim into a Lean 4 proposition.
 Return exactly one JSON object with fields lean_name, lean_type, module_path,
@@ -38,6 +45,35 @@ _LEASE_ID = re.compile(r"^[^/]+/ls-[1-9][0-9]*$")
 _PROOF_BODY = re.compile(r"(?:\bby\b|:=|\bsorry\b|\badmit\b|\baxiom\b)")
 
 
+class FormalizerBackend(Protocol):
+    """Replaceable producer of candidate formalization fields."""
+
+    backend_id: str
+
+    def formalize(
+        self, compilation: FormalizationCompilation
+    ) -> Mapping[str, Any]: ...
+
+
+class LLMFormalizerBackend:
+    """Prompt an LLM and parse its response into candidate fields."""
+
+    backend_id = "llm-v1"
+
+    def __init__(self, llm_client: LLMClientProtocol) -> None:
+        self.llm_client = llm_client
+
+    def formalize(
+        self, compilation: FormalizationCompilation
+    ) -> Mapping[str, Any]:
+        raw = self.llm_client.generate(
+            FORMALIZER_SYSTEM_PROMPT,
+            "Compile this context packet into a Lean 4 proposition:\n\n"
+            + compilation.context_text,
+        )
+        return extract_json_from_text(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class FormalizationResult:
     """A candidate Lean proposition and its inert gate proposal."""
@@ -49,16 +85,20 @@ class FormalizationResult:
     module_path: str | None
     universe_level: str | None
     notes: str
+    backend_id: str
     proposal: Proposal
 
 
 class FormalizerWorker:
     """Generate one draft declaration from a compiled formalization packet."""
 
-    def __init__(self, llm_client: LLMClientProtocol, *, actor: str) -> None:
+    def __init__(self, backend: FormalizerBackend, *, actor: str) -> None:
         if not actor.strip():
             raise ValueError("actor must be a non-empty string")
-        self.llm_client = llm_client
+        backend_id = getattr(backend, "backend_id", None)
+        if not isinstance(backend_id, str) or not backend_id.strip():
+            raise ValueError("backend must provide a non-empty backend_id")
+        self.backend = backend
         self.actor = actor
 
     def run(
@@ -101,12 +141,9 @@ class FormalizerWorker:
         ):
             raise ValueError("fencing_token must be a positive integer")
 
-        raw = self.llm_client.generate(
-            FORMALIZER_SYSTEM_PROMPT,
-            "Compile this context packet into a Lean 4 proposition:\n\n"
-            + compilation.context_text,
-        )
-        candidate = extract_json_from_text(raw)
+        candidate = self.backend.formalize(compilation)
+        if not isinstance(candidate, Mapping):
+            raise ValueError("formalizer backend must return a mapping")
         lean_name = _required_text(candidate, "lean_name")
         lean_type = _required_text(candidate, "lean_type")
         notes = candidate.get("notes", "")
@@ -159,6 +196,7 @@ class FormalizerWorker:
             module_path=output_module,
             universe_level=universe,
             notes=notes,
+            backend_id=self.backend.backend_id,
             proposal=proposal,
         )
 
