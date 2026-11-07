@@ -13,6 +13,7 @@ from ..models import (
     ACTION_TYPES, BASE_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, CapabilitySet, DecisionResponse, Event, OperationRef,
     OperationSnapshot, TERMINAL_LIFECYCLES,
+    action_types_for_contract,
 )
 
 
@@ -28,9 +29,9 @@ class ScriptedReceiverPort:
         self._budget_versions: dict[OperationRef, int] = {}
 
     async def capabilities(self, *, contract_version="2.0"):
-        if contract_version not in {"2.0", "2.1"}:
+        if contract_version not in {"2.0", "2.1", "2.2"}:
             raise UnsupportedCapability("scripted-test contract version is unavailable")
-        actions = BASE_ACTION_TYPES if contract_version == "2.0" else ACTION_TYPES
+        actions = action_types_for_contract(contract_version)
         return CapabilitySet(contract_version, frozenset(actions),
             controls=frozenset(("cancel", "amend-budget", "answer-decision")),
             backend_mode="scripted-test", independent_replay=False,

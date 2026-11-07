@@ -133,6 +133,61 @@ class QueueResearchMoves:
             raise ValueError("moves must contain one to five typed research guidance items")
 
 
+COORDINATOR_RULES = ("repair", "five-mechanisms", "diversify-formal", "bridge-lemma", "alignment-review", "global-audit")
+STALL_ESCALATION_RULES = frozenset({"five-mechanisms", "global-audit"})
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatorEscalation:
+    """A speculative policy action, with its target and optional claim separate."""
+
+    rule: str
+    target_id: str
+    detail: str
+    claim_id: str | None = None
+
+    def __post_init__(self):
+        if self.rule not in COORDINATOR_RULES:
+            raise ValueError("unknown coordinator escalation rule")
+        _identifier(self.target_id, "target_id")
+        if not isinstance(self.detail, str) or not self.detail.strip() or len(self.detail.encode("utf-8")) > 4096:
+            raise ValueError("escalation detail must be nonempty and at most 4096 bytes")
+        if self.claim_id is not None:
+            _identifier(self.claim_id, "claim_id")
+
+
+@dataclass(frozen=True, slots=True)
+class QueueCoordinatorEscalations:
+    """One atomic policy batch; the receiver recomputes its committed basis."""
+
+    kind: ClassVar[str] = "queue-coordinator-escalations"
+    proof_id: str
+    intent_key: str
+    basis: tuple[int, int, int]
+    round_number: int
+    escalations: tuple[CoordinatorEscalation, ...]
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.intent_key, "intent_key")
+        if (not isinstance(self.basis, tuple) or len(self.basis) != 3
+                or any(type(n) is not int or n < 0 for n in self.basis)):
+            raise ValueError("basis must contain three nonnegative integer counts")
+        if type(self.round_number) is not int or self.round_number < 0:
+            raise ValueError("round_number must be a nonnegative integer")
+        if (not isinstance(self.escalations, tuple) or not 1 <= len(self.escalations) <= 100
+                or not all(isinstance(e, CoordinatorEscalation) for e in self.escalations)):
+            raise ValueError("escalations must contain one to 100 typed items")
+        keys = [(e.rule, e.target_id) for e in self.escalations]
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate policy identity in escalation batch")
+        for item in self.escalations:
+            if item.target_id != self.proof_id and not item.target_id.startswith(self.proof_id + "/"):
+                raise ValueError("escalation target belongs to another proof")
+            if item.claim_id is not None and not item.claim_id.startswith(self.proof_id + "/"):
+                raise ValueError("escalation claim belongs to another proof")
+
+
 @dataclass(frozen=True, slots=True)
 class ProofStatus:
     kind: ClassVar[str] = "proof-status"
@@ -223,8 +278,19 @@ class LemmaBridge:
 
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
-ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves
+COORDINATOR_ACTION_TYPES = {QueueCoordinatorEscalations.kind: QueueCoordinatorEscalations}
+ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations
+
+
+def action_types_for_contract(version: str):
+    if version == "2.0":
+        return BASE_ACTION_TYPES
+    if version == "2.1":
+        return {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES}
+    if version == "2.2":
+        return ACTION_TYPES
+    raise ValueError("unsupported contract version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,10 +310,12 @@ class ActionRequest:
             raise TypeError("action must be a registered typed action")
         if not isinstance(self.preconditions, Preconditions):
             raise TypeError("preconditions must be Preconditions")
-        if (self.contract_version not in {"2.0", "2.1"}
-                or (self.contract_version == "2.0" and self.action.kind in COORDINATION_ACTION_TYPES)
+        if (self.action.kind not in action_types_for_contract(self.contract_version)
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
+        if (self.contract_version == "2.2" and isinstance(self.action, (SelectedProofCycle, QueueCoordinatorEscalations))
+                and self.preconditions.expected_revision is None):
+            raise ValueError("coordinator mutations require expected_revision")
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):
             raise ValueError("deadline must be an aware UTC datetime")
         if self.deadline is not None and self.deadline.utcoffset().total_seconds() != 0:
@@ -475,11 +543,11 @@ class CapabilitySet:
         if type(self.independent_replay) is not bool:
             raise TypeError("independent_replay must be boolean")
         _identifier(self.receiver_mode, "receiver_mode")
-        if self.contract_version not in {"2.0", "2.1"}:
-            raise ValueError("unsupported contract version")
-        supported = BASE_ACTION_TYPES.keys() if self.contract_version == "2.0" else ACTION_TYPES.keys()
-        if not self.actions <= supported:
+        supported = action_types_for_contract(self.contract_version)
+        if not self.actions <= supported.keys():
             raise ValueError("unknown advertised action")
+        if self.contract_version != "2.2" and self.controls.intersection({"cycle-execution-revision", "atomic-coordinator-escalations"}):
+            raise ValueError("coordinator guarantees require contract 2.2")
         if self.backend_mode not in {"real", "scripted-test", "unavailable"}:
             raise ValueError("unknown backend mode")
 

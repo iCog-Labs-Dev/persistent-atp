@@ -8,7 +8,47 @@ Omega/PeTTa skill → Omega bridge → persistent_atp_client → ReceiverPort
                            persistent-ATP receiver → service → commit gate
 ```
 
-The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The package version is `0.2.0`; the original nine actions retain contract `2.0`, and coordinator reads and actions use capability-gated contract `2.1`.
+The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The package version is `0.3.0`; the original nine actions retain contract `2.0`, existing coordination actions retain `2.1`, and atomic coordinator batches opt into contract `2.2`.
+
+Contract `2.2` adds `CoordinatorEscalation` and `QueueCoordinatorEscalations`:
+one to 100 items in one receiver-owned gate proposal. Each item retains its
+rule, target, optional claim link and detail. The request also carries a stable
+intent key, three committed progress counts, a round number and a mandatory
+expected revision. The receiver checks the basis against committed state and
+deduplicates existing policy identities across coordinator restarts.
+
+The client requires the `atomic-coordinator-escalations` capability before
+submitting this action. Selected cycles prepared with
+`contract_version="2.2"` require both an expected revision and the
+`cycle-execution-revision` capability. Older receivers fail explicitly; the
+client does not split a batch, encode metadata in prose or downgrade contracts.
+Contract `2.0` and `2.1` request bytes and default method behavior are unchanged.
+
+Receivers must apply semantic validation after structural JSON Schema checks,
+using `request_from_json` or equivalent checks in another implementation.
+Escalation detail must be nonblank and no larger than 4096 UTF-8 bytes; JSON
+Schema's `maxLength` counts characters and cannot enforce this byte limit.
+Proof ownership and duplicate policy identities also require semantic checks.
+
+```python
+from persistent_atp_client import CoordinatorEscalation, Preconditions
+
+handle = await client.queue_coordinator_escalations(
+    "existing-proof", "run-001-round-2",
+    (CoordinatorEscalation("repair", "existing-proof/at-1", "Repair the base case",
+                           claim_id="existing-proof/c-1"),),
+    basis=(0, 0, 0), round_number=2, workspace_id="reference",
+    preconditions=Preconditions(expected_revision=7),
+    request_id="run-001-round-2-escalations",
+)
+operation = await handle.wait(timeout=10)
+```
+
+Use actual committed basis/revision values from a complete coordination read.
+Persist prepared requests and operation references across ambiguous delivery.
+Operation completion remains distinct from formal verification. The reference
+receiver uses the existing proof-wide escalation lease, which may supersede
+active dispatch leases; this action does not introduce a non-preempting queue.
 
 The receiver and Omega commands below require `feat/omegaclaw-integration`; this branch supplies the standalone library and its contract tests.
 

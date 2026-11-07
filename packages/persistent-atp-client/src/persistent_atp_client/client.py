@@ -18,12 +18,12 @@ from .errors import (
     StalePrecondition,
 )
 from .models import (
-    ACTION_TYPES, COORDINATION_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
+    ACTION_TYPES, COORDINATION_ACTION_TYPES, COORDINATOR_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
     LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
-    CoordinationPage, ProjectDigest,
+    CoordinationPage, ProjectDigest, QueueCoordinatorEscalations, CoordinatorEscalation,
 )
 from .ports import ReceiverPort
 
@@ -67,8 +67,11 @@ class AsyncClient:
         await self.aclose()
 
     def prepare(self, action, *, workspace_id: str, preconditions: Preconditions | None = None,
-                request_id: str | None = None, deadline: datetime | None = None) -> ActionRequest:
-        version = "2.1" if getattr(action, "kind", None) in COORDINATION_ACTION_TYPES else "2.0"
+                request_id: str | None = None, deadline: datetime | None = None,
+                contract_version: str | None = None) -> ActionRequest:
+        kind = getattr(action, "kind", None)
+        version = contract_version or ("2.2" if kind in COORDINATOR_ACTION_TYPES else
+                                       "2.1" if kind in COORDINATION_ACTION_TYPES else "2.0")
         return ActionRequest(request_id=request_id or uuid.uuid4().hex,
                              workspace_id=workspace_id, action=action,
                              preconditions=preconditions or Preconditions(), deadline=deadline,
@@ -99,6 +102,11 @@ class AsyncClient:
             raise StalePrecondition("request deadline elapsed before submission", request_id=request.request_id) from exc
         if request.action.kind not in caps.actions:
             raise UnsupportedCapability(f"{request.action.kind} is unavailable", request_id=request.request_id)
+        required = ("atomic-coordinator-escalations" if isinstance(request.action, QueueCoordinatorEscalations)
+                    else "cycle-execution-revision" if request.contract_version == "2.2"
+                    and isinstance(request.action, SelectedProofCycle) else None)
+        if required is not None and required not in caps.controls:
+            raise UnsupportedCapability(f"{required} is unavailable", request_id=request.request_id)
         expected = fingerprint(request)
         try:
             receipt = await _before(self._port.submit(request), end)
@@ -117,9 +125,10 @@ class AsyncClient:
         return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
 
     async def submit_action(self, action, *, workspace_id: str, preconditions: Preconditions | None = None,
-                            request_id: str | None = None, deadline: datetime | None = None) -> "OperationHandle":
+                            request_id: str | None = None, deadline: datetime | None = None,
+                            contract_version: str | None = None) -> "OperationHandle":
         request = self.prepare(action, workspace_id=workspace_id, preconditions=preconditions,
-                               request_id=request_id, deadline=deadline)
+                               request_id=request_id, deadline=deadline, contract_version=contract_version)
         return await self.submit(request)
 
     async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
@@ -149,6 +158,13 @@ class AsyncClient:
         if page.workspace_id != workspace_id or page.proof_id != proof_id:
             raise ReceiverProtocolError("coordination page belongs to another workspace or proof")
         return page
+
+    async def queue_coordinator_escalations(self, proof_id: str, intent_key: str,
+            escalations: tuple[CoordinatorEscalation, ...], *, basis: tuple[int, int, int],
+            round_number: int, workspace_id: str, preconditions: Preconditions, **request_options):
+        action = QueueCoordinatorEscalations(proof_id, intent_key, basis, round_number, escalations)
+        return await self.submit_action(action, workspace_id=workspace_id, preconditions=preconditions,
+                                        **request_options)
 
     async def proof_status(self, proof_id: str, *, workspace_id: str, at_revision: int | None = None):
         return await self.status(workspace_id=workspace_id, proof_id=proof_id, at_revision=at_revision)

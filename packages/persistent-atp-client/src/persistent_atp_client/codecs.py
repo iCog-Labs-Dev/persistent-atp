@@ -7,7 +7,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions, QueueResearchMoves, ResearchGuidance
+from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions, QueueResearchMoves, ResearchGuidance, CoordinatorEscalation, QueueCoordinatorEscalations
 
 
 def _dump(value: Any) -> Any:
@@ -73,6 +73,11 @@ def request_from_dict(raw: object) -> ActionRequest:
         if not isinstance(data["moves"], list):
             raise ValueError("moves must be a list")
         data["moves"] = tuple(_strict(ResearchGuidance, move) for move in data["moves"])
+    if cls is QueueCoordinatorEscalations:
+        if not isinstance(data.get("escalations"), list) or not isinstance(data.get("basis"), list):
+            raise ValueError("escalations and basis must be arrays")
+        data["escalations"] = tuple(_strict(CoordinatorEscalation, item) for item in data["escalations"])
+        data["basis"] = tuple(data["basis"])
     payload["action"] = _strict(cls, data)
     payload["preconditions"] = _strict(Preconditions, payload["preconditions"])
     if payload["deadline"] is not None:
