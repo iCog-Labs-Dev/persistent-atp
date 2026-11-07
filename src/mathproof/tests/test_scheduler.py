@@ -273,6 +273,90 @@ class TestStatistics(SchedulerCase):
         self.assertEqual(scheduler.statistics.attempts("critic-task"), 2)
 
 
+def obstruction_view(*, disposition="stagnated", sibling=False) -> MemoryView:
+    view = MemoryView()
+    view.add_node("p1/c-1", "Claim", {"status": "conjectural"})
+    view.add_node("p1/fr-1", "FormalRun", {"status": disposition})
+    view.add_node("p1/fs-1", "FormalState", {"status": "open"})
+    view.add_node("p1/env-1", "Environment", {})
+    view.add_node(
+        "p1/obs-1",
+        "Obstruction",
+        {"formal_run_id": "p1/fr-1"},
+    )
+    view.add_edge(
+        "RAISED_OBSTRUCTION", "p1/fr-1", "p1/obs-1", "p1/e-raised"
+    )
+    view.add_edge("AT_STATE", "p1/obs-1", "p1/fs-1", "p1/e-state")
+    view.add_edge("RESOLVES", "p1/c-1", "p1/obs-1", "p1/e-kernel")
+    view.add_edge("RAN_UNDER", "p1/fr-1", "p1/env-1", "p1/e-env")
+    if sibling:
+        view.add_node(
+            "p1/obs-2",
+            "Obstruction",
+            {"formal_run_id": "p1/fr-1"},
+        )
+        view.add_edge(
+            "RAISED_OBSTRUCTION", "p1/fr-1", "p1/obs-2", "p1/e-raised-2"
+        )
+        view.add_edge("AT_STATE", "p1/obs-2", "p1/fs-1", "p1/e-state-2")
+        view.add_edge("RESOLVES", "p1/c-1", "p1/obs-2", "p1/e-kernel-2")
+    return view
+
+
+class TestObstructionFrontier(unittest.TestCase):
+    def test_stagnated_run_obstruction_enters_frontier(self):
+        candidate = next(
+            item
+            for item in GlobalScheduler(
+                obstruction_view(), JournalStore()
+            ).build_frontier("p1")
+            if item.move_id == "p1/obs-1"
+        )
+
+        self.assertEqual(candidate.category, "obstruction-task")
+        self.assertIn("p1/fr-1", candidate.conflict_ids)
+        self.assertIn("p1/fs-1", candidate.conflict_ids)
+
+    def test_counterexample_is_eligible_but_infrastructure_failure_is_not(self):
+        counterexample = GlobalScheduler(
+            obstruction_view(disposition="counterexample"), JournalStore()
+        ).build_frontier("p1")
+        infrastructure = GlobalScheduler(
+            obstruction_view(disposition="internal-error"), JournalStore()
+        ).build_frontier("p1")
+
+        self.assertIn("p1/obs-1", {item.move_id for item in counterexample})
+        self.assertNotIn("p1/obs-1", {item.move_id for item in infrastructure})
+
+    def test_injected_handled_policy_excludes_obstruction(self):
+        scheduler = GlobalScheduler(
+            obstruction_view(),
+            JournalStore(),
+            obstruction_is_handled=lambda _view, obstruction_id: (
+                obstruction_id == "p1/obs-1"
+            ),
+        )
+
+        self.assertNotIn(
+            "p1/obs-1",
+            {item.move_id for item in scheduler.build_frontier("p1")},
+        )
+
+    def test_sibling_obstructions_cannot_be_leased_concurrently(self):
+        scheduler = GlobalScheduler(obstruction_view(sibling=True), JournalStore())
+
+        first = scheduler.lease_next(
+            "p1", WorkerClass.COORDINATOR.value, actor="coordinator-a"
+        )
+        second = scheduler.lease_next(
+            "p1", WorkerClass.COORDINATOR.value, actor="coordinator-b"
+        )
+
+        self.assertIn(first.selected_move_id, {"p1/obs-1", "p1/obs-2"})
+        self.assertIsNone(second)
+
+
 class TestInvariantBoundary(SchedulerCase):
     def test_scheduling_writes_no_committed_state(self):
         """Invariant 7/9 negative test: only leases move, the graph stands still."""

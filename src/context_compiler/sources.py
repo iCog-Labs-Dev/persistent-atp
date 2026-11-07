@@ -92,6 +92,7 @@ _IDENTITY_KEY: Mapping[str, str] = {
     "attempt": "attempt_id",
     "environment": "environment_id",
     "formal-declaration": "declaration_id",
+    "obstruction": "obstruction_id",
 }
 """A body names its own record under this key; added only when absent."""
 
@@ -272,6 +273,27 @@ def collect_sources(
             fields = dict(node.fields)
             if source_type in _IDENTITY_KEY:
                 fields.setdefault(_IDENTITY_KEY[source_type], node_id)
+            if source_type == "research-move" and fields.get("state_id") is None:
+                parents = view.edges_to(node_id, "PROPOSES")
+                if len(parents) == 1:
+                    # PROPOSES is the canonical ownership relationship.  The
+                    # compiler consumes a body-shaped state_id, so derive it
+                    # rather than requiring callers to persist the same fact
+                    # twice.
+                    fields["state_id"] = parents[0].src_id
+            if source_type == "formal-run":
+                searches = view.edges_from(node_id, "SEARCHES")
+                if fields.get("declaration_id") is None and len(searches) == 1:
+                    fields["declaration_id"] = searches[0].dst_id
+                if fields.get("disposition") is None and fields.get("status") is not None:
+                    fields["disposition"] = fields["status"]
+            if (
+                source_type == "formal-declaration"
+                and fields.get("environment_id") is None
+            ):
+                pins = view.edges_from(node_id, "PINNED_ENVIRONMENT")
+                if len(pins) == 1:
+                    fields["environment_id"] = pins[0].dst_id
             bodies[node_id] = fields
             if node_id != plan.kernel_id and source_type in emittable:
                 try:
@@ -279,7 +301,7 @@ def collect_sources(
                         source_type,
                         node_id,
                         version,
-                        {"label": node.label, "fields": dict(node.fields)},
+                        {"label": node.label, "fields": fields},
                     )
                 except (TypeError, ValueError):
                     note_missing(node_id, "unhashable-fields", parent)
