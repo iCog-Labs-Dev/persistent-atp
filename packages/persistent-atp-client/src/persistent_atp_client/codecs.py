@@ -98,4 +98,3 @@ def request_from_json(data: bytes | str) -> ActionRequest:
 
     return request_from_dict(json.loads(data, object_pairs_hook=no_duplicate,
         parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"nonfinite JSON value: {value}"))))
-

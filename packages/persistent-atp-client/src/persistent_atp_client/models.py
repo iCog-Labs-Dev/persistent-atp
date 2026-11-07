@@ -595,4 +595,3 @@ class DecisionResponse:
         _hash(self.target_hash, "target_hash")
         if type(self.decision_version) is not int or self.decision_version < 0:
             raise ValueError("decision_version must be nonnegative")
-
