@@ -211,7 +211,10 @@ class TestMathsAIHTTPFormalATP(unittest.TestCase):
         with patch.object(
             atp,
             "_call",
-            return_value={"verified": True, "status": "verified"},
+            return_value={"verified": True, "status": "verified",
+                          "run_id": REQUEST["run_id"],
+                          "certificate_hash": result["certificate"]["artifact_hash"],
+                          "environment_hash": REQUEST["environment_hash"]},
         ) as remote:
             verdict = atp.formal_replay(
                 result["certificate"],
@@ -239,6 +242,94 @@ class TestMathsAIHTTPFormalATP(unittest.TestCase):
             validate_formal_search_result(atp._latest[REQUEST["run_id"]]),
             (),
         )
+
+    def test_new_certificate_does_not_inherit_old_replay(self):
+        atp = started_adapter()
+        first = snapshot(atp, "found", result=provider_result())
+        with patch.object(atp, "_call", return_value=first):
+            certificate = atp.formal_search_status(REQUEST["run_id"])["certificate"]
+        with patch.object(atp, "_call", return_value={
+            "verified": True, "status": "verified", "run_id": REQUEST["run_id"],
+            "certificate_hash": certificate["artifact_hash"],
+            "environment_hash": REQUEST["environment_hash"],
+        }):
+            atp.formal_replay(certificate, REQUEST["environment_hash"])
+
+        other = provider_result()
+        other["proof_trace"] = {**TRACE, "tactic": "simp", "arguments": []}
+        other["summary"]["edges"][0].update(tactic="simp", arguments=[])
+        with patch.object(atp, "_call", return_value=snapshot(atp, "found", result=other)):
+            new_result = atp.formal_search_status(REQUEST["run_id"])
+        self.assertNotEqual(new_result["certificate"]["artifact_hash"], certificate["artifact_hash"])
+        self.assertEqual(new_result["certificate"]["status"], "candidate")
+        with self.assertRaisesRegex(MathsAIAPIError, "certificate artifact"):
+            atp.formal_replay(certificate, REQUEST["environment_hash"])
+
+    def test_unattested_replay_cannot_verify(self):
+        atp = started_adapter()
+        with patch.object(atp, "_call", return_value=snapshot(atp, "found", result=provider_result())):
+            certificate = atp.formal_search_status(REQUEST["run_id"])["certificate"]
+        with patch.object(atp, "_call", return_value={"verified": True, "status": "verified"}):
+            with self.assertRaisesRegex(MathsAIAPIError, "verification unavailable"):
+                atp.formal_replay(certificate, REQUEST["environment_hash"])
+        self.assertEqual(atp._latest[REQUEST["run_id"]]["certificate"]["status"], "candidate")
+
+    def test_replay_rejects_wrong_attested_environment_or_certificate(self):
+        atp = started_adapter()
+        with patch.object(atp, "_call", return_value=snapshot(atp, "found", result=provider_result())):
+            certificate = atp.formal_search_status(REQUEST["run_id"])["certificate"]
+        for field in ("environment_hash", "certificate_hash", "run_id"):
+            attestation = {
+                "verified": True, "status": "verified",
+                "run_id": REQUEST["run_id"],
+                "certificate_hash": certificate["artifact_hash"],
+                "environment_hash": REQUEST["environment_hash"],
+            }
+            attestation[field] = "wrong"
+            with self.subTest(field=field), patch.object(atp, "_call", return_value=attestation):
+                with self.assertRaisesRegex(MathsAIAPIError, "verification unavailable"):
+                    atp.formal_replay(certificate, REQUEST["environment_hash"])
+        self.assertEqual(atp._latest[REQUEST["run_id"]]["certificate"]["status"], "candidate")
+
+    def test_lost_response_with_different_remote_request_is_not_adopted(self):
+        atp = MathsAIHTTPFormalATP("http://localhost:8000")
+        changed = snapshot(atp, "queued")
+        changed["request"] = {**changed["request"], "problem": {"goal": "False"}}
+        with patch.object(atp, "_call", side_effect=[MathsAIAPIError("response lost"), changed]):
+            with self.assertRaisesRegex(MathsAIAPIError, "bound request"):
+                atp.formal_search_start(REQUEST)
+        self.assertNotIn(REQUEST["run_id"], atp._admitted)
+
+    def test_start_failure_before_admission_can_retry(self):
+        atp = MathsAIHTTPFormalATP("http://localhost:8000")
+        absent = MathsAIAPIError("missing", status_code=404)
+        with patch.object(atp, "_call", side_effect=[MathsAIAPIError("connection lost"), absent]):
+            with self.assertRaisesRegex(MathsAIAPIError, "connection lost"):
+                atp.formal_search_start(REQUEST)
+        with patch.object(atp, "_call", return_value=snapshot(atp, "queued")) as remote:
+            result = atp.formal_search_start(REQUEST)
+        self.assertEqual(result["disposition"], "searching")
+        remote.assert_called_once()
+        self.assertEqual(remote.call_args.args[:2], ("POST", "/formal-search/start"))
+
+    def test_lost_start_response_adopts_remote_run(self):
+        atp = MathsAIHTTPFormalATP("http://localhost:8000")
+        with patch.object(atp, "_call", side_effect=[
+            MathsAIAPIError("response lost"), snapshot(atp, "queued")
+        ]) as remote:
+            result = atp.formal_search_start(REQUEST)
+        self.assertEqual(result["disposition"], "searching")
+        self.assertEqual([c.args[0] for c in remote.call_args_list], ["POST", "GET"])
+
+    def test_uncertain_admission_never_reposts_until_resolved(self):
+        atp = MathsAIHTTPFormalATP("http://localhost:8000")
+        with patch.object(atp, "_call", side_effect=MathsAIAPIError("network down")):
+            with self.assertRaises(MathsAIAPIError):
+                atp.formal_search_start(REQUEST)
+        with patch.object(atp, "_call", return_value=snapshot(atp, "queued")) as remote:
+            result = atp.formal_search_start(REQUEST)
+        self.assertEqual(result["disposition"], "searching")
+        remote.assert_called_once_with("GET", "/formal-search/p1/fr-1")
 
     def test_provider_http_400_from_bound_replay_is_rejection(self):
         atp = started_adapter()

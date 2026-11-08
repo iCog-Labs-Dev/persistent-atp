@@ -101,6 +101,19 @@ then sends the exact stored problem and proof trace back with the run ID. A
 successful or rejected verdict is rebound to the request's pinned environment
 hash before it is returned to persistent-atp.
 
+A positive replay verdict must identify the run, certificate hash, and the
+environment fingerprint computed by the provider's actual Lean runtime.
+Mathematics-ai-atp versions that return only `verified: true` cannot establish
+this binding; the adapter reports verification as unavailable. The provider
+must not merely echo the requested environment hash.
+
+If a start response is lost, the adapter looks up the run and checks its echoed
+request before adopting it. If the provider confirms the run does not exist,
+the caller may submit the same request again. If the lookup fails, admission
+remains uncertain and the adapter will not submit a duplicate request. The
+provider should make starts idempotent for identical run IDs and requests to
+close the race between an absent lookup and a delayed original submission.
+
 The current adapter keeps request-to-trace bindings in process. Recovering a
 run in a newly started persistent-atp client requires restoring that local
 binding or adding a provider endpoint that authenticates and returns the

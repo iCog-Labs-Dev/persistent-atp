@@ -248,7 +248,8 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         self._envelopes: dict[str, dict[str, Any]] = {}
         self._latest: dict[str, dict[str, Any]] = {}
         self._proof_traces: dict[str, dict[str, Any]] = {}
-        self._replays: dict[str, dict[str, Any]] = {}
+        self._replays: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._admitted: set[str] = set()
 
     def _call(
         self,
@@ -410,7 +411,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                     result["artifacts"] = [
                         {"sha256": certificate_hash, "role": "certificate"}
                     ]
-                    replay = self._replays.get(run_id)
+                    replay = self._replays.get((run_id, certificate_hash, request["environment_hash"]))
                     if replay is not None:
                         result["certificate"]["status"] = (
                             "replay-accepted"
@@ -442,15 +443,39 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             )
         run_id = str(request["run_id"])
         if run_id in self._requests:
-            return self._invalid_request(request, f"run {run_id!r} already started")
+            if self._requests[run_id] != dict(request):
+                return self._invalid_request(request, f"run {run_id!r} has a different request")
+            if run_id in self._admitted:
+                return self._invalid_request(request, f"run {run_id!r} already started")
+            # The previous POST may have reached the server before its reply
+            # was lost. Never send another POST while admission is uncertain.
+            return self._reconcile_start(run_id)
         self._requests[run_id] = dict(request)
         self._envelopes[run_id] = self._provider_envelope(request)
-        snapshot = self._call(
-            "POST",
-            "/formal-search/start",
-            self._envelopes[run_id],
-            expected_statuses=frozenset({202}),
-        )
+        try:
+            snapshot = self._call(
+                "POST", "/formal-search/start", self._envelopes[run_id],
+                expected_statuses=frozenset({202}),
+            )
+        except MathsAIAPIError as exc:
+            # A 409 may mean a previous attempt was admitted. A transport
+            # failure is ambiguous as well; reconcile both by identity.
+            try:
+                return self._reconcile_start(run_id)
+            except MathsAIAPIError as lookup_error:
+                if lookup_error.status_code == 404:
+                    self._requests.pop(run_id, None)
+                    self._envelopes.pop(run_id, None)
+                    raise exc
+                raise
+        self._check_snapshot(snapshot, run_id)
+        self._admitted.add(run_id)
+        return self._translate(snapshot, run_id)
+
+    def _reconcile_start(self, run_id: str) -> Mapping[str, Any]:
+        snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
+        self._check_snapshot(snapshot, run_id)
+        self._admitted.add(run_id)
         return self._translate(snapshot, run_id)
 
     def formal_search_status(self, run_id: str) -> Mapping[str, Any]:
@@ -530,6 +555,13 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             }
         else:
             if body.get("verified") is True and body.get("status") == "verified":
+                if (body.get("run_id") != run_id
+                    or body.get("certificate_hash") != latest_certificate["artifact_hash"]
+                    or body.get("environment_hash") != environment_hash):
+                    raise MathsAIAPIError(
+                        "replay verification unavailable: provider did not attest "
+                        "the run, certificate, and actual environment"
+                    )
                 verdict = {"status": "verified", "environment_hash": environment_hash}
             elif body.get("verified") is False and body.get("status") == "rejected":
                 verdict = {
@@ -539,7 +571,8 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 }
             else:
                 raise MathsAIAPIError("formal-replay returned an invalid verdict")
-        self._replays[run_id] = verdict
+        key = (run_id, latest_certificate["artifact_hash"], environment_hash)
+        self._replays[key] = verdict
         if run_id in self._latest and "certificate" in self._latest[run_id]:
             updated = dict(self._latest[run_id])
             updated_certificate = dict(updated["certificate"])
