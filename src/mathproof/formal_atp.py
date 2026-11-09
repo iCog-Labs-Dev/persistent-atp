@@ -30,6 +30,8 @@ from typing import Any, Callable, Iterable, Mapping
 
 from commit_gate.canon import content_hash
 from commit_gate.vocab import RunDisposition
+from .state_identity import SERIALIZATION_VERSION, exact_state_hash
+from .witness import build_witness, certificate_id_for_result
 
 __all__ = [
     "FormalATPAdapter",
@@ -109,12 +111,19 @@ def _digest(*parts: Any) -> str:
 
 
 def build_state(proof_id: str, serial: int, goal_text: str, env_hash: str, **extra):
-    exact = _digest("exact", goal_text, env_hash)
+    context = extra.pop("local_context", [])
+    version = extra.pop("serialization_version", SERIALIZATION_VERSION)
+    exact = exact_state_hash(goal_text, context, env_hash, version)
+    context = list(context)
     semantic = _digest("semantic", goal_text)
     state = {
         "state_id": f"{proof_id}/fs-{serial}",
         "kind": extra.pop("kind", "or"),
         "goal_text": goal_text,
+        "serialization_version": version,
+        "local_context": context,
+        "context_digest": content_hash(context),
+        "environment_hash": env_hash,
         "exact_state_hash": exact,
         "semantic_signature": semantic,
         "status": extra.pop("status", "open"),
@@ -189,7 +198,7 @@ def build_result(disposition: str, request: Mapping[str, Any]) -> dict[str, Any]
     goal_text = request.get("goal_text", f"goal({run_id})")
 
     if disposition == RunDisposition.PROVED_PENDING_REPLAY.value:
-        root = build_state(proof_id, 1, goal_text, env_hash)
+        root = build_state(proof_id, 1, goal_text, env_hash, local_context=request.get("local_context", []))
         closer = build_tactic_edge(
             proof_id, 1, root["state_id"], "lean-accepted", 0, [],
             tactic_label="exact",
@@ -211,10 +220,13 @@ def build_result(disposition: str, request: Mapping[str, Any]) -> dict[str, Any]
             ],
             budget_used={"tactic_steps": 1, "wall_clock_ms": 100},
         )
+        certificate_id = certificate_id_for_result(result)
+        result["certificate"]["witness"] = build_witness(
+            result, certificate_id, {root["state_id"]: closer["tactic_id"]})
         return result
 
     if disposition == RunDisposition.COUNTEREXAMPLE.value:
-        root = build_state(proof_id, 1, goal_text, env_hash)
+        root = build_state(proof_id, 1, goal_text, env_hash, local_context=request.get("local_context", []))
         witness_artifact = _digest("witness", run_id)
         result.update(
             root_state_id=root["state_id"],
@@ -241,8 +253,8 @@ def build_result(disposition: str, request: Mapping[str, Any]) -> dict[str, Any]
         return result
 
     if disposition == RunDisposition.STAGNATED.value:
-        root = build_state(proof_id, 1, goal_text, env_hash)
-        child = build_state(proof_id, 2, goal_text + "' (after rw)", env_hash)
+        root = build_state(proof_id, 1, goal_text, env_hash, local_context=request.get("local_context", []))
+        child = build_state(proof_id, 2, goal_text + "' (after rw)", env_hash, local_context=request.get("local_context", []))
         dead = build_tactic_edge(
             proof_id, 1, root["state_id"], "lean-rejected", 0, [],
             tactic_label="simp",
@@ -274,9 +286,9 @@ def build_result(disposition: str, request: Mapping[str, Any]) -> dict[str, Any]
         return result
 
     # budget-exhausted: live frontier with an unproven multi-child expansion.
-    root = build_state(proof_id, 1, goal_text, env_hash)
-    left = build_state(proof_id, 2, goal_text + " [left]", env_hash)
-    right = build_state(proof_id, 3, goal_text + " [right]", env_hash)
+    root = build_state(proof_id, 1, goal_text, env_hash, local_context=request.get("local_context", []))
+    left = build_state(proof_id, 2, goal_text + " [left]", env_hash, local_context=request.get("local_context", []))
+    right = build_state(proof_id, 3, goal_text + " [right]", env_hash, local_context=request.get("local_context", []))
     expand = build_tactic_edge(
         proof_id, 1, root["state_id"], "lean-accepted", 2,
         [left["state_id"], right["state_id"]],

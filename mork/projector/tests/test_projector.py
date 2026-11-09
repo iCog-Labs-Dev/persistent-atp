@@ -290,8 +290,9 @@ class TestProjectJournalToFile(unittest.TestCase):
 
         add_atoms = [l for l in content.splitlines() if l.startswith("!(add-atom")]
         # 4 nodes + 4 layer atoms (nodes) + 13 field atoms (incl. inferred state_id)
-        # + 4 edges + 4 reverse edges + 4 edge layer atoms + 4 efield atoms = 33
-        self.assertEqual(len(add_atoms), 33)
+        # + 4 edges + 4 reverse edges + 4 out-edge index atoms
+        # + 4 edge layer atoms + 4 efield atoms = 37
+        self.assertEqual(len(add_atoms), 37)
 
         self.assertIn("!(mm2-exec &mork 1)", content)
         self.assertIn('(node "even-sum-proof" "s1" "State")', content)

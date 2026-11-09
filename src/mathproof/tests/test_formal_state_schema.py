@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from commit_gate.canon import content_hash
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "formal-state.schema.json"
@@ -16,6 +17,8 @@ EXAMPLE_STATE = {
     "environment_id": "env-lean-mathlib-pinned",
     "environment_hash": "sha256:" + "11" * 32,
     "serialization_version": 1,
+    "local_context": [],
+    "context_digest": content_hash([]),
     "exact_state_hash": "sha256:" + "22" * 32,
     "semantic_signature": "sha256:" + "33" * 32,
     "is_theorem": True,

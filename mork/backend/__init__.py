@@ -5,11 +5,12 @@ it, so a gate reads and writes MORK atoms directly.
 """
 
 from .ffi import MalformedAtom, MorkError, MorkSpace, MorkUnavailable
-from .view import MorkView
+from .view import MorkView, ProjectionUnavailable
 
 __all__ = [
     "MorkSpace",
     "MorkView",
+    "ProjectionUnavailable",
     "MorkError",
     "MorkUnavailable",
     "MalformedAtom",

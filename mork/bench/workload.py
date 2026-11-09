@@ -7,7 +7,10 @@ Two shapes are produced. `proof_atoms` and `background_atoms` write
 s-expressions straight into a space, which is how bulk load is built: they skip
 the gate and the view entirely, so reaching a given space size costs a few FFI
 crossings rather than a few thousand. `proposals` builds gate-legal proposals,
-for the experiments that measure the commit path.
+for the experiments that measure the commit path. `frontier_atoms` is a third,
+separate workload: the graph shape `rules/frontier.metta` queries (states
+proposing moves). It is never compared with `proof_atoms` — the two answer
+different questions.
 
 The vocabulary is not decorative. `validate_proposal` rejects a label outside
 `GATE_LABELS`, a status value outside its enum, a status transition that is not
@@ -16,6 +19,10 @@ the gate actually accepts:
 
     FormalState.status  open -> expanded    (needs the lease)
     depth               an annotation field (no lease, no prior)
+
+Labels and status/kind values come from `shared.vocab`; the PROPOSES/REQUIRES
+relation literals mirror `EDGE_ENDPOINTS` in `commit_gate.validate` and the
+patterns in `rules/frontier.metta`.
 """
 
 from __future__ import annotations
@@ -27,9 +34,11 @@ from commit_gate.ops import AddEdge, Op, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from mork.backend import MorkSpace
 from mork.backend.view import encode
+from shared.vocab import FormalStateStatus, ResearchMoveStatus, StateKind
 
 __all__ = [
     "background_atoms",
+    "frontier_atoms",
     "load",
     "node_id",
     "proof_atoms",
@@ -38,7 +47,9 @@ __all__ = [
 ]
 
 _LABEL = "FormalState"
-_KINDS = ("or", "and", "goal")
+_MOVE_LABEL = "Move"
+_PROPOSES = "PROPOSES"
+_REQUIRES = "REQUIRES"
 _WORKER = "coordinator"
 _BATCH = 2000  # atoms per `add`, so bulk load costs one crossing per 2,000
 
@@ -73,12 +84,48 @@ def proof_atoms(
         local = encode(f"s{index}")
         yield f"(node {p} {local} {encode(_LABEL)})"
         yield f"(field {p} {local} {encode('description')} {encode(f'state {index}')})"
-        yield f"(field {p} {local} {encode('status')} {encode('open')})"
-        yield f"(field {p} {local} {encode('kind')} {encode(rng.choice(_KINDS))})"
+        yield f"(field {p} {local} {encode('status')} {encode(FormalStateStatus.OPEN)})"
+        yield f"(field {p} {local} {encode('kind')} {encode(rng.choice(tuple(StateKind)))})"
         if index:
             parent = encode(f"s{rng.randrange(index)}")
             edge = encode(f"e{index}")
             yield f"(edge {p} {edge} {encode('CHILD_OF')} {local} {parent})"
+            yield f"(out-edge {p} {local} {encode('CHILD_OF')} {parent} {edge})"
+
+
+def frontier_atoms(
+    proof: str, nodes: int, rng: random.Random, *, start: int = 0
+) -> Iterator[str]:
+    """Atoms in the `frontier.metta` shape: states propose moves at states.
+
+    For every state after the first this emits the state node (with its layer
+    and field atoms, exactly as `MorkView` writes them), one `Move` node with
+    layer and `open` status, a PROPOSES edge state -> move, and a REQUIRES
+    edge move -> a random earlier state.
+
+    A separate workload from `proof_atoms`, never compared with it: that one
+    measures the commit/query path; this one measures the frontier queries
+    the scheduler runs.
+    """
+    p = encode(proof)
+    move_open = encode(ResearchMoveStatus.OPEN)
+    for index in range(start, nodes):
+        local = encode(f"s{index}")
+        yield f"(node {p} {local} {encode(_LABEL)})"
+        yield f'(layer {p} {local} "committed")'
+        yield f"(field {p} {local} {encode('description')} {encode(f'state {index}')})"
+        yield f"(field {p} {local} {encode('status')} {encode(FormalStateStatus.OPEN)})"
+        yield f"(field {p} {local} {encode('kind')} {encode(rng.choice(tuple(StateKind)))})"
+        if index:
+            move = encode(f"m{index}")
+            yield f"(node {p} {move} {encode(_MOVE_LABEL)})"
+            yield f'(layer {p} {move} "committed")'
+            yield f"(field {p} {move} {encode('status')} {move_open})"
+            parent = encode(f"s{rng.randrange(index)}")
+            yield f"(edge {p} {encode(f'p{index}')} {encode(_PROPOSES)} {local} {move})"
+            yield f"(edge {p} {encode(f'r{index}')} {encode(_REQUIRES)} {move} {parent})"
+            yield f"(out-edge {p} {local} {encode(_PROPOSES)} {move} {encode(f'p{index}')})"
+            yield f"(out-edge {p} {move} {encode(_REQUIRES)} {parent} {encode(f'r{index}')})"
 
 
 def background_atoms(
@@ -114,7 +161,7 @@ def proposals(
                 {
                     "description": f"state {revision}",
                     "status": "open",
-                    "kind": rng.choice(_KINDS),
+                    "kind": rng.choice(tuple(StateKind)),
                 },
             )
         ]

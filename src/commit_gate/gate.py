@@ -128,22 +128,32 @@ class CommitGate:
         if self._projection is None:
             return 0
         mark = self._projection.projected_revision(proof_id)
-        if mark == self._store.head(proof_id)[0]:
+        head = self._store.head(proof_id)[0]
+        if mark == head:
             return 0
 
+        apply_event = getattr(self._projection, "apply_journal_event", None)
         replayed = 0
-        for revision, payload in self._store.read_events_after(proof_id, mark):
+        for revision in range(mark + 1, head + 1):
             try:
-                event = Proposal.from_dict(payload)
-                if event.proof_id != proof_id or not event.ops:
-                    raise ValueError("journal event has the wrong proof or no operations")
-                apply_ops(self._projection, event.ops)
+                if apply_event is not None:
+                    apply_event(self._store, proof_id, revision)
+                else:
+                    self._apply_event_inline(proof_id, revision)
             except Exception as exc:
                 raise ProjectionError(revision, "", exc) from exc
-            # Marked per event: an interrupted replay resumes rather than restarts.
-            self._projection.record_projected(proof_id, revision)
             replayed += 1
         return replayed
+
+    def _apply_event_inline(self, proof_id: str, revision: int) -> None:
+        """Per-event apply for projections without `apply_journal_event`."""
+        (payload,) = self._store.read_events_between(proof_id, revision - 1, revision)
+        event = Proposal.from_dict(payload)
+        if event.proof_id != proof_id or not event.ops:
+            raise ValueError("journal event has the wrong proof or no operations")
+        apply_ops(self._projection, event.ops)
+        # Marked per event: an interrupted replay resumes rather than restarts.
+        self._projection.record_projected(proof_id, revision)
 
     def validate(self, proposal: Proposal) -> list[Rejection]:
         """Validate against the exact journal revision this proposal names."""
@@ -245,18 +255,15 @@ class CommitGate:
 
             if self._projection is not None:
                 try:
-                    (payload,) = self._store.read_events_between(
-                        proposal.proof_id, revision - 1, revision
+                    apply_event = getattr(
+                        self._projection, "apply_journal_event", None
                     )
-                    event = Proposal.from_dict(payload)
-                    if event.proof_id != proposal.proof_id or not event.ops:
-                        raise ValueError(
-                            "journal event has the wrong proof or no operations"
-                        )
-                    apply_ops(self._projection, event.ops)
+                    if apply_event is not None:
+                        apply_event(self._store, proposal.proof_id, revision)
+                    else:
+                        self._apply_event_inline(proposal.proof_id, revision)
                 except Exception as exc:
                     raise ProjectionError(revision, event_hash, exc) from exc
-                self._projection.record_projected(proposal.proof_id, revision)
             return CommitResult(
                 accepted=True,
                 rejections=(),

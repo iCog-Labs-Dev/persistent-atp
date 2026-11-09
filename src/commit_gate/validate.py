@@ -160,6 +160,7 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
     WorkerClass.FORMAL_ATP.value: frozenset(
         {
             "HAS_TACTIC",
+            "RUN_OF",
             "FORMAL_REQUIRES",
             "CLOSES_STATE",
             "HAS_ROOT",
@@ -198,6 +199,7 @@ labels do not establish that a worker may make the assertion.
 
 EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
     "HAS_TACTIC": ("FormalState", "TacticApplication"),
+    "RUN_OF": ("TacticApplication", "FormalRun"),
     "FORMAL_REQUIRES": ("TacticApplication", "FormalState"),
     "CLOSES_STATE": ("TacticApplication", "FormalState"),
     "HAS_ROOT": ("FormalRun", "FormalState"),

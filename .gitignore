@@ -5,3 +5,5 @@
 *.egg-info/
 *.png
 *.dot
+docs/
+.mork-fork-src/

@@ -1,4 +1,4 @@
-"""The seven experiments.
+"""The benchmark experiments.
 
 Each takes a fresh process, because MORK has no way to empty its space: an
 experiment that ran after another would measure whatever the first one left
@@ -420,6 +420,55 @@ def e7_memory(report: Report, quick: bool) -> None:
     )
 
 
+# --------------------------------------------------------------------- E8
+
+def e8_dependency_closure(report: Report, quick: bool) -> None:
+    """A worst-depth chain with one exact alignment/declaration per claim."""
+    from mork.atoms import node_atoms, edge_atoms
+    import time
+    space, proof = MorkSpace(), "closure"
+    view = MorkView(space)
+    grown = 0
+    for count in ([100, 1000] if quick else [100, 1000, 10000]):
+        def atoms():
+            for index in range(grown, count):
+                claim, declaration, alignment = [f"{proof}/{kind}{index}" for kind in ("c", "d", "a")]
+                yield from node_atoms(claim, "Claim")
+                yield from node_atoms(declaration, "FormalDeclaration")
+                yield from node_atoms(alignment, "Alignment", {"lifecycle": "reviewed", "verdict": "aligned"})
+                yield from edge_atoms("ALIGNS_CLAIM", alignment, claim, f"{proof}/ac{index}")
+                yield from edge_atoms("ALIGNS_DECLARATION", alignment, declaration, f"{proof}/ad{index}")
+                if index:
+                    yield from edge_atoms("DEPENDS_ON", f"{proof}/c{index-1}", claim, f"{proof}/dep{index}")
+        load(space, atoms())
+        grown = count
+        started = time.perf_counter_ns()
+        result = view.get_transitive_dependencies(f"{proof}/d0")
+        initial = (time.perf_counter_ns() - started) / 1000
+        assert len(result) == count - 1
+        samples = []
+        for _ in range(5 if quick else 20):
+            # Genuine structural native writes invalidate the requested result.
+            # Reinsert the same edge so every timed query traverses the full chain.
+            view.remove_edge(f"{proof}/dep1")
+            view.add_edge("DEPENDS_ON", f"{proof}/c0", f"{proof}/c1", f"{proof}/dep1")
+            began = time.perf_counter_ns()
+            found = view.get_transitive_dependencies(f"{proof}/d0")
+            samples.append((time.perf_counter_ns() - began) / 1000)
+            assert len(found) == count - 1
+        import statistics
+        samples.sort()
+        median = statistics.median(samples)
+        p95 = samples[min(int(len(samples) * .95), len(samples) - 1)]
+        atoms = _count(space)
+        report.add(Row("E8", "dependency closure cold", count, atoms, median, p95, len(samples),
+                       note=f"initial={initial:.1f} us; native dependency edge removed/reinserted before every sample; Python index maintained"))
+        median, p95, iterations = measure(lambda: view.get_transitive_dependencies(f"{proof}/d0"),
+                                          iterations=20, warmup=1)
+        report.add(Row("E8", "dependency closure warm", count, atoms, median, p95, iterations,
+                       note=f"{count-1} reachable declarations; bounded result cache"))
+
+
 EXPERIMENTS: dict[str, tuple[str, Callable[[Report, bool], None]]] = {
     "E1": ("unrelated proofs vs query time", e1_cross_proof),
     "E2": ("own proof size vs query time", e2_own_growth),
@@ -428,6 +477,7 @@ EXPERIMENTS: dict[str, tuple[str, Callable[[Report, bool], None]]] = {
     "E5": ("commit latency, MORK vs memory", e5_commit_latency),
     "E6": ("cold catch_up() after a crash", e6_cold_recovery),
     "E7": ("memory growth and reclaim", e7_memory),
+    "E8": ("dependency closure at 10K claims plus alignment/declarations", e8_dependency_closure),
 }
 
 

@@ -1,0 +1,8 @@
+{
+  "cargo_package": "mork-ffi",
+  "profile": "release",
+  "kernel_default_features": ["grounding", "specialize_io"],
+  "disabled_optional_features": ["wasm"],
+  "rustflags": ["-C", "target-cpu=native"],
+  "evidence": "Pinned installer inputs and source manifests; features/flags are not exported by the fixed native library."
+}

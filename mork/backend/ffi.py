@@ -1,7 +1,7 @@
 """Access to a MORK space through its C FFI.
 
 MORK exposes one entry point, `rust_mork(command, input) -> RustBuffer`. This
-wraps the four commands `view.py` needs: add, remove, match, list.
+wraps graph reads/writes plus fixed-dependency backup, restore and build identity.
 
 Two facts about that boundary shape the code here.
 
@@ -9,10 +9,9 @@ The library will not load under a plain `CDLL` — it needs to be present at
 process start, so `LD_PRELOAD` must name it (see `scripts/with-mork.sh`), and
 `MORK_LIBRARY` or the `library_path` argument gives the path.
 
-A malformed s-expression makes MORK panic, and `rust_mork` is `extern "C"`, so
-the panic cannot unwind: the process aborts with nothing to catch. Every string
-is checked for balance here, before it crosses, so a bad atom is a Python error
-rather than a dead gate.
+The fork catches unwinding panics and returns typed error replies. Python
+balance checks reject malformed expressions before crossing; an unrecoverable
+native panic invalidates the shared Space until host restart and journal replay.
 
 The Rust side holds one process-wide space behind a `OnceLock`; constructing a
 second `MorkSpace` does not give you a second space.
@@ -21,7 +20,10 @@ second `MorkSpace` does not give you a second space.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import threading
+from collections import OrderedDict
 from typing import Sequence
 
 __all__ = ["MorkSpace", "MorkError", "MorkUnavailable", "MalformedAtom"]
@@ -40,12 +42,12 @@ class MorkUnavailable(MorkError):
 class MalformedAtom(MorkError):
     """An s-expression was rejected before reaching MORK.
 
-    Raised instead of letting MORK abort the process on a parse failure.
+    Raised before crossing the native parser.
     """
 
 
 class _RustBuffer(ctypes.Structure):
-    """Mirrors `RustBuffer` in mork_ffi/src/lib.rs.
+    """Mirrors `RustBuffer` in MORK/ffi/src/lib.rs.
 
     Exactly two fields. A third one makes ctypes read past the struct and
     segfault.
@@ -105,6 +107,18 @@ class MorkSpace:
     caller's job. See `mork.backend.view` for the atom shapes this project uses.
     """
 
+    # The cdylib owns one Space, so wrappers and views must share coordination.
+    lock = threading.RLock()
+    invalid_proofs: set[str] = set()
+    recovery = threading.local()
+    recovery_targets: dict[str, int] = {}
+    unavailable = False
+    # Derived, bounded materialization only. Canonical mutations invalidate
+    # affected-proof results across wrappers; restore/uncertain input resets all.
+    closure_cache: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+    dependency_indexes: OrderedDict = OrderedDict()
+    dependency_unknown: set[str] | None = set()
+
     def __init__(self, library_path: str | None = None):
         path = library_path or os.environ.get(_ENV_VAR)
         if not path:
@@ -112,6 +126,7 @@ class MorkSpace:
                 f"set {_ENV_VAR} to libmork_ffi.so, and LD_PRELOAD to the same "
                 "path so the library is loaded at process start"
             )
+        self.library_path = os.path.realpath(path)
         try:
             library = ctypes.CDLL(path)
         except OSError as exc:
@@ -132,13 +147,36 @@ class MorkSpace:
 
     def _command(self, command: bytes, payload: bytes = b"") -> str:
         """Run one FFI command and decode its reply."""
-        buffer = self._call(command, payload)
-        if not buffer.ptr:
-            return ""
-        reply = ctypes.string_at(buffer.ptr, buffer.len).decode("utf-8")
-        if reply.startswith("ERR:"):
-            raise MorkError(f"{command.decode()}: {reply[4:].strip()}")
-        return reply
+        if b"\0" in command or b"\0" in payload:
+            raise MorkError("embedded NUL in FFI request")
+        from mork.dependencies import prepare, finish
+        with self.lock:
+            changes = prepare(self, command, payload)
+            succeeded = False
+            try:
+                buffer = self._call(command, payload)
+                if not buffer.ptr:
+                    succeeded = True
+                    return ""
+                try:
+                    reply = ctypes.string_at(buffer.ptr, buffer.len).decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise MorkError("non-UTF-8 FFI reply") from exc
+                if reply.startswith("ERR:"):
+                    if "internal panic" in reply or "space poisoned" in reply:
+                        type(self).unavailable = True
+                    raise MorkError(f"{command.decode()}: {reply[4:].strip()}")
+                succeeded = True
+                return reply
+            finally:
+                finish(self, changes, command, succeeded)
+
+    def build_info(self) -> dict:
+        """Build identity exported by the loaded fork."""
+        try:
+            return json.loads(self._command(b"get-build-info"))
+        except (ValueError, TypeError) as exc:
+            raise MorkError("invalid build info reply") from exc
 
     def add(self, *sexprs: str) -> None:
         """Add atoms. Adding one that is already present changes nothing."""
@@ -162,11 +200,24 @@ class MorkSpace:
         """
         check_balanced(pattern)
         query = f"({pattern} {template})"
+        check_balanced(query)
         return self._lines(self._command(b"match", query.encode("utf-8")))
 
     def atoms(self) -> list[str]:
         """Every atom in the space. Intended for tests and debugging."""
         return self._lines(self._command(b"get-atoms"))
+
+    def backup(self, directory: str) -> None:
+        """Snapshot the whole space into `directory` (created if needed).
+
+        The kernel validates the restored tree before exposing it on the
+        matching `restore` (see mork/snapshot.py for the bundle format).
+        """
+        self._command(b"backup", directory.encode("utf-8"))
+
+    def restore(self, directory: str) -> None:
+        """Replace the space with the validated snapshot in `directory`."""
+        self._command(b"restore", directory.encode("utf-8"))
 
     @staticmethod
     def _payload(sexprs: Sequence[str]) -> bytes:

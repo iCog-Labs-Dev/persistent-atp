@@ -1,0 +1,47 @@
+{
+  "build_configuration": {
+    "cargo_package": "mork-ffi",
+    "disabled_optional_features": [
+      "wasm"
+    ],
+    "evidence": "Pinned installer inputs and source manifests; features/flags are not exported by the fixed native library.",
+    "kernel_default_features": [
+      "grounding",
+      "specialize_io"
+    ],
+    "profile": "release",
+    "rustflags": [
+      "-C",
+      "target-cpu=native"
+    ]
+  },
+  "build_info": {
+    "commands": [
+      "add-atoms",
+      "remove-atoms",
+      "match",
+      "get-atoms",
+      "backup",
+      "restore",
+      "get-build-info"
+    ],
+    "crate": "mork_ffi",
+    "mork_commit": "c065fc42cf308465a413feee3fa3c3c9b2f5804f",
+    "patch_sha256": "916c4f21b8035e3e8540237f48072d975d3b605a3f48491fdbca49847e5affa2",
+    "rustc": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+    "version": "0.2.0"
+  },
+  "library": "libmork_ffi.so",
+  "reference_artifact": {
+    "resolved_path": "/home/quantap/Documents/icog_office/team_projects/mathematics-ai/main_repo/persistent-atp-mork-expt/persistent-atp/.mork-fork-src/MORK/target/release/libmork_ffi.so",
+    "sha256": "c1d122e4f9d83bb4967627998b2c83d8436bf5e47c7d76f84a02392abcf7ba0b"
+  },
+  "sources": {
+    "ffi_patch_sha256": "916c4f21b8035e3e8540237f48072d975d3b605a3f48491fdbca49847e5affa2",
+    "mork": "c065fc42cf308465a413feee3fa3c3c9b2f5804f",
+    "mork_ffi": "in-tree",
+    "pathmap": "4c84a8b40c7b6a7ecb54e009a70f0c5abbc1b60f"
+  },
+  "toolchain": "rustc 1.99.0-nightly (09ee43b2d 2026-07-27)",
+  "version": 2
+}

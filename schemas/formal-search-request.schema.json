@@ -19,7 +19,10 @@
     "goal_text"
   ],
   "properties": {
-    "proof_id": { "type": "string", "minLength": 1 },
+    "proof_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "claim_id": {
       "type": "string",
       "description": "The research claim this search serves.",
@@ -38,13 +41,21 @@
       "minimum": 0,
       "description": "Journal revision the caller believes is current."
     },
-    "lease_id": { "type": "string" },
-    "fencing_token": { "type": "integer", "minimum": 1 },
+    "lease_id": {
+      "type": "string"
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 1
+    },
     "lean_source_artifact": {
       "$ref": "#/$defs/sha256",
       "description": "Content address of the Lean source being searched."
     },
-    "environment_id": { "type": "string", "minLength": 1 },
+    "environment_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "environment_hash": {
       "$ref": "#/$defs/sha256",
       "description": "Digest of the pinned toolchain (Section 13.2). Results are only valid under this hash."
@@ -58,8 +69,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "premise_corpus_artifact": { "$ref": "#/$defs/sha256" },
-        "retrieval_policy": { "type": "string" }
+        "premise_corpus_artifact": {
+          "$ref": "#/$defs/sha256"
+        },
+        "retrieval_policy": {
+          "type": "string"
+        }
       }
     },
     "model_bundle": {
@@ -67,28 +82,56 @@
       "additionalProperties": false,
       "description": "Heuristic models used for scheduling only.",
       "properties": {
-        "tactic_model_artifact": { "$ref": "#/$defs/sha256" },
-        "argument_model_artifact": { "$ref": "#/$defs/sha256" },
-        "premise_model_artifact": { "$ref": "#/$defs/sha256" }
+        "tactic_model_artifact": {
+          "$ref": "#/$defs/sha256"
+        },
+        "argument_model_artifact": {
+          "$ref": "#/$defs/sha256"
+        },
+        "premise_model_artifact": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "search_policy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "policy_name": { "type": "string" },
-        "deny_sorry": { "const": true },
-        "max_tactic_steps": { "type": "integer", "minimum": 1 }
+        "policy_name": {
+          "type": "string"
+        },
+        "deny_sorry": {
+          "const": true
+        },
+        "max_tactic_steps": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
-      "required": ["deny_sorry"]
+      "required": [
+        "deny_sorry"
+      ]
     },
     "budget": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "max_steps": { "type": "integer", "minimum": 1 },
-        "wall_clock_ms": { "type": "integer", "minimum": 1 }
+        "max_steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "wall_clock_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
+    },
+    "local_context": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Ordered, exact producer-local hypotheses; never normalized for exact identity."
     }
   },
   "$defs": {

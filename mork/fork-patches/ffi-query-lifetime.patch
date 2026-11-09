@@ -1,0 +1,156 @@
+diff --git a/ffi/build.rs b/ffi/build.rs
+index 101ca0c..a41da5c 100644
+--- a/ffi/build.rs
++++ b/ffi/build.rs
+@@ -1,4 +1,7 @@
+ fn main() {
++    println!("cargo:rerun-if-env-changed=MORK_FFI_PATCH_SHA256");
++    let patch = std::env::var("MORK_FFI_PATCH_SHA256").unwrap_or_else(|_| "unpatched".into());
++    println!("cargo:rustc-env=MORK_FFI_PATCH_SHA256={patch}");
+     let commit = std::process::Command::new("git")
+         .args(["rev-parse", "HEAD"])
+         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".."))
+diff --git a/ffi/src/lib.rs b/ffi/src/lib.rs
+index a6deb6c..f656544 100644
+--- a/ffi/src/lib.rs
++++ b/ffi/src/lib.rs
+@@ -82,7 +82,8 @@ fn parse_sexpr(s: &Space, r: &[u8], buf: &mut [u8]) -> Result<(Expr, usize), Par
+ }
+ 
+ /// Expects `sexpr` to be a tuple `(<pattern> <template>)`.
+-fn parse_query(s: &Space, sexpr: &[u8]) -> Result<Option<(Expr, Expr)>, ParserError> {
++// Keep the backing allocation alive for both raw-pointer Expr values.
++fn parse_query(s: &Space, sexpr: &[u8]) -> Result<Option<(Vec<u8>, Expr, Expr)>, ParserError> {
+     let mut parsebuf = vec![0u8; sexpr.len().saturating_mul(65).saturating_add(64)];
+     let (qexpr, _used) = parse_sexpr(s, sexpr, &mut parsebuf)?;
+     let mut ez = ExprZipper::new(qexpr);
+@@ -97,7 +98,7 @@ fn parse_query(s: &Space, sexpr: &[u8]) -> Result<Option<(Expr, Expr)>, ParserEr
+     if ez.next_child() {
+         return Ok(None);
+     }
+-    Ok(Some((pattern, template)))
++    Ok(Some((parsebuf, pattern, template)))
+ }
+ 
+ fn cmd_add(space: &mut Space, inp: &[u8]) -> Result<&'static [u8], String> {
+@@ -114,37 +115,42 @@ fn cmd_remove(space: &mut Space, inp: &[u8]) -> Result<&'static [u8], String> {
+         .map_err(|e| format!("ERR: load failed: {e}"))
+ }
+ 
+-fn cmd_get_atoms<'a>(space: &mut Space, outbuf: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
+-    struct CappedWriter<'a> {
+-        buf: &'a mut Vec<u8>,
+-        limit: usize,
+-    }
+-    impl std::io::Write for CappedWriter<'_> {
+-        fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
+-            if self.buf.len() + chunk.len() > self.limit {
+-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "output limit"));
+-            }
++// Kernel serializers unwrap write errors. A capped sink must therefore keep
++// accepting writes after overflow, discard them, and report the typed limit
++// error after serialization rather than panicking and poisoning the Space.
++struct LimitedWriter<'a> {
++    buf: &'a mut Vec<u8>,
++    limit: usize,
++    exceeded: bool,
++}
++impl std::io::Write for LimitedWriter<'_> {
++    fn write(&mut self, chunk: &[u8]) -> std::io::Result<usize> {
++        if self.exceeded || chunk.len() > self.limit.saturating_sub(self.buf.len()) {
++            self.exceeded = true;
++        } else {
+             self.buf.extend_from_slice(chunk);
+-            Ok(chunk.len())
+-        }
+-        fn flush(&mut self) -> std::io::Result<()> {
+-            Ok(())
+         }
++        Ok(chunk.len())
+     }
++    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
++}
+ 
++fn cmd_get_atoms<'a>(space: &mut Space, outbuf: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
+     outbuf.clear();
+-    let mut capped = CappedWriter { buf: outbuf, limit: MAX_OUTPUT_BYTES };
+-    space.dump_all_sexpr(&mut capped)?;
+-    let len = capped.buf.len();
+-    Ok(&capped.buf[..len])
++    let mut writer = LimitedWriter { buf: outbuf, limit: MAX_OUTPUT_BYTES, exceeded: false };
++    space.dump_all_sexpr(&mut writer).map_err(|e| format!("ERR: dump failed: {e}"))?;
++    if writer.exceeded { return Err("ERR: output limit".into()); }
++    Ok(&outbuf[..])
+ }
+ 
+ fn cmd_match<'a>(space: &mut Space, inp: &[u8], outbuf: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
+-    let (pattern, template) = parse_query(space, inp)
++    let (_query_storage, pattern, template) = parse_query(space, inp)
+         .map_err(|e| format!("ERR: parse failed: {e:?}"))?
+         .ok_or_else(|| "ERR: invalid query tuple".to_string())?;
+     outbuf.clear();
+-    space.dump_sexpr(pattern, template, &mut *outbuf);
++    let mut writer = LimitedWriter { buf: outbuf, limit: MAX_OUTPUT_BYTES, exceeded: false };
++    space.dump_sexpr(pattern, template, &mut writer);
++    if writer.exceeded { return Err("ERR: output limit".into()); }
+     Ok(&outbuf[..])
+ }
+ 
+@@ -201,11 +207,12 @@ fn cmd_restore(dir: &str) -> Result<Space, String> {
+ 
+ fn build_info() -> String {
+     format!(
+-        "{{\"crate\":\"mork_ffi\",\"version\":\"{}\",\"mork_commit\":\"{}\",\"rustc\":\"{}\",\
++        "{{\"crate\":\"mork_ffi\",\"version\":\"{}\",\"mork_commit\":\"{}\",\"rustc\":\"{}\",\"patch_sha256\":\"{}\",\
+ \"commands\":[\"add-atoms\",\"remove-atoms\",\"match\",\"get-atoms\",\"backup\",\"restore\",\"get-build-info\"]}}",
+         env!("CARGO_PKG_VERSION"),
+         env!("MORK_FFI_MORK_COMMIT"),
+         env!("MORK_FFI_RUSTC"),
++        env!("MORK_FFI_PATCH_SHA256"),
+     )
+ }
+ 
+@@ -320,6 +327,43 @@ mod tests {
+         assert_eq!(reply_bytes(dispatch(&space, b"get-atoms", b"")), b"");
+     }
+ 
++    #[test]
++    fn capped_serialization_does_not_panic_or_poison() {
++        let mut space = Space::new();
++        space.add_all_sexpr(b"(friend sam tim)").unwrap();
++        let mut output = Vec::new();
++        let mut writer = LimitedWriter { buf: &mut output, limit: 4, exceeded: false };
++        space.dump_all_sexpr(&mut writer).unwrap();
++        assert!(writer.exceeded);
++        assert!(writer.buf.len() <= 4);
++        let (_storage, pattern, template) = parse_query(
++            &space, b"((friend $x $y) ($x $y))"
++        ).unwrap().unwrap();
++        let mut output = Vec::new();
++        let mut writer = LimitedWriter { buf: &mut output, limit: 4, exceeded: false };
++        space.dump_sexpr(pattern, template, &mut writer);
++        assert!(writer.exceeded);
++        assert!(writer.buf.len() <= 4);
++        let reply = cmd_get_atoms(&mut space, &mut output).unwrap();
++        assert_eq!(reply, b"(friend sam tim)\n");
++    }
++
++    #[test]
++    fn query_expressions_borrow_live_owned_storage() {
++        let space = Space::new();
++        let (storage, pattern, template) = parse_query(
++            &space, b"((friend $x $y) ($x $y))"
++        ).unwrap().unwrap();
++        let start = storage.as_ptr() as usize;
++        let end = start + storage.len();
++        assert!((start..end).contains(&(pattern.ptr as usize)));
++        assert!((start..end).contains(&(template.ptr as usize)));
++        // Heap pressure must not replace bytes referenced by either Expr.
++        let pressure: Vec<Vec<u8>> = (0..100).map(|_| vec![0xFF; 2048]).collect();
++        assert_eq!(pressure.len(), 100);
++        assert_eq!(unsafe { *pattern.ptr }, mork_expr::item_byte(mork_expr::Tag::Arity(3)));
++    }
++
+     #[test]
+     fn malformed_input_is_a_typed_error() {
+         let space = Mutex::new(Space::new());

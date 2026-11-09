@@ -53,3 +53,36 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+  mork-native:
+    # Builds the pinned MORK FFI and runs every test that needs the real
+    # library, so native coverage can no longer silently skip in CI. The
+    # provenance drift check runs inside the suite (mork/tests/test_provenance.py).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system pytest jsonschema
+
+      - name: Install nightly Rust toolchain
+        run: rustup toolchain install nightly-2026-07-28 --profile minimal
+
+      - name: Build pinned MORK and run native tests
+        env:
+          MORK_PYTHON: python3
+          MORK_TEST_FORK: "1"
+          MORK_REQUIRE_NATIVE: "1"
+        run: scripts/with-mork.sh --install -- python3 -m pytest -q mork/tests src/commit_gate/tests/test_gate_projection.py

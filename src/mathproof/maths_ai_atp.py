@@ -52,6 +52,7 @@ from mathproof.formal_atp import (
     stub_replay,
 )
 from mathproof.schemas import validate as validate_schema
+from mathproof.witness import build_witness, certificate_id_for_result
 from mathproof.soundness import validate_formal_search_result
 
 __all__ = ["MathsAIFormalATP", "default_reasoner_factory"]
@@ -117,7 +118,7 @@ def _node_annotations(node: Any) -> dict[str, float]:
     return annotations
 
 
-def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
+def _kernel_proof_traces(graph: Any):
     """Construct complete Lean-only witnesses for solved nodes in an AND/OR graph.
 
     An edge witnesses its source only when Lean accepted it and every child
@@ -135,11 +136,11 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
         ):
             outgoing.setdefault(edge.source_id, []).append(edge)
 
-    witnesses: dict[int, tuple[dict[str, Any], frozenset[int]]] = {}
+    witnesses: dict[int, tuple[dict[str, Any], frozenset[int], dict]] = {}
 
     def trace_for(
         node_id: int, visiting: frozenset[int]
-    ) -> tuple[dict[str, Any], frozenset[int]] | None:
+    ) -> tuple[dict[str, Any], frozenset[int], dict] | None:
         if node_id in visiting or node_id not in graph.nodes:
             return None
         cached = witnesses.get(node_id)
@@ -151,6 +152,15 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
             if any(child is None for child in children):
                 continue
             child_witnesses = [child for child in children if child is not None]
+            selected = {node_id: edge}
+            compatible = True
+            for child in child_witnesses:
+                for member, selected_edge in child[2].items():
+                    if member in selected and selected[member] is not selected_edge:
+                        compatible = False
+                    selected[member] = selected_edge
+            if not compatible:
+                continue
             trace = {
                 "goal": str(graph.nodes[node_id].goal.expression),
                 "tactic": str(edge.tactic.tactic_name),
@@ -158,17 +168,19 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
                 "subgoals": [child[0] for child in child_witnesses],
             }
             used = frozenset({node_id}).union(*(child[1] for child in child_witnesses))
-            witness = (trace, used)
+            witness = (trace, used, selected)
             witnesses[node_id] = witness
             return witness
         return None
 
     traces: dict[int, dict[str, Any]] = {}
+    selections = {}
     for node_id in graph.nodes:
         witness = trace_for(node_id, frozenset())
         if witness is not None:
             traces[node_id] = witness[0]
-    return traces
+            selections[node_id] = witness[2]
+    return traces, selections
 
 
 def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict[str, Any]:
@@ -177,7 +189,7 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
     env_hash = request["environment_hash"]
 
     state_ids = {node_id: f"{proof_id}/fs-{node_id + 1}" for node_id in graph.nodes}
-    kernel_traces = _kernel_proof_traces(graph)
+    kernel_traces, selections = _kernel_proof_traces(graph)
 
     parent_edges = {}
     multi_child = set()
@@ -198,8 +210,9 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
             build_state(
                 proof_id,
                 node_id + 1,
-                _goal_text(node.goal),
+                str(node.goal.expression),
                 env_hash,
+                local_context=[str(h) for h in (node.goal.hypotheses or [])],
                 kind="and" if node_id in multi_child else "or",
                 status=status,
                 annotations=_node_annotations(node),
@@ -207,7 +220,9 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
         )
 
     tactic_edges = []
+    tactic_ids = {}
     for serial, edge in enumerate(graph.edges.values(), start=1):
+        tactic_ids[id(edge)] = f"{proof_id}/ta-{serial}"
         tactic_name = str(edge.tactic.tactic_name)
         if tactic_name in NON_KERNEL_TACTICS:
             executor_result = ExecutorResult.EMPTY_OUTPUT.value
@@ -272,6 +287,9 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
             checkpoint={"epoch_ms": wall_ms, "frontier_state_ids": []},
             artifacts=[{"sha256": certificate_hash, "role": "certificate"}],
         )
+        result["certificate"]["witness"] = build_witness(
+            result, certificate_id_for_result(result),
+            {state_ids[node]: tactic_ids[id(edge)] for node, edge in selections[graph.root_id].items()})
         return result
 
     if graph.is_exhausted():
@@ -334,7 +352,7 @@ class MathsAIFormalATP(FormalATPAdapter):
             graph = asyncio.run(
                 self._get_reasoner().prove(
                     str(request["goal_text"]),
-                    hypotheses=list(request.get("hypotheses") or []),
+                    hypotheses=list(request.get("local_context", request.get("hypotheses")) or []),
                 )
             )
             wall_ms = int((time.monotonic() - started) * 1000)

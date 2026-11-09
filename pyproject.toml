@@ -15,6 +15,9 @@ dependencies = [
     "jsonschema>=4.0",
 ]
 
+[project.scripts]
+persistent-atp-host = "mork.host:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
