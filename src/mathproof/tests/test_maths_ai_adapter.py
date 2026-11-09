@@ -464,6 +464,11 @@ class TestMathsAIFormalATP(unittest.TestCase):
         verdict = atp.formal_replay({"artifact_hash": "x"}, REQUEST["environment_hash"])
         self.assertEqual(verdict, {"status": "rejected", "rejection_reason": "no-lean"})
 
+    def test_replay_without_independent_verifier_fails_closed(self):
+        atp = MathsAIFormalATP(reasoner=StubReasoner())
+        verdict = atp.formal_replay({"artifact_hash": "x"}, REQUEST["environment_hash"])
+        self.assertEqual(verdict["status"], "rejected")
+
 
 if __name__ == "__main__":
     unittest.main()
