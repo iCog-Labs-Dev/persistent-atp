@@ -14,6 +14,67 @@ proof's `node()` from 250.0 µs to 249.6 µs. The concern was unfounded — but 
 same sweep run *inside* one proof found a real problem the concern hadn't named
 ([E2](#e2--what-does-one-proof-cost-as-it-grows)).
 
+## Current PoC dependency-closure results
+
+The fixed native dependency and patch are unchanged. These current measurements
+supersede the earlier closure figures below. A Python-side dependency index
+tracks relevant graph mutations and parallel-edge counts; unknown state is
+hydrated from native atoms, and restore drops derived data. Result invalidation
+is scoped to the affected proof. The bounded index/result caches are not journal
+or proof authority.
+
+| 10,000-claim workload (199,996 atoms) | Median | p95 | Samples | Project target |
+|---|---:|---:|---:|---:|
+| Cold closure after structural native writes | 15.00 ms | **17.10 ms** | 20 | ≤100 ms p95 |
+| Warm closure | 0.0006 ms | **0.0015 ms** | 20 | ≤10 ms p95 |
+
+Before each cold sample the benchmark removes and reinserts the root dependency
+edge, invalidating the result while retaining the exact same full-chain workload.
+It therefore measures uncached result queries, not repeated cached reads.
+Index maintenance is write work; restoring/rehydrating an evicted or unknown
+proof is separate rebuild work. The first seeded query was 14.72 ms. Cold and
+warm distributions are recorded in the result files; these figures are
+host/workload-specific. The project uses Python for live queries, and further
+MORK improvements are outside the current PoC scope.
+
+Validation metadata comes from the actual pytest interpreter (3.13.5) via opt-in
+`POC_TEST_METADATA` sidecars. `scripts/record-poc-validation.py` rejects
+interpreter mismatches, native skips, native baseline drift, or missed latency
+budgets. The historical system-generator version mismatch is corrected explicitly
+in the older validation JSON.
+
+## Earlier native re-baseline
+
+These measurements update the historical results below. Final machine-readable
+rows are in `results/fork-final-2026-11-07.json`; `results/closure-before-materialization-2026-11-07.json`
+records the initial uncached bulk-query baseline. Build and validation identity
+are recorded alongside them and in `../FFI_PROVENANCE.json`.
+
+Measurements use the pinned fork plus the recorded FFI query-lifetime/output-limit
+patch, one fresh process per experiment. Source/compiler/patch identity is
+verified before launching. Absolute timings vary with host load; the final
+sweep was run without this task's test or build processes competing with it.
+
+| Experiment | Updated finding |
+|---|---|
+| E1 | 298 → 148,298 atoms, with 1,000 background proofs: node median 35.35 → 35.25 µs; outgoing edges 28.75 → 28.71 µs. Shared-Space isolation remains flat; keep `OnceLock` for the measured workload. |
+| E2 | 100 → 10,000 nodes: outgoing-edge median 29.54 → 30.14 µs; incoming edges 13.20 → 12.84 µs. Both grounded traversal directions remain flat. |
+| E5 | 300 accepted proposals per backend: MemoryView median/p95 1.57/2.70 ms; MorkView 9.31/16.47 ms. Includes current safety/recovery/validation behavior; old 3.3 ms numbers are historical. |
+| E8, initial bulk query | 10,000 claims plus exact alignments/declarations: uncached p95 ~249 ms. This exceeded the 100 ms performance threshold. |
+| E8, materialized | Same 199,996-atom chain: cold rebuild **122.8 ms**, cached median/p95 **0.88/2.63 µs**. Every native mutation/restore invalidates the bounded result cache. |
+
+**Project design:** retain the shared Space and indexed traversals. Materialize
+at most 16 requested closure results, while reporting cold rebuild cost
+separately. The current dependency-index implementation and its cold/warm
+results are reported above; E5 supplies the commit-latency baseline.
+
+E8's scale counts claims/declarations; it also creates alignment nodes, so the
+10,000-claim workload is deliberately more than 10,000 total graph nodes. Warm
+measurements use ten iterations after warmup. The cold sample is a separately
+reported single observation, not a fabricated p95. RSS remains an OS metric,
+not allocator-level live-byte evidence. These are synthetic representations and
+performance probes, not theorem verification.
+
 ---
 
 ## Running it
@@ -219,6 +280,25 @@ Same four probes, but now the growth is *inside* the proof being queried.
 Read against E1 the diagnosis is unambiguous: MORK *can* discriminate — E1 proves
 it does, at 500× the scale. So the growth here is not MORK's indexing, it is the
 query.
+
+**Update (B8, out-edge index).** `edge_atoms` now also emits an
+`(out-edge <proof> <src> <rel> <dst> <eid>)` index atom with the selective
+components first, and `edges_from` matches on its fixed `(proof, src, rel)`
+prefix instead of the variable-early `edge` pattern. Re-measured on the
+fork's ffi crate (medians, µs):
+
+| nodes in proof | atoms | `node()` | `edges_from()` | `edges_to()` | `projected_revision()` |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 597 | 31.4 | 22.5 | 8.8 | 7.3 |
+| 500 | 2,997 | 31.3 | 22.4 | 8.7 | 7.3 |
+| 2,500 | 14,998 | 30.7 | 22.5 | 8.9 | 7.2 |
+| 10,000 | 59,998 | 30.1 | 21.9 | 8.7 | 7.2 |
+
+All four probes are now flat across 100x growth (`edges_from` was
+253.6 -> 2,207.2 us above, 8.7x linear). The atom count per edge rose from
+5 to 7 — two index atoms (`rev-edge`, `out-edge`) per edge — which E1's
+flat curve absorbs. The variable-early `edge` pattern is retained for
+whole-proof enumeration (`edges()`), where scanning is the semantics.
 
 **Cause, in our code.** [`MorkView._edges`](../backend/view.py#L283) leaves the
 edge id unbound:
