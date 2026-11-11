@@ -1,0 +1,59 @@
+{
+  "run_id": "p1/fr-1",
+  "proof_id": "p1",
+  "declaration_id": "p1/fd-1",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "disposition": "proved-pending-replay",
+  "root_state_id": "p1/fs-1",
+  "checkpoint": {
+    "epoch_ms": 1724419200000,
+    "frontier_state_ids": []
+  },
+  "states": [
+    {
+      "state_id": "p1/fs-1",
+      "kind": "or",
+      "goal_text": "a + b = b + a",
+      "exact_state_hash": "sha256:f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+      "semantic_signature": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+      "status": "open",
+      "annotations": {
+        "depth": 0,
+        "derived_priority": 0.5
+      }
+    }
+  ],
+  "tactic_edges": [
+    {
+      "tactic_id": "p1/ta-1",
+      "source_state_id": "p1/fs-1",
+      "tactic_label": "apply",
+      "tactic_args": ["Nat.add_comm"],
+      "executor_result": "lean-accepted",
+      "subgoal_count": 0,
+      "produced_goal_ids": [],
+      "model_provenance": {
+        "search_policy_name": "conservative-deny-sorry"
+      },
+      "annotations": {
+        "gnn_tactic_prior": 0.93
+      }
+    }
+  ],
+  "certificate": {
+    "artifact_hash": "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+    "status": "candidate",
+    "producer_run_id": "p1/fr-1"
+  },
+  "obstructions": [],
+  "artifacts": [
+    {
+      "sha256": "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "role": "lean-source"
+    }
+  ],
+  "budget_used": {
+    "tactic_steps": 1,
+    "wall_clock_ms": 340
+  }
+}

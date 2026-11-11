@@ -1,0 +1,128 @@
+{
+  "proof_id": "even-sum-proof",
+  "events": [
+    {
+      "revision": 1,
+      "event_hash": "sha256:aaa111",
+      "prev_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "actor": "llm-explorer-1",
+      "worker_class": "llm-research",
+      "payload": {
+        "proof_id": "even-sum-proof",
+        "actor": "llm-explorer-1",
+        "worker_class": "llm-research",
+        "ops": [
+          {
+            "op": "upsert_node",
+            "label": "State",
+            "id": "even-sum-proof/s1",
+            "fields": {
+              "description": "Prove: if n even and m even, then n+m even",
+              "status": "open",
+              "kind": "or"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "revision": 2,
+      "event_hash": "sha256:bbb222",
+      "prev_hash": "sha256:aaa111",
+      "actor": "llm-explorer-1",
+      "worker_class": "llm-research",
+      "payload": {
+        "proof_id": "even-sum-proof",
+        "actor": "llm-explorer-1",
+        "worker_class": "llm-research",
+        "ops": [
+          {
+            "op": "upsert_node",
+            "label": "Claim",
+            "id": "even-sum-proof/c1",
+            "fields": {
+              "statement": "If n is even, then n = 2k for some integer k",
+              "status": "conjectural"
+            }
+          },
+          {
+            "op": "add_edge",
+            "rel": "SUPPORTED_BY",
+            "src": "even-sum-proof/s1",
+            "dst": "even-sum-proof/c1",
+            "edge_id": "even-sum-proof/e1"
+          }
+        ]
+      }
+    },
+    {
+      "revision": 3,
+      "event_hash": "sha256:ccc333",
+      "prev_hash": "sha256:bbb222",
+      "actor": "llm-explorer-1",
+      "worker_class": "llm-research",
+      "payload": {
+        "proof_id": "even-sum-proof",
+        "actor": "llm-explorer-1",
+        "worker_class": "llm-research",
+        "ops": [
+          {
+            "op": "upsert_node",
+            "label": "Move",
+            "id": "even-sum-proof/m1",
+            "fields": {
+              "summary": "Expand definition of even numbers",
+              "status": "open",
+              "kind": "reduction"
+            }
+          },
+          {
+            "op": "add_edge",
+            "rel": "PROPOSES",
+            "src": "even-sum-proof/s1",
+            "dst": "even-sum-proof/m1",
+            "edge_id": "even-sum-proof/e2"
+          }
+        ]
+      }
+    },
+    {
+      "revision": 4,
+      "event_hash": "sha256:ddd444",
+      "prev_hash": "sha256:ccc333",
+      "actor": "llm-explorer-1",
+      "worker_class": "llm-research",
+      "payload": {
+        "proof_id": "even-sum-proof",
+        "actor": "llm-explorer-1",
+        "worker_class": "llm-research",
+        "ops": [
+          {
+            "op": "upsert_node",
+            "label": "Attempt",
+            "id": "even-sum-proof/a1",
+            "fields": {
+              "move_summary": "Expanded definition: n=2k, m=2j, so n+m=2(k+j)",
+              "status": "supported",
+              "worker": "llm-explorer-1"
+            }
+          },
+          {
+            "op": "add_edge",
+            "rel": "ON_STATE",
+            "src": "even-sum-proof/a1",
+            "dst": "even-sum-proof/s1",
+            "edge_id": "even-sum-proof/e3"
+          },
+          {
+            "op": "add_edge",
+            "rel": "ON_MOVE",
+            "src": "even-sum-proof/a1",
+            "dst": "even-sum-proof/m1",
+            "edge_id": "even-sum-proof/e4"
+          }
+        ]
+      }
+    }
+  ]
+}

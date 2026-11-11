@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/score-vector.schema.json",
+  "title": "ScoreVector",
+  "description": "Heuristic scheduling features (Sections 2.4, 8.2). Every field here is advisory: scores order the frontier and choose tactics, they never establish truth, close a state, or promote a claim. There is deliberately no truth/status/proof field in this vocabulary -- priority is not status (Section 6.12).",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 1,
+  "properties": {
+    "gnn_tactic_prior": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "argument_probability": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "premise_relevance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pln_strength": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "pln_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "proof_number": { "type": "integer", "minimum": 0 },
+    "disproof_number": { "type": "integer", "minimum": 0 },
+    "depth": { "type": "integer", "minimum": 0 },
+    "estimated_execution_cost": { "type": "number", "minimum": 0 },
+    "state_novelty": { "type": "number", "minimum": 0 },
+    "transposition_count": { "type": "integer", "minimum": 0 },
+    "failure_family": { "type": "string" },
+    "dependency_centrality": { "type": "number", "minimum": 0 },
+    "expected_information_gain": { "type": "number", "minimum": 0 },
+    "verification_value": { "type": "number", "minimum": 0 },
+    "repeated_failure_risk": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "expected_theorem_impact": { "type": "number" },
+    "novelty_and_mechanism_diversity": { "type": "number" },
+    "formalization_readiness": { "type": "number" },
+    "estimated_cost": { "type": "number" },
+    "human_priority": { "type": "number" },
+    "availability_of_suitable_worker_or_model_or_tool": { "type": "number" },
+    "derived_priority": { "type": "number" }
+  }
+}

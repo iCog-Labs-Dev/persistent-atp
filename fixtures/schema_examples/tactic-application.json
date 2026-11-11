@@ -1,0 +1,19 @@
+{
+  "tactic_id": "p1/ta-1",
+  "source_state_id": "p1/fs-1",
+  "tactic_label": "apply",
+  "tactic_args": ["Nat.add_comm"],
+  "executor_result": "lean-rejected",
+  "subgoal_count": 0,
+  "produced_goal_ids": [],
+  "diagnostic_artifact": "sha256:2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+  "status": "dead",
+  "model_provenance": {
+    "model_bundle_artifact": "sha256:e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+    "search_policy_name": "conservative-deny-sorry"
+  },
+  "annotations": {
+    "gnn_tactic_prior": 0.4,
+    "failure_family": "type-mismatch"
+  }
+}

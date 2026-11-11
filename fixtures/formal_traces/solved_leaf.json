@@ -1,0 +1,66 @@
+{
+  "run_id": "p1/fr-1",
+  "proof_id": "p1",
+  "declaration_id": "p1/fd-1",
+  "environment_hash": "sha256:c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+  "disposition": "proved-pending-replay",
+  "root_state_id": "p1/fs-1",
+  "checkpoint": {
+    "epoch_ms": 1724419200000,
+    "frontier_state_ids": []
+  },
+  "states": [
+    {
+      "state_id": "p1/fs-1",
+      "kind": "or",
+      "goal_text": "n + 0 = n",
+      "exact_state_hash": "sha256:5151515151515151515151515151515151515151515151515151515151515151",
+      "semantic_signature": "sha256:6161616161616161616161616161616161616161616161616161616161616161",
+      "status": "expanded"
+    },
+    {
+      "state_id": "p1/fs-2",
+      "kind": "goal",
+      "goal_text": "Nat.rec case: n + 0 = n holds by rfl after induction hypothesis",
+      "exact_state_hash": "sha256:5252525252525252525252525252525252525252525252525252525252525252",
+      "semantic_signature": "sha256:6262626262626262626262626262626262626262626262626262626262626262",
+      "status": "formally-closed"
+    }
+  ],
+  "tactic_edges": [
+    {
+      "tactic_id": "p1/ta-1",
+      "source_state_id": "p1/fs-1",
+      "tactic_label": "induction",
+      "tactic_args": ["n"],
+      "executor_result": "lean-accepted",
+      "subgoal_count": 1,
+      "produced_goal_ids": ["p1/fs-2"]
+    },
+    {
+      "tactic_id": "p1/ta-2",
+      "source_state_id": "p1/fs-2",
+      "tactic_label": "rfl",
+      "tactic_args": [],
+      "executor_result": "lean-accepted",
+      "subgoal_count": 0,
+      "produced_goal_ids": []
+    }
+  ],
+  "certificate": {
+    "artifact_hash": "sha256:7171717171717171717171717171717171717171717171717171717171717171",
+    "status": "candidate",
+    "producer_run_id": "p1/fr-1"
+  },
+  "obstructions": [],
+  "artifacts": [
+    {
+      "sha256": "sha256:7171717171717171717171717171717171717171717171717171717171717171",
+      "role": "certificate"
+    }
+  ],
+  "budget_used": {
+    "tactic_steps": 2,
+    "wall_clock_ms": 210
+  }
+}

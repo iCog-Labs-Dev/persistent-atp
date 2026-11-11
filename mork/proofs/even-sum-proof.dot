@@ -1,0 +1,13 @@
+digraph proof {
+  rankdir="TB";
+  node [shape=box, style="rounded,filled", fontname="Helvetica"];
+  labelloc="t"; label="even-sum-proof";
+  "s1" [label="State: s1\ndescription: Prove: if n even and m even,\nthen n+m even\nstatus: open", fillcolor="#8ecae6", style="rounded,filled"];
+  "c1" [label="Claim: c1\nstatement: If n is even, then n = 2k for\nsome integer k\nstatus: conjectural", fillcolor="#219ebc", style="rounded,filled"];
+  "m1" [label="Move: m1\nsummary: Expand definition of even\nnumbers\nstatus: open", fillcolor="#ffb703", style="rounded,filled"];
+  "a1" [label="Attempt: a1\nstatus: supported", fillcolor="#fb8500", style="rounded,filled"];
+  "s1" -> "c1" [label="SUPPORTED_BY", style="solid"];
+  "s1" -> "m1" [label="PROPOSES", style="solid"];
+  "a1" -> "s1" [label="ON_STATE", style="solid"];
+  "a1" -> "m1" [label="ON_MOVE", style="solid"];
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/proof-spec.schema.json",
+  "title": "ProofSpec",
+  "description": "The specification of one proof effort: its scope identity, who opened it, and the research claims it targets. The proof_id is the namespace every object of the effort is scoped under (commit gate rule), so it is assigned before any content exists.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["proof_id", "actor", "target_claim_ids"],
+  "properties": {
+    "proof_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Scope root, e.g. 'p1'. Not allocator-issued: everything else is scoped under it."
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who opened the proof; immutable after creation."
+    },
+    "title": { "type": "string" },
+    "target_claim_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[^/]+/c-[1-9][0-9]*$"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

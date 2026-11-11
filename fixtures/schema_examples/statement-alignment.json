@@ -1,0 +1,19 @@
+{
+  "alignment_id": "p1/al-1",
+  "claim_id": "p1/c-1",
+  "declaration_id": "p1/fd-1",
+  "statement_hash": "sha256:3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b",
+  "source_hash": "sha256:b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+  "imports": ["Mathlib.Data.Nat.Basic"],
+  "namespace": "Nat",
+  "universe_assumptions": [],
+  "typeclass_assumptions": ["[Add α]"],
+  "quantifier_correspondence": "forall a b : Nat <-> for all naturals a, b",
+  "domain_correspondence": "N <-> Nat, no coercion",
+  "classical_assumptions": [],
+  "constructive_assumptions": [],
+  "relation": "exact",
+  "reviewer": "alignment-reviewer-1",
+  "reviewer_verdict": "aligned",
+  "status": "aligned"
+}
