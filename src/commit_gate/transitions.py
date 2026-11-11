@@ -137,7 +137,8 @@ STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
 # Fields that can be set in UpsertNode but never changed via SetField.
 # Mapped by node label. Derived from the "Immutable" notes in the schema.
 IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
-    "FormalState": frozenset({"goal_text", "exact_hash", "is_theorem"}),
+    "FormalState": frozenset({"goal_text", "exact_hash", "exact_state_hash", "is_theorem",
+                               "serialization_version", "local_context", "context_digest", "environment_hash"}),
     "TacticApplication": frozenset(
         {
             "tactic_label",
@@ -151,8 +152,8 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
     "FormalDeclaration": frozenset(
         {"lean_name", "lean_type", "lean_value", "module_path", "universe_level"}
     ),
-    "FormalRun": frozenset({"actor", "start_time", "environment_hash"}),
-    "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash"}),
+    "FormalRun": frozenset({"actor", "start_time", "environment_hash", "operation_id", "request_artifact", "executor_id"}),
+    "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash", "witness", "root_state_id"}),
     "LeanReplay": frozenset(
         {"actor", "replayed_at", "status", "sorry_detected", "rejection_reason", "environment_hash", "certificate_id", "artifact_hash"}
     ),

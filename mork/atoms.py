@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Collection, Mapping
 
 __all__ = [
     "encode",
@@ -13,11 +13,17 @@ __all__ = [
     "edge_atoms",
     "field_atom",
     "projected_atom",
+    "derive_state_id",
+    "PROJECTED_SCHEMA_VERSION",
     "to_add_command",
 ]
 
 _MAX_TOKEN_BYTES = 56
 _MAX_CHUNK_BYTES = 48
+
+#: Bumped whenever the projected atom set changes shape; a viewer must refuse
+#: to treat a space published under a newer schema as valid (NFR-008).
+PROJECTED_SCHEMA_VERSION = 1
 
 
 def encode(value: Any) -> str:
@@ -43,9 +49,14 @@ def encode(value: Any) -> str:
             current = candidate
     if current:
         chunks.append(current)
-    return "(json-chunks " + " ".join(
-        json.dumps(chunk, ensure_ascii=False) for chunk in chunks
-    ) + ")"
+    # MORK encodes expression arity in six bits. Keep the marker plus its
+    # children below 64 even for multi-kilobyte values; flat lists corrupt
+    # the parser's representation once they contain 63+ chunks.
+    parts = [json.dumps(chunk, ensure_ascii=False) for chunk in chunks]
+    while len(parts) > 62:
+        parts = ["(json-chunks " + " ".join(parts[i:i + 62]) + ")"
+                 for i in range(0, len(parts), 62)]
+    return "(json-chunks " + " ".join(parts) + ")"
 
 
 def extract_proof_id(identity: str) -> str:
@@ -56,6 +67,19 @@ def extract_proof_id(identity: str) -> str:
 def extract_local_id(identity: str) -> str:
     """Return the local portion of ``<proof>/<local>``."""
     return identity.split("/", 1)[1] if "/" in identity else identity
+
+
+def derive_state_id(candidates: Collection[str]) -> str | None:
+    """Projected ``state_id`` from candidate exact-state references.
+
+    Exactly one candidate resolves to that state id; zero or several are
+    ambiguous and resolve to nothing. Shared by the live MORK view, the
+    in-memory view, and the batch projector so all three derive identical
+    fields for identical graphs.
+    """
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
 
 
 def field_atom(
@@ -116,6 +140,11 @@ def edge_atoms(
         f"{encode(rel_type)} {encode(local_src)} {encode(local_dst)})",
         f"(rev-edge {encode(proof_id)} {encode(local_dst)} "
         f"{encode(rel_type)} {encode(local_src)} {encode(local_edge_id)})",
+        # Selective outgoing index: `edges_from` matches on the fixed
+        # (proof, src, rel) prefix; the variable-early `edge` pattern
+        # scans every edge of the proof (bench E2: linear growth).
+        f"(out-edge {encode(proof_id)} {encode(local_src)} "
+        f"{encode(rel_type)} {encode(local_dst)} {encode(local_edge_id)})",
         f'(layer {encode(proof_id)} {encode(f"edge:{local_edge_id}")} "committed")',
     ]
     atoms.extend(
@@ -125,9 +154,14 @@ def edge_atoms(
     return tuple(atoms)
 
 
-def projected_atom(proof_id: str, revision: int) -> str:
+def projected_atom(
+    proof_id: str, revision: int, schema_version: int = PROJECTED_SCHEMA_VERSION
+) -> str:
     """Build the live projection watermark atom."""
-    return f"(projected {encode(proof_id)} {encode(revision)})"
+    return (
+        f"(projected {encode(proof_id)} {encode(revision)} "
+        f"{encode(schema_version)})"
+    )
 
 
 def to_add_command(atom: str) -> str:

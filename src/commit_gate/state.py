@@ -18,6 +18,8 @@ from threading import RLock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence, runtime_checkable
 
+from mork.atoms import derive_state_id
+
 from .ops import AddEdge, Op, RemoveEdge, SetField, UpsertNode
 
 if TYPE_CHECKING:
@@ -179,7 +181,19 @@ class WriteView(MutableView, Protocol):
         """Note that this graph now reflects the journal up to `revision`.
 
         Called only after the writes for that revision have succeeded, so the
-        mark is never ahead of the state. Must not move backwards.
+        mark is never ahead of the state. Revisions apply in journal order:
+        `revision` must be exactly current+1, and the schema version must
+        never decrease. A violation raises rather than moving the mark.
+        """
+        ...
+
+    def apply_journal_event(
+        self, store: JournalStore, proof_id: str, revision: int
+    ) -> None:
+        """Apply the exact next journal event and publish its revision atomically.
+
+        A failed or out-of-order event leaves both the state and the watermark
+        unchanged. The event's operations come from the journal, not a caller.
         """
         ...
 
@@ -350,8 +364,9 @@ class MemoryView:
             return
 
         fields = dict(node.fields)
-        if len(candidates) == 1:
-            fields["state_id"] = next(iter(candidates))
+        state_id = derive_state_id(candidates)
+        if state_id is not None:
+            fields["state_id"] = state_id
         else:
             fields.pop("state_id", None)
         self.nodes[node_id] = NodeRecord(node_id, node.label, fields)

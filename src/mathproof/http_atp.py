@@ -18,11 +18,15 @@ from mathproof.formal_atp import FormalATPAdapter
 from mathproof.schemas import validate
 from mathproof.soundness import validate_formal_search_result
 
-__all__ = ["ATPServiceError", "HTTPFormalATP"]
+__all__ = ["ATPServiceError", "ATPRunNotFound", "HTTPFormalATP"]
 
 
 class ATPServiceError(RuntimeError):
     """Transport failure or response that violates the canonical contract."""
+
+
+class ATPRunNotFound(ATPServiceError):
+    """The provider authoritatively returned HTTP 404 for a requested resource."""
 
 
 class HTTPFormalATP(FormalATPAdapter):
@@ -35,6 +39,8 @@ class HTTPFormalATP(FormalATPAdapter):
             or not parsed.netloc
             or parsed.query
             or parsed.fragment
+            or parsed.username
+            or parsed.password
         ):
             raise ValueError("base_url must be an HTTP(S) URL without query or fragment")
         if timeout <= 0:
@@ -59,7 +65,14 @@ class HTTPFormalATP(FormalATPAdapter):
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                body = json.load(response)
+                payload_bytes = response.read(24 * 1024 * 1024 + 1)
+                if len(payload_bytes) > 24 * 1024 * 1024:
+                    raise ATPServiceError("ATP response exceeds the byte limit")
+                body = json.loads(payload_bytes)
+        except HTTPError as exc:
+            if exc.code == 404:
+                raise ATPRunNotFound("ATP resource was not found") from exc
+            raise ATPServiceError(f"ATP service returned HTTP {exc.code}") from exc
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
             raise ATPServiceError(f"ATP service {method} {path} failed: {exc}") from exc
         if not isinstance(body, dict):
@@ -96,6 +109,21 @@ class HTTPFormalATP(FormalATPAdapter):
         if run_id not in self._requests:
             raise ValueError(f"unknown run_id {run_id!r}; start the run first")
         return self._requests[run_id]
+
+    def restore_request(self, request: Mapping[str, Any]) -> None:
+        """Restore trusted durable request metadata before observing an old run.
+
+        This performs no delivery or implicit retry. Provider status is still
+        checked against this exact canonical request by ``_check_search``.
+        """
+        errors = validate("formal-search-request", request)
+        if errors:
+            raise ValueError("invalid restored formal request")
+        run_id = str(request["run_id"])
+        existing = self._requests.get(run_id)
+        if existing is not None and existing != dict(request):
+            raise ValueError("run identity is already bound to another request")
+        self._requests[run_id] = dict(request)
 
     def formal_search_start(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         errors = validate("formal-search-request", request)

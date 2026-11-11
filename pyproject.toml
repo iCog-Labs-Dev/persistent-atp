@@ -9,6 +9,7 @@ description = "A durable, race-safe metagraph memory system for long-horizon aut
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "persistent-atp-client[http]>=0.3.0,<0.4",
     "python-dotenv>=1.0",
     "neo4j>=5.14",
     "psycopg[binary]>=3.3.6",
@@ -19,6 +20,14 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+provider-sdk = [
+    "openai>=2.0,<3",
+    "PyYAML>=6.0",
+]
+omega = [
+    "janus-swi>=1.5,<2",
+    "PyYAML>=6.0",
+]
 # The production backend is not on PyPI and lives in a private repository,
 # so plain pip cannot resolve it — [tool.uv.sources] below applies to uv
 # only. Install it with `uv sync --extra real-atp`; everything else
@@ -27,11 +36,17 @@ real-atp = [
     "mathematics-ai-atp",
 ]
 
+[project.scripts]
+persistent-atp-host = "mork.host:main"
+persistent-atp-omega = "omegaclaw.cli:main"
+persistent-atp-provider-probe = "omegaclaw.deepseek_probe:main"
+
 [tool.setuptools]
 package-dir = {"" = "src", "mork" = "mork"}
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
+namespaces = false
 include = [
     "alignment*",
     "artifacts*",
@@ -40,10 +55,20 @@ include = [
     "mathproof*",
     "shared*",
     "mork*",
+    "omegaclaw*",
+]
+
+[tool.setuptools.package-data]
+omegaclaw = [
+    "config/*.yaml",
+    "config/*.conf",
+    "omega_plugin/*.metta",
+    "omega_plugin/*.txt",
+    "omega_plugin/*.py",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", "packages/persistent-atp-client/src"]
 # `mork/bench` is deliberately absent: it spawns subprocesses and times them.
 testpaths = [
     "src/commit_gate/tests",
@@ -55,7 +80,11 @@ testpaths = [
     "mork/projector/tests",
     "mork/visualizer/tests",
     "mork/tests",
+    "packages/persistent-atp-client/tests",
+    "src/omegaclaw/tests",
+    "tests/omegaclaw_runtime",
 ]
 
 [tool.uv.sources]
+persistent-atp-client = { path = "packages/persistent-atp-client", editable = true }
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }

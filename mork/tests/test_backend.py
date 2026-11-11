@@ -9,12 +9,14 @@ under its own proof id. Every atom carries its proof and every query is scoped
 to one, which is what keeps these tests from seeing each other's writes.
 """
 
+import threading
 import unittest
 
 from commit_gate.apply import apply_ops
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
+from commit_gate.proposal import Proposal
 from commit_gate.state import GraphView, MemoryView, ReadView, WriteView
-from mork.atoms import edge_atoms
+from mork.atoms import derive_state_id, edge_atoms
 from mork.backend.ffi import MorkSpace, MorkUnavailable
 from mork.backend.view import MorkView, decode, encode, tokens
 from mork.projector.core import extract_local_id, extract_proof_id
@@ -293,6 +295,7 @@ class TestMorkViewEdges(unittest.TestCase):
         self.assertEqual(_SPACE.match(pattern, pattern), [])
         atoms = self.view.atoms(self.proof)
         self.assertFalse(any("rev-edge" in atom and '"e1"' in atom for atom in atoms))
+        self.assertFalse(any("out-edge" in atom and '"e1"' in atom for atom in atoms))
         self.assertNotIn(
             f'(layer "{self.proof}" "edge:e1" "committed")', atoms
         )
@@ -379,6 +382,7 @@ class TestProjection(unittest.TestCase):
             f'(node "{self.proof}" $id $label)',
             f'(field "{self.proof}" $id $name $value)',
             f'(edge "{self.proof}" $eid $rel $src $dst)',
+            f'(out-edge "{self.proof}" $src $rel $dst $eid)',
             f'(efield "{self.proof}" $eid $name $value)',
         ]
         return sorted(atom for shape in shapes for atom in _SPACE.match(shape, shape))
@@ -392,6 +396,7 @@ class TestProjection(unittest.TestCase):
                 f'(field "{self.proof}" "s1" "status" "closed")',
                 f'(node "{self.proof}" "m1" "TacticApplication")',
                 f'(node "{self.proof}" "s1" "FormalState")',
+                f'(out-edge "{self.proof}" "s1" "PROPOSES" "m1" "e1")',
             ],
         )
 
@@ -444,38 +449,59 @@ class TestProjection(unittest.TestCase):
 class MarkContract:
     """The projection mark, held to the same rules on every backend.
 
-    Mixed into one case per backend so a new backend cannot satisfy `WriteView`
-    with a mark that behaves differently from the one the gate relies on.
+    Watermarks advance strictly in journal order — revision must be exactly
+    current+1 — and carry an explicit schema version that must never
+    decrease. Violations raise instead of moving the mark.
     """
 
     def test_unrecorded_proof_reads_as_zero(self):
         self.assertEqual(self.view.projected_revision(self.proof), 0)
 
     def test_records_and_reads_back(self):
-        self.view.record_projected(self.proof, 3)
-        self.assertEqual(self.view.projected_revision(self.proof), 3)
+        self.view.record_projected(self.proof, 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
 
     def test_advances(self):
         self.view.record_projected(self.proof, 1)
         self.view.record_projected(self.proof, 2)
         self.assertEqual(self.view.projected_revision(self.proof), 2)
 
-    def test_never_moves_backwards(self):
+    def test_rejects_a_skipped_revision(self):
+        """A gap must not advance the watermark."""
+        with self.assertRaises(ValueError):
+            self.view.record_projected(self.proof, 3)
+        self.assertEqual(self.view.projected_revision(self.proof), 0)
+
+    def test_rejects_moving_backwards(self):
         """Replaying older events must not un-record newer ones."""
-        self.view.record_projected(self.proof, 5)
+        self.view.record_projected(self.proof, 1)
         self.view.record_projected(self.proof, 2)
-        self.assertEqual(self.view.projected_revision(self.proof), 5)
+        with self.assertRaises(ValueError):
+            self.view.record_projected(self.proof, 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 2)
+
+    def test_rejects_recording_the_same_revision_twice(self):
+        """Re-marking a published revision means the watermark ran ahead."""
+        self.view.record_projected(self.proof, 1)
+        with self.assertRaises(ValueError):
+            self.view.record_projected(self.proof, 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
 
     def test_is_kept_per_proof(self):
-        self.view.record_projected(self.proof, 3)
-        self.view.record_projected(f"{self.proof}-other", 7)
-        self.assertEqual(self.view.projected_revision(self.proof), 3)
-        self.assertEqual(self.view.projected_revision(f"{self.proof}-other"), 7)
+        self.view.record_projected(self.proof, 1)
+        self.view.record_projected(f"{self.proof}-other", 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
+        self.assertEqual(self.view.projected_revision(f"{self.proof}-other"), 1)
 
-    def test_recording_the_same_revision_twice_is_harmless(self):
-        self.view.record_projected(self.proof, 2)
-        self.view.record_projected(self.proof, 2)
-        self.assertEqual(self.view.projected_revision(self.proof), 2)
+    def test_records_the_schema_version(self):
+        self.view.record_projected(self.proof, 1)
+        self.assertEqual(self.view.projected_schema_version(self.proof), 1)
+
+    def test_rejects_a_schema_version_regression(self):
+        self.view.record_projected(self.proof, 1)
+        with self.assertRaises(ValueError):
+            self.view.record_projected(self.proof, 2, schema_version=0)
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
 
 
 @needs_mork
@@ -487,8 +513,10 @@ class TestMorkViewMark(MarkContract, unittest.TestCase):
     def test_only_one_mark_atom_is_ever_held(self):
         for revision in (1, 2, 3):
             self.view.record_projected(self.proof, revision)
-        pattern = f'(projected "{self.proof}" $revision)'
-        self.assertEqual(_SPACE.match(pattern, pattern), [f'(projected "{self.proof}" 3)'])
+        pattern = f'(projected "{self.proof}" $revision $schema_version)'
+        self.assertEqual(
+            _SPACE.match(pattern, pattern), [f'(projected "{self.proof}" 3 1)']
+        )
 
     def test_the_mark_lives_in_the_space_it_describes(self):
         """Why it is not kept in the journal database.
@@ -497,8 +525,197 @@ class TestMorkViewMark(MarkContract, unittest.TestCase):
         anywhere more durable would outlive the atoms it vouches for and claim
         an empty graph was up to date.
         """
+        self.view.record_projected(self.proof, 1)
         self.view.record_projected(self.proof, 2)
-        self.assertIn(f'(projected "{self.proof}" 2)', self.view.atoms(self.proof))
+        self.assertIn(
+            f'(projected "{self.proof}" 2 1)', self.view.atoms(self.proof)
+        )
+
+
+class TestDeriveStateId(unittest.TestCase):
+    """The shared state-identity rule behind all three projection paths."""
+
+    def test_a_single_candidate_resolves(self):
+        self.assertEqual(derive_state_id({"s1"}), "s1")
+
+    def test_no_candidate_is_ambiguous(self):
+        self.assertIsNone(derive_state_id(set()))
+
+    def test_several_candidates_are_ambiguous(self):
+        self.assertIsNone(derive_state_id({"s1", "s2"}))
+
+
+@needs_mork
+class TestStateIdParity(unittest.TestCase):
+    """Live and in-memory views derive identical state_id fields."""
+
+    def setUp(self):
+        self.view = MorkView(_SPACE)
+        self.proof = f"parity-{self._testMethodName}"
+
+    def id_for(self, local):
+        return f"{self.proof}/{local}"
+
+    def test_move_state_reference_matches_memory_view(self):
+        ops = [
+            UpsertNode("FormalState", self.id_for("s1"), {}),
+            UpsertNode("Move", self.id_for("mv1"), {}),
+            AddEdge(
+                "PROPOSES", self.id_for("s1"), self.id_for("mv1"), self.id_for("e1")
+            ),
+        ]
+        memory = MemoryView()
+        apply_ops(memory, ops)
+        apply_ops(self.view, ops)
+        self.assertEqual(
+            self.view.node(self.id_for("mv1")).fields.get("state_id"),
+            memory.node(self.id_for("mv1")).fields.get("state_id"),
+        )
+        self.assertEqual(
+            self.view.node(self.id_for("mv1")).fields["state_id"], "s1"
+        )
+
+    def test_ambiguous_reference_matches_memory_view(self):
+        ops = [
+            UpsertNode("FormalState", self.id_for("s1"), {}),
+            UpsertNode("FormalState", self.id_for("s2"), {}),
+            UpsertNode("Move", self.id_for("mv1"), {}),
+            AddEdge(
+                "PROPOSES", self.id_for("s1"), self.id_for("mv1"), self.id_for("e1")
+            ),
+            AddEdge(
+                "PROPOSES", self.id_for("s2"), self.id_for("mv1"), self.id_for("e2")
+            ),
+        ]
+        memory = MemoryView()
+        apply_ops(memory, ops)
+        apply_ops(self.view, ops)
+        self.assertNotIn("state_id", self.view.node(self.id_for("mv1")).fields)
+        self.assertNotIn("state_id", memory.node(self.id_for("mv1")).fields)
+
+
+class _JournalStoreStub:
+    """The slice of JournalStore that apply_journal_event reads."""
+
+    def __init__(self, events):
+        self._events = events  # {revision: Proposal}
+
+    def read_events_between(self, proof_id, start, end):
+        return [
+            self._events[revision].to_dict()
+            for revision in sorted(self._events)
+            if start < revision <= end
+        ]
+
+
+@needs_mork
+class TestApplyJournalEvent(unittest.TestCase):
+    """The gate's publish rule on MorkView: one journal event, one mark."""
+
+    def setUp(self):
+        self.view = MorkView(_SPACE)
+        self.proof = f"evt-{self._testMethodName}"
+
+    def id_for(self, local):
+        return f"{self.proof}/{local}"
+
+    def event(self, *ops):
+        return Proposal(
+            proof_id=self.proof, actor="test", worker_class="test", ops=list(ops)
+        )
+
+    def test_applies_the_event_and_publishes_the_mark(self):
+        store = _JournalStoreStub(
+            {1: self.event(UpsertNode("FormalState", self.id_for("s1"), {}))}
+        )
+        self.view.apply_journal_event(store, self.proof, 1)
+        self.assertIsNotNone(self.view.node(self.id_for("s1")))
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
+
+    def test_rejects_an_out_of_order_revision(self):
+        store = _JournalStoreStub(
+            {2: self.event(UpsertNode("FormalState", self.id_for("s2"), {}))}
+        )
+        with self.assertRaises(ValueError):
+            self.view.apply_journal_event(store, self.proof, 2)
+        self.assertEqual(self.view.projected_revision(self.proof), 0)
+        self.assertIsNone(self.view.node(self.id_for("s2")))
+
+    def test_a_failing_event_leaves_the_mark_behind(self):
+        """A partial mutation must not advance the watermark."""
+        store = _JournalStoreStub(
+            {
+                1: self.event(
+                    UpsertNode("FormalState", self.id_for("s1"), {}),
+                    SetField("FormalState", self.id_for("ghost"), "status", "x"),
+                )
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.view.apply_journal_event(store, self.proof, 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 0)
+        # Recovery: the event is repaired in the journal and replayed whole.
+        store._events[1] = self.event(
+            UpsertNode("FormalState", self.id_for("s1"), {})
+        )
+        self.view.apply_journal_event(store, self.proof, 1)
+        self.assertEqual(self.view.projected_revision(self.proof), 1)
+
+    def test_readers_see_a_consistent_projection_while_events_apply(self):
+        store = _JournalStoreStub(
+            {
+                revision: self.event(
+                    UpsertNode("FormalState", self.id_for(f"s{revision}"), {})
+                )
+                for revision in range(1, 51)
+            }
+        )
+        errors: list[BaseException] = []
+        seen: list[tuple[int, int]] = []
+        stop = threading.Event()
+
+        def read():
+            try:
+                while not stop.is_set():
+                    revision, snapshot = self.view.snapshot(self.proof)
+                    seen.append((revision, len(snapshot.list_nodes(self.proof))))
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=read) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        try:
+            for revision in range(1, 51):
+                self.view.apply_journal_event(store, self.proof, revision)
+        finally:
+            stop.set()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(self.view.projected_revision(self.proof), 50)
+        for revision, count in seen:
+            self.assertEqual(count, revision)
+
+
+class TestProofScopedPatterns(unittest.TestCase):
+    """Proof-prefix lint: every pattern in view.py is proof-scoped."""
+
+    def test_every_match_pattern_starts_with_the_proof_slot(self):
+        import inspect
+        import pathlib
+        import re
+
+        source = pathlib.Path(inspect.getsourcefile(MorkView)).read_text()
+        patterns = re.findall(r'f"\((\S+)\s+\{([^}]+)\}', source)
+        self.assertGreater(len(patterns), 10)
+        for relation, slot in patterns:
+            self.assertIn(
+                slot,
+                ("proof", "encode(proof_id)"),
+                f"{relation!r} pattern is not proof-scoped: {slot!r}",
+            )
 
 
 if __name__ == "__main__":

@@ -64,6 +64,8 @@ class SoundnessReason(StrEnum):
     MALFORMED_ENVIRONMENT_HASH = "malformed-environment-hash"
     OBSTRUCTION_ENVIRONMENT_MISMATCH = "obstruction-environment-mismatch"
 
+    STATE_IDENTITY_MISMATCH = "state-identity-mismatch"
+    INVALID_CERTIFICATE_WITNESS = "invalid-certificate-witness"
     CERTIFICATE_REQUIRED = "certificate-required"
     CERTIFICATE_DISPOSITION_MISMATCH = "certificate-disposition-mismatch"
     CERTIFICATE_WITHOUT_KERNEL_PROOF = "certificate-without-kernel-proof"
@@ -307,6 +309,21 @@ def validate_formal_search_result(
     """Every structural violation in a formal-search-result payload."""
     findings: list[SoundnessViolation] = []
     findings.extend(_check_environment(result))
+    from .state_identity import identity_issue
+    from .witness import validate_witness
+    for index, state in enumerate(result.get("states") or []):
+        if "serialization_version" in state:
+            issue = identity_issue(state, result.get("environment_hash"))
+            if issue:
+                findings.append(SoundnessViolation(SoundnessReason.STATE_IDENTITY_MISMATCH,
+                                                   issue, f"states[{index}]"))
+    certificate = result.get("certificate") or {}
+    if "witness" in certificate:
+        try:
+            validate_witness(certificate["witness"], result)
+        except (KeyError, TypeError, ValueError) as exc:
+            findings.append(SoundnessViolation(SoundnessReason.INVALID_CERTIFICATE_WITNESS,
+                                               str(exc), "certificate.witness"))
 
     for violation, _edge in _check_tactic_edges(result):
         if violation is not None:

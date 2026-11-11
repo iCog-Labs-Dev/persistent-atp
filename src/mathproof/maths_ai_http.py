@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from types import SimpleNamespace
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
@@ -30,11 +31,15 @@ from mathproof.formal_atp import (
 from mathproof.maths_ai_atp import _convert_graph
 from mathproof.schemas import validate as validate_schema
 from mathproof.soundness import validate_formal_search_result
+from mathproof.http_atp import ATPServiceError
+from commit_gate.canon import canonical_json
+from artifacts.hashing import hash_content
+from mathproof.witness import build_witness, certificate_id_for_result
 
 __all__ = ["MathsAIAPIError", "MathsAIHTTPFormalATP", "maths_ai_http_atp"]
 
 
-class MathsAIAPIError(RuntimeError):
+class MathsAIAPIError(ATPServiceError):
     """A transport failure or invalid Mathematics-ai-atp response."""
 
     def __init__(self, message: str, *, status_code: int | None = None):
@@ -74,7 +79,7 @@ def _empty_result(
     return result
 
 
-def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any:
+def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any], *, strict=False) -> Any:
     """Validate a provider hypergraph summary and expose the local graph API."""
     raw_nodes = summary.get("nodes")
     raw_edges = summary.get("edges")
@@ -93,6 +98,11 @@ def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any
             raise MathsAIAPIError("formal-search summary has an invalid node identity")
         if not isinstance(expression, str) or not expression.strip():
             raise MathsAIAPIError("formal-search summary has an empty node expression")
+        context = raw.get("hypotheses")
+        if strict and context is None:
+            raise MathsAIAPIError("formal-search summary omits a local context")
+        if context is not None and (not isinstance(context, list) or not all(isinstance(item, str) for item in context)):
+            raise MathsAIAPIError("formal-search summary has an invalid local context")
         if status not in {"open", "expanded", "solved", "dead"}:
             raise MathsAIAPIError("formal-search summary has an invalid node status")
         if not _finite_number(prior):
@@ -112,7 +122,7 @@ def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any
             )
         nodes[node_id] = SimpleNamespace(
             id=node_id,
-            goal=SimpleNamespace(expression=expression, hypotheses=[]),
+            goal=SimpleNamespace(expression=expression, hypotheses=list(context or [])),
             status=status,
             gnn_probability=float(prior),
             stv=stv,
@@ -124,6 +134,8 @@ def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any
         raise MathsAIAPIError("formal-search summary has no valid root")
     if nodes[root_id].goal.expression != request["goal_text"]:
         raise MathsAIAPIError("formal-search root does not match the requested goal")
+    if strict and nodes[root_id].goal.hypotheses != list(request.get("hypotheses") or []):
+        raise MathsAIAPIError("formal-search root context differs from the request")
     nodes[root_id].goal.hypotheses = list(request.get("hypotheses") or [])
 
     edges: dict[int, Any] = {}
@@ -175,7 +187,8 @@ def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any
         raise MathsAIAPIError("formal-search summary has contradictory termination flags")
     if solved != (nodes[root_id].status == "solved"):
         raise MathsAIAPIError("formal-search solved flag contradicts the root status")
-    if exhausted != (nodes[root_id].status == "dead"):
+    budget_exhausted = summary.get("budget_exhausted") is True
+    if exhausted != (nodes[root_id].status == "dead" or budget_exhausted):
         raise MathsAIAPIError("formal-search exhausted flag contradicts the root status")
 
     return SimpleNamespace(
@@ -184,7 +197,8 @@ def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any
         root_id=root_id,
         root=nodes[root_id],
         is_solved=lambda: solved,
-        is_exhausted=lambda: exhausted,
+        is_exhausted=lambda: exhausted and not budget_exhausted,
+        budget_exhausted=budget_exhausted,
         frontier=lambda: [node for node in nodes.values() if node.status == "open"],
     )
 
@@ -223,6 +237,21 @@ def _trace_matches_graph(graph: Any, node_id: int, trace: Any, visiting: frozens
     return False
 
 
+def _trace_selection(graph, node_id, trace):
+    for edge in graph.edges.values():
+        if (edge.source_id == node_id and edge.status == "solved"
+                and edge.tactic.tactic_name == trace.get("tactic")
+                and edge.tactic.arguments == trace.get("arguments", [])
+                and len(edge.child_ids) == len(trace.get("subgoals", []))
+                and all(_trace_matches_graph(graph, child, subtrace, frozenset({node_id}))
+                        for child, subtrace in zip(edge.child_ids, trace.get("subgoals", [])))):
+            selected = {node_id: edge}
+            for child, subtrace in zip(edge.child_ids, trace.get("subgoals", [])):
+                selected.update(_trace_selection(graph, child, subtrace))
+            return selected
+    raise MathsAIAPIError("proof trace has no complete kernel witness")
+
+
 class MathsAIHTTPFormalATP(FormalATPAdapter):
     """Translate persistent-atp calls to Mathematics-ai-atp's HTTP API."""
 
@@ -230,13 +259,14 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
     _RETRYABLE = frozenset({"interrupted", "failed", "cancelled"})
     _TERMINAL = frozenset({"found", "verified", "unsolved", "exhausted"})
 
-    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0, strict: bool = False):
         parsed = urlsplit(base_url)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.netloc
             or parsed.query
             or parsed.fragment
+            or parsed.username or parsed.password
         ):
             raise ValueError("base_url must be an HTTP(S) URL without query or fragment")
         if timeout <= 0:
@@ -244,12 +274,32 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.strict = strict
+        self.artifact_bytes: dict[str, bytes] = {}
         self._requests: dict[str, dict[str, Any]] = {}
         self._envelopes: dict[str, dict[str, Any]] = {}
         self._latest: dict[str, dict[str, Any]] = {}
         self._proof_traces: dict[str, dict[str, Any]] = {}
         self._replays: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._admitted: set[str] = set()
+
+    def restore_request(self, request):
+        errors = validate_schema("formal-search-request", request)
+        if errors: raise ValueError("invalid restored Mathematics-ai request")
+        run_id = request["run_id"]
+        if run_id in self._requests and self._requests[run_id] != dict(request):
+            raise ValueError("run identity is already bound to another request")
+        self._requests[run_id] = json.loads(canonical_json(dict(request)))
+        envelope = self._provider_envelope(request)
+        if self.strict:
+            envelope["budget"]["max_steps"] = request["budget"]["max_steps"]
+        self._envelopes[run_id] = envelope
+
+    def _artifact(self, payload):
+        content = canonical_json(payload)
+        pointer = hash_content(content)
+        self.artifact_bytes[pointer] = content
+        return pointer
 
     def _call(
         self,
@@ -324,6 +374,8 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             raise MathsAIAPIError("formal-search snapshot did not echo the bound request")
         if snapshot.get("environment") != envelope["environment"]:
             raise MathsAIAPIError("formal-search snapshot changed the pinned environment")
+        if self.strict and snapshot.get("execution_environment_hash") != self._requests[run_id]["environment_hash"]:
+            raise MathsAIAPIError("formal-search actual environment differs from the pin")
         if snapshot.get("budget") != envelope["budget"]:
             raise MathsAIAPIError("formal-search snapshot changed the requested budget")
         status = snapshot.get("status")
@@ -372,11 +424,11 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             elif status == "cancelled":
                 result = _empty_result(RunDisposition.CANCELLED.value, request)
             elif status == "interrupted":
-                result = build_result(RunDisposition.ENVIRONMENT_ERROR.value, request)
-                result["artifacts"][0]["note"] = "remote run was interrupted"
+                result = _empty_result(RunDisposition.ENVIRONMENT_ERROR.value, request) if self.strict else build_result(RunDisposition.ENVIRONMENT_ERROR.value, request)
+                if not self.strict: result["artifacts"][0]["note"] = "remote run was interrupted"
             elif status == "failed":
-                result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
-                result["artifacts"][0]["note"] = str(snapshot.get("error") or "remote run failed")
+                result = _empty_result(RunDisposition.INTERNAL_ERROR.value, request) if self.strict else build_result(RunDisposition.INTERNAL_ERROR.value, request)
+                if not self.strict: result["artifacts"][0]["note"] = str(snapshot.get("error") or "remote run failed")
             else:
                 provider_result = snapshot.get("result")
                 if not isinstance(provider_result, Mapping):
@@ -389,7 +441,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                     or provider_result.get("exhausted") != summary.get("exhausted")
                 ):
                     raise MathsAIAPIError("formal-search result contradicts its summary")
-                graph = _remote_graph(summary, request)
+                graph = _remote_graph(summary, request, strict=self.strict)
                 proof_trace = provider_result.get("proof_trace")
                 if status in {"found", "verified"}:
                     if not graph.is_solved() or not _trace_matches_graph(
@@ -399,12 +451,12 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                     self._proof_traces[run_id] = dict(proof_trace)
                 elif graph.is_solved():
                     raise MathsAIAPIError(f"run status {status!r} hides a solved graph")
-                if status == "exhausted" and not graph.is_exhausted():
+                if status == "exhausted" and not graph.is_exhausted() and not graph.budget_exhausted:
                     raise MathsAIAPIError("exhausted run has a non-exhausted graph")
                 if status == "unsolved" and graph.is_exhausted():
                     raise MathsAIAPIError("unsolved run has an exhausted graph")
 
-                result = _convert_graph(graph, request, 0)
+                result = _convert_graph(graph, request, 0, identity_namespace=run_id if self.strict else None)
                 if graph.is_solved():
                     certificate_hash = _digest("certificate", run_id, proof_trace)
                     result["certificate"]["artifact_hash"] = certificate_hash
@@ -420,8 +472,54 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                         )
                         result["certificate"]["replay_result"] = dict(replay)
 
+                if self.strict:
+                    used = provider_result.get("budget_used")
+                    if (not isinstance(used, dict) or set(used) != {"tactic_steps", "wall_clock_ms"}
+                            or any(type(value) is not int or value < 0 for value in used.values())
+                            or used["tactic_steps"] > request["budget"]["max_steps"]):
+                        raise MathsAIAPIError("provider omitted or exceeded the enforced step budget")
+                    result["budget_used"] = used
+                    if graph.budget_exhausted:
+                        result["disposition"] = "budget-exhausted"
+                    pointers = {}
+                    if graph.is_solved():
+                        if any(re.search(r"\b(?:sorry|admit)\b", edge.tactic.tactic_name + " " + " ".join(edge.tactic.arguments))
+                               for edge in graph.edges.values()):
+                            raise MathsAIAPIError("proof graph contains forbidden proof placeholders")
+                        pointer = self._artifact(proof_trace)
+                        if provider_result.get("certificate_hash") != pointer:
+                            raise MathsAIAPIError("provider certificate hash differs from exact trace bytes")
+                        result["certificate"]["artifact_hash"] = pointer
+                        selected = _trace_selection(graph, graph.root_id, proof_trace)
+                        edge_ids = {id(edge): converted["tactic_id"]
+                                    for edge, converted in zip(graph.edges.values(), result["tactic_edges"])}
+                        state_ids = {node: converted["state_id"] for node, converted in zip(graph.nodes, result["states"])}
+                        result["certificate"]["witness"] = build_witness(result, certificate_id_for_result(result),
+                            {state_ids[node]: edge_ids[id(edge)] for node, edge in selected.items()})
+                        pointers[pointer] = "certificate"
+                    for edge in result["tactic_edges"]:
+                        if edge.get("diagnostic_artifact"):
+                            pointer = self._artifact({"run_id": run_id, "tactic_id": edge["tactic_id"],
+                                "executor_result": edge["executor_result"], "provider_error": snapshot.get("error")})
+                            edge["diagnostic_artifact"] = pointer
+                            pointers[pointer] = "diagnostic"
+                    for obstruction in result.get("obstructions", []):
+                        pointer = self._artifact({"run_id": run_id, "root_goal": graph.root.goal.expression,
+                                                  "hypotheses": graph.root.goal.hypotheses})
+                        obstruction["minimal_state_artifact"] = pointer
+                        pointers[pointer] = "minimal-state"
+                        diagnostics = [self._artifact({"run_id": run_id, "node_id": node.id, "note": node.note})
+                                       for node in graph.nodes.values() if node.status == "dead"]
+                        obstruction["diagnostic_artifacts"] = diagnostics
+                        pointers.update({pointer: "diagnostic" for pointer in diagnostics})
+                    result["artifacts"] = [{"sha256": pointer, "role": role} for pointer, role in sorted(pointers.items())]
+
+            if self.strict and status in {"interrupted", "failed", "cancelled"}:
+                pointer = self._artifact({"run_id": run_id, "provider_status": status, "error": snapshot.get("error")})
+                result["artifacts"] = [{"sha256": pointer, "role": "provider-diagnostic"}]
             self._validate_result(result, request)
         except MathsAIAPIError as exc:
+            if self.strict: raise
             result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
             result["artifacts"][0]["note"] = str(exc)
         self._latest[run_id] = result
@@ -449,9 +547,11 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 return self._invalid_request(request, f"run {run_id!r} already started")
             # The previous POST may have reached the server before its reply
             # was lost. Never send another POST while admission is uncertain.
-            return self._reconcile_start(run_id)
-        self._requests[run_id] = dict(request)
-        self._envelopes[run_id] = self._provider_envelope(request)
+            if not self.strict: return self._reconcile_start(run_id)
+            try: return self._reconcile_start(run_id)
+            except MathsAIAPIError as exc:
+                if exc.status_code != 404: raise
+        self.restore_request(request)
         try:
             snapshot = self._call(
                 "POST", "/formal-search/start", self._envelopes[run_id],
@@ -540,13 +640,14 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             },
             "proof_trace": proof_trace,
         }
+        if self.strict: payload["certificate_hash"] = latest_certificate["artifact_hash"]
         try:
             body = self._call("POST", "/formal-replay", payload)
         except MathsAIAPIError as exc:
             # Mathematics-ai-atp maps a Lean tactic rejection (ValueError) to
             # HTTP 400. The request was already locally validated and bound to
             # the stored run, so this is an independent negative verdict.
-            if exc.status_code != 400:
+            if exc.status_code != 400 or self.strict:
                 raise
             verdict = {
                 "status": "rejected",
@@ -554,6 +655,10 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 "rejection_reason": str(exc),
             }
         else:
+            if self.strict and (body.get("run_id") != run_id
+                    or body.get("certificate_hash") != latest_certificate["artifact_hash"]
+                    or body.get("environment_hash") != environment_hash):
+                raise MathsAIAPIError("replay response is not bound to the exact run/certificate/environment")
             if body.get("verified") is True and body.get("status") == "verified":
                 if (body.get("run_id") != run_id
                     or body.get("certificate_hash") != latest_certificate["artifact_hash"]
@@ -563,6 +668,10 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                         "the run, certificate, and actual environment"
                     )
                 verdict = {"status": "verified", "environment_hash": environment_hash}
+                if self.strict:
+                    if body.get("sorry_detected") is not False:
+                        raise MathsAIAPIError("replay did not establish the no-sorry policy")
+                    verdict.update({"run_id": run_id, "certificate_hash": body["certificate_hash"], "sorry_detected": False})
             elif body.get("verified") is False and body.get("status") == "rejected":
                 verdict = {
                     "status": "rejected",

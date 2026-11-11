@@ -12,10 +12,9 @@ Writes to the knowledge base go through a **deterministic commit gate** and an *
 
 For this early prototype phase, the system is built on a contemporary off-the-shelf database to keep development pace steady, with a path toward the full MORK/PeTTa-native backend as the design matures.
 
-## Context compilation
+## Omega receiver experiment
 
-The context compilation subsystem builds deterministic, budgeted context
-packets for formal ATP, research, and obstruction-analysis tasks. See the
-[context compiler guide](src/context_compiler/README.md) for its architecture,
-end-to-end usage, selection behavior, outputs, and current integration
-boundaries.
+See [the integration guide](src/omegaclaw/README.md) for reference and production
+profiles, native MORK/PostgreSQL setup, durable operation recovery and the bounded
+Omega/PeTTa experiment. The [Mathematics-ai provider guide](src/omegaclaw/MATHEMATICS_AI.md)
+covers real search integration and the separate Lean replay/promotion command.

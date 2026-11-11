@@ -8,6 +8,7 @@ under its own proof id.
 """
 
 import unittest
+from mork.backend.view import ProjectionUnavailable
 
 from commit_gate.apply import apply_ops
 from commit_gate.gate import CommitGate, ProjectionError
@@ -260,7 +261,8 @@ class TestProjectionFailure(MorkGateCase):
 
         # MORK is behind, which is the recoverable direction: the journal holds
         # the change, so replaying it later still produces the right state.
-        self.assertEqual(self.view.node(self.id_for("fs1")).fields["status"], "open")
+        with self.assertRaises(ProjectionUnavailable):
+            self.view.node(self.id_for("fs1"))
 
     def test_the_mark_is_not_advanced_past_a_failed_projection(self):
         self.commit_open_state()
@@ -294,7 +296,8 @@ class TestCatchUp(MorkGateCase):
 
         self.assertEqual(self.store.head(self.proof)[0], 2)
         self.assertEqual(self.view.projected_revision(self.proof), 1)
-        self.assertEqual(self.view.node(self.id_for("fs1")).fields["status"], "open")
+        with self.assertRaises(ProjectionUnavailable):
+            self.view.node(self.id_for("fs1"))
 
     def test_the_mark_advances_with_each_commit(self):
         self.assertEqual(self.view.projected_revision(self.proof), 0)

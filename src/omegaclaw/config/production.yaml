@@ -1,0 +1,16 @@
+{
+  "mode": "production",
+  "root": "tmp/runs/omega-production-service",
+  "workspace": "production",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "token_env": "PERSISTENT_ATP_OMEGA_TOKEN",
+  "graph_backend": "mork",
+  "artifact_db_env": "ARTIFACT_DB_URL",
+  "formal_provider": {
+    "kind": "canonical-http",
+    "url_env": "PERSISTENT_ATP_FORMAL_URL",
+    "token_env": "PERSISTENT_ATP_FORMAL_TOKEN",
+    "timeout_s": 10
+  }
+}

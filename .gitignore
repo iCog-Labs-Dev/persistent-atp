@@ -5,3 +5,7 @@
 *.egg-info/
 *.png
 *.dot
+.runs/
+/tmp/
+/build/
+.mork-fork-src/

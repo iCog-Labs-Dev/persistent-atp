@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "persistent-atp-client"
+version = "0.3.0"
+description = "Transport-neutral typed client for the persistent-ATP receiver"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+http = ["httpx>=0.27,<1"]
+dev = ["pytest>=8", "jsonschema>=4", "httpx>=0.27,<1"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+persistent_atp_client = ["py.typed", "schemas/*.json"]

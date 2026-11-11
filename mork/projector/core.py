@@ -39,6 +39,7 @@ from collections import defaultdict
 from typing import Any, Dict, List
 
 from mork.atoms import (
+    derive_state_id,
     edge_atoms,
     encode,
     extract_local_id,
@@ -151,9 +152,9 @@ class Projector:
                 candidates[src].add(extract_local_id(dst))
 
         self.node_state_map = {
-            node_id: next(iter(state_ids))
+            node_id: state_id
             for node_id, state_ids in candidates.items()
-            if len(state_ids) == 1
+            if (state_id := derive_state_id(state_ids)) is not None
         }
 
     def _node_to_atoms(self, node_id: str, node_data: Dict[str, Any]) -> List[str]:

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/certificate-witness.schema.json",
+  "title": "CertificateWitness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "certificate_id",
+    "root_state_id",
+    "selected_tactics",
+    "indexed_obligations",
+    "closure_leaves",
+    "membership_set",
+    "artifact_hash"
+  ],
+  "properties": {
+    "certificate_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "root_state_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "selected_tactics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "indexed_obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tactic_id",
+          "child_index",
+          "state_id"
+        ],
+        "properties": {
+          "tactic_id": {
+            "type": "string"
+          },
+          "child_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "closure_leaves": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "membership_set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

@@ -1,10 +1,10 @@
 """The global scheduler: choose the next move, issue its lease (Section 8).
 
-`GlobalScheduler.lease_next(proof_id, worker_class, ttl, actor=...)` is `proof-lease-next`
-(Section 2): one call builds the eligible frontier from committed state,
-scores it with a transparent weighted-sum policy, selects one move, and
-issues a per-move dispatch lease through the journal store -- expiry, mutual
-exclusion and fencing included.
+`GlobalScheduler.lease_best_global_move(proof_id)` is the coordinator's
+routing-aware entry point. It ranks the eligible frontier across available
+worker classes, then atomically leases the best free move to its required
+class and configured actor. `lease_next` remains the class-supplied lower-level
+entry point for existing callers.
 
 Invariants this module must never break (2.4 / 7 / 9):
 
@@ -18,6 +18,7 @@ Invariants this module must never break (2.4 / 7 / 9):
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
@@ -27,7 +28,9 @@ from commit_gate.ops import UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.reasons import Reason
 from commit_gate.state import JournalOverlayView, ReadView
-from commit_gate.store import ConcurrencyError, JournalStore, LeaseCandidate, LeaseRow
+from commit_gate.store import (
+    ConcurrencyError, JournalStore, LeaseCandidate, LeaseRow, RoutedLeaseCandidate,
+)
 from commit_gate.vocab import (
     AttemptStatus,
     ClaimStatus,
@@ -83,6 +86,7 @@ CATEGORY_WORKER_CLASS = {
     "critic-task": WorkerClass.CRITIC.value,
     "obstruction-task": WorkerClass.COORDINATOR.value,
 }
+ROUTABLE_WORKER_CLASSES = frozenset(CATEGORY_WORKER_CLASS.values())
 
 OBSTRUCTION_DISPOSITIONS = frozenset(
     {RunDisposition.STAGNATED.value, RunDisposition.COUNTEREXAMPLE.value}
@@ -228,6 +232,7 @@ class GlobalScheduler:
         clock: Callable[[], float] = time.time,
         statistics: SchedulerStatistics | None = None,
         obstruction_is_handled: Callable[[ReadView, str], bool] | None = None,
+        worker_actors: Mapping[str, str] | None = None,
     ):
         self._view = view
         self._store = store
@@ -241,8 +246,79 @@ class GlobalScheduler:
         self._obstruction_is_handled = obstruction_is_handled or (
             lambda _view, _obstruction_id: False
         )
+        self._worker_actors = dict(worker_actors or {})
+        for worker_class, actor in self._worker_actors.items():
+            if worker_class not in ROUTABLE_WORKER_CLASSES:
+                raise ValueError(f"no route is defined for worker class {worker_class!r}")
+            if not isinstance(actor, str) or not actor.strip():
+                raise ValueError(f"worker class {worker_class!r} needs a nonempty actor")
 
     # -- public entry point -------------------------------------------------
+
+    def lease_best_global_move(
+        self, proof_id: str, ttl_seconds: float = 600.0,
+        *, category: str | None = None, expected_revision: int | None = None,
+        eligible_move_ids: set[str] | frozenset[str] | None = None,
+        lease_id_hint: str | None = None,
+    ) -> Lease | None:
+        """Lease the highest-ranked free move to its required worker class.
+
+        Only classes with configured actors are available. An unserved class
+        cannot gain a lease through an availability score. `None` means no
+        currently routable move is free, never proof completion. Journal
+        revision races still raise `ConcurrencyError` from `claim_best_routed`.
+        An expected revision pins the assessment before any dispatch claim;
+        the store checks that same revision atomically when issuing its lease.
+        """
+        if category is not None and category not in CATEGORY_WORKER_CLASS:
+            raise ValueError(f"unknown frontier category {category!r}")
+        if eligible_move_ids is not None:
+            if not isinstance(eligible_move_ids, (set, frozenset)) or not all(
+                isinstance(identity, str) and identity.startswith(proof_id + "/") for identity in eligible_move_ids
+            ):
+                raise ValueError("eligible move identities must be a proof-scoped set")
+            eligible_move_ids = frozenset(eligible_move_ids)
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+            raise ValueError("expected_revision must be a nonnegative integer")
+        revision, frontier = self._snapshot_frontier(proof_id)
+        if expected_revision is not None and revision != expected_revision:
+            raise ConcurrencyError(Reason.STALE_BASE_REVISION,
+                f"dispatch expected revision {expected_revision}, observed {revision}")
+        scored: list[tuple[float, Candidate, str, dict[str, float]]] = []
+        for candidate in frontier:
+            if eligible_move_ids is not None and candidate.move_id not in eligible_move_ids:
+                continue
+            if category is not None and candidate.category != category:
+                continue
+            try:
+                worker_class = CATEGORY_WORKER_CLASS[candidate.category]
+            except KeyError as exc:
+                raise ValueError(f"no route for candidate category {candidate.category!r}") from exc
+            if worker_class not in self._worker_actors:
+                continue
+            features = self._feature_vector(candidate, worker_class)
+            priority, snapshot = self._policy.score(features)
+            if not math.isfinite(priority):
+                raise ValueError("routing priority must be finite")
+            scored.append((priority, candidate, worker_class, snapshot))
+        scored.sort(key=lambda item: (-item[0], item[1].move_id))
+
+        row = self._store.claim_best_routed(
+            proof_id,
+            [RoutedLeaseCandidate(
+                candidate.move_id, snapshot, self._worker_actors[worker_class],
+                worker_class, candidate.conflict_ids,
+            ) for _priority, candidate, worker_class, snapshot in scored],
+            base_revision=revision,
+            ttl_seconds=ttl_seconds,
+            **({"lease_id_hint": lease_id_hint} if lease_id_hint is not None else {}),
+        )
+        if row is None:
+            return None
+        snapshot = next(snapshot for _, candidate, worker_class, snapshot in scored
+                        if candidate.move_id == row.selected_move_id
+                        and worker_class == row.worker_class)
+        return Lease.from_row(row, snapshot, self._policy.name)
 
     def lease_next(
         self,

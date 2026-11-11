@@ -14,13 +14,21 @@
     "tactic_edges"
   ],
   "properties": {
-    "run_id": { "type": "string", "pattern": "^[^/]+/fr-[1-9][0-9]*$" },
-    "proof_id": { "type": "string", "minLength": 1 },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[^/]+/fr-[1-9][0-9]*$"
+    },
+    "proof_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "declaration_id": {
       "type": "string",
       "pattern": "^[^/]+/fd-[1-9][0-9]*$"
     },
-    "environment_hash": { "$ref": "#/$defs/sha256" },
+    "environment_hash": {
+      "$ref": "#/$defs/sha256"
+    },
     "disposition": {
       "description": "Mirrors commit_gate.vocab.RunDisposition (6.10).",
       "enum": [
@@ -42,30 +50,47 @@
     "checkpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["epoch_ms", "frontier_state_ids"],
+      "required": [
+        "epoch_ms",
+        "frontier_state_ids"
+      ],
       "properties": {
-        "epoch_ms": { "type": "integer", "minimum": 0 },
+        "epoch_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
         "frontier_state_ids": {
           "type": "array",
-          "items": { "$ref": "#/$defs/state_ref" }
+          "items": {
+            "$ref": "#/$defs/state_ref"
+          }
         }
       }
     },
     "states": {
       "type": "array",
-      "items": { "$ref": "#/$defs/state" }
+      "items": {
+        "$ref": "#/$defs/state"
+      }
     },
     "tactic_edges": {
       "type": "array",
-      "items": { "$ref": "#/$defs/tactic_edge" }
+      "items": {
+        "$ref": "#/$defs/tactic_edge"
+      }
     },
     "certificate": {
       "description": "Present when disposition is proved-pending-replay.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifact_hash", "status"],
+      "required": [
+        "artifact_hash",
+        "status"
+      ],
       "properties": {
-        "artifact_hash": { "$ref": "#/$defs/sha256" },
+        "artifact_hash": {
+          "$ref": "#/$defs/sha256"
+        },
         "status": {
           "description": "Mirrors commit_gate.vocab.CertificateStatus.",
           "enum": [
@@ -76,34 +101,64 @@
             "stale"
           ]
         },
-        "producer_run_id": { "type": "string" },
+        "producer_run_id": {
+          "type": "string"
+        },
         "replay_result": {
-          "description": "Attached only after independent replay (6.11).",
+          "description": "Attached only after independent replay (6.11), optionally bound to exact run/certificate evidence.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["status"],
+          "required": [
+            "status"
+          ],
           "properties": {
-            "status": { "enum": ["verified", "rejected"] },
-            "environment_hash": { "$ref": "#/$defs/sha256" },
-            "rejection_reason": { "type": "string" }
+            "run_id": {"type": "string"},
+            "certificate_hash": {"$ref": "#/$defs/sha256"},
+            "sorry_detected": {"type": "boolean"},
+            "status": {
+              "enum": [
+                "verified",
+                "rejected"
+              ]
+            },
+            "environment_hash": {
+              "$ref": "#/$defs/sha256"
+            },
+            "rejection_reason": {
+              "type": "string"
+            }
           }
+        },
+        "witness": {
+          "$ref": "https://persistent-atp.invalid/schemas/certificate-witness.schema.json"
         }
       }
     },
     "obstructions": {
       "type": "array",
-      "items": { "$ref": "#/$defs/obstruction" }
+      "items": {
+        "$ref": "#/$defs/obstruction"
+      }
     },
     "artifacts": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sha256", "role"],
+        "required": [
+          "sha256",
+          "role"
+        ],
         "properties": {
-          "sha256": { "$ref": "#/$defs/sha256" },
-          "role": { "type": "string" },
-          "note": { "type": "string" }
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "role": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
         }
       }
     },
@@ -111,8 +166,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "tactic_steps": { "type": "integer", "minimum": 0 },
-        "wall_clock_ms": { "type": "integer", "minimum": 0 }
+        "tactic_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },
@@ -128,13 +189,31 @@
     "state": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["state_id", "exact_state_hash", "semantic_signature"],
+      "required": [
+        "state_id",
+        "exact_state_hash",
+        "semantic_signature"
+      ],
       "properties": {
-        "state_id": { "$ref": "#/$defs/state_ref" },
-        "kind": { "enum": ["or", "and", "goal"] },
-        "goal_text": { "type": "string" },
-        "exact_state_hash": { "$ref": "#/$defs/sha256" },
-        "semantic_signature": { "$ref": "#/$defs/sha256" },
+        "state_id": {
+          "$ref": "#/$defs/state_ref"
+        },
+        "kind": {
+          "enum": [
+            "or",
+            "and",
+            "goal"
+          ]
+        },
+        "goal_text": {
+          "type": "string"
+        },
+        "exact_state_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "semantic_signature": {
+          "$ref": "#/$defs/sha256"
+        },
         "status": {
           "description": "Mirrors commit_gate.vocab.FormalStateStatus.",
           "enum": [
@@ -149,8 +228,44 @@
             "stale"
           ]
         },
-        "annotations": { "$ref": "#/$defs/score_vector" }
-      }
+        "annotations": {
+          "$ref": "#/$defs/score_vector"
+        },
+        "serialization_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "local_context": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered, exact producer-local hypotheses; never normalized for exact identity."
+        },
+        "context_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "environment_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "serialization_version"
+            ]
+          },
+          "then": {
+            "required": [
+              "goal_text",
+              "local_context",
+              "context_digest",
+              "environment_hash"
+            ]
+          }
+        }
+      ]
     },
     "tactic_edge": {
       "description": "One tactic application: AND across all Lean-produced children, OR among sibling alternatives (Section 4).",
@@ -168,9 +283,18 @@
           "type": "string",
           "pattern": "^[^/]+/ta-[1-9][0-9]*$"
         },
-        "source_state_id": { "$ref": "#/$defs/state_ref" },
-        "tactic_label": { "type": "string" },
-        "tactic_args": { "type": "array", "items": { "type": "string" } },
+        "source_state_id": {
+          "$ref": "#/$defs/state_ref"
+        },
+        "tactic_label": {
+          "type": "string"
+        },
+        "tactic_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "executor_result": {
           "description": "Mirrors commit_gate.vocab.ExecutorResult (11.3).",
           "enum": [
@@ -190,10 +314,14 @@
         },
         "produced_goal_ids": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Complete child list; length must equal subgoal_count."
         },
-        "diagnostic_artifact": { "$ref": "#/$defs/sha256" },
+        "diagnostic_artifact": {
+          "$ref": "#/$defs/sha256"
+        },
         "status": {
           "description": "Mirrors commit_gate.vocab.TacticStatus.",
           "enum": [
@@ -213,17 +341,28 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "model_bundle_artifact": { "$ref": "#/$defs/sha256" },
-            "search_policy_name": { "type": "string" }
+            "model_bundle_artifact": {
+              "$ref": "#/$defs/sha256"
+            },
+            "search_policy_name": {
+              "type": "string"
+            }
           }
         },
-        "annotations": { "$ref": "#/$defs/score_vector" }
+        "annotations": {
+          "$ref": "#/$defs/score_vector"
+        }
       }
     },
     "obstruction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["obstruction_id", "kind", "formal_run_id", "environment_hash"],
+      "required": [
+        "obstruction_id",
+        "kind",
+        "formal_run_id",
+        "environment_hash"
+      ],
       "properties": {
         "obstruction_id": {
           "type": "string",
@@ -247,31 +386,47 @@
             "unknown"
           ]
         },
-        "formal_run_id": { "type": "string" },
+        "formal_run_id": {
+          "type": "string"
+        },
         "formal_state_ids": {
           "type": "array",
-          "items": { "$ref": "#/$defs/state_ref" }
+          "items": {
+            "$ref": "#/$defs/state_ref"
+          }
         },
-        "minimal_state_artifact": { "$ref": "#/$defs/sha256" },
+        "minimal_state_artifact": {
+          "$ref": "#/$defs/sha256"
+        },
         "diagnostic_artifacts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/sha256" }
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
         },
-        "repeated_failure_family": { "type": "string" },
+        "repeated_failure_family": {
+          "type": "string"
+        },
         "premises_considered": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "tactic_families_considered": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "evidence": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["kind"],
+            "required": [
+              "kind"
+            ],
             "properties": {
               "kind": {
                 "description": "Mirrors commit_gate.vocab.EvidenceKind (11.5).",
@@ -288,8 +443,12 @@
                   "human-guidance"
                 ]
               },
-              "artifact_hash": { "$ref": "#/$defs/sha256" },
-              "note": { "type": "string" }
+              "artifact_hash": {
+                "$ref": "#/$defs/sha256"
+              },
+              "note": {
+                "type": "string"
+              }
             }
           }
         },
@@ -305,7 +464,9 @@
             "counterexample-search"
           ]
         },
-        "environment_hash": { "$ref": "#/$defs/sha256" }
+        "environment_hash": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "score_vector": {
@@ -313,29 +474,75 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "gnn_tactic_prior": { "type": "number" },
-        "argument_probability": { "type": "number" },
-        "premise_relevance": { "type": "number" },
-        "pln_strength": { "type": "number" },
-        "pln_confidence": { "type": "number" },
-        "proof_number": { "type": "integer" },
-        "disproof_number": { "type": "integer" },
-        "depth": { "type": "integer" },
-        "estimated_execution_cost": { "type": "number" },
-        "state_novelty": { "type": "number" },
-        "transposition_count": { "type": "integer" },
-        "failure_family": { "type": "string" },
-        "dependency_centrality": { "type": "number" },
-        "expected_information_gain": { "type": "number" },
-        "verification_value": { "type": "number" },
-        "repeated_failure_risk": { "type": "number" },
-        "expected_theorem_impact": { "type": "number" },
-        "novelty_and_mechanism_diversity": { "type": "number" },
-        "formalization_readiness": { "type": "number" },
-        "estimated_cost": { "type": "number" },
-        "human_priority": { "type": "number" },
-        "availability_of_suitable_worker_or_model_or_tool": { "type": "number" },
-        "derived_priority": { "type": "number" }
+        "gnn_tactic_prior": {
+          "type": "number"
+        },
+        "argument_probability": {
+          "type": "number"
+        },
+        "premise_relevance": {
+          "type": "number"
+        },
+        "pln_strength": {
+          "type": "number"
+        },
+        "pln_confidence": {
+          "type": "number"
+        },
+        "proof_number": {
+          "type": "integer"
+        },
+        "disproof_number": {
+          "type": "integer"
+        },
+        "depth": {
+          "type": "integer"
+        },
+        "estimated_execution_cost": {
+          "type": "number"
+        },
+        "state_novelty": {
+          "type": "number"
+        },
+        "transposition_count": {
+          "type": "integer"
+        },
+        "failure_family": {
+          "type": "string"
+        },
+        "dependency_centrality": {
+          "type": "number"
+        },
+        "expected_information_gain": {
+          "type": "number"
+        },
+        "verification_value": {
+          "type": "number"
+        },
+        "repeated_failure_risk": {
+          "type": "number"
+        },
+        "expected_theorem_impact": {
+          "type": "number"
+        },
+        "novelty_and_mechanism_diversity": {
+          "type": "number"
+        },
+        "formalization_readiness": {
+          "type": "number"
+        },
+        "estimated_cost": {
+          "type": "number"
+        },
+        "human_priority": {
+          "type": "number"
+        },
+        "availability_of_suitable_worker_or_model_or_tool": {
+          "type": "number"
+        },
+        "derived_priority": {
+          "type": "number"
+        }
       }
     }
   }

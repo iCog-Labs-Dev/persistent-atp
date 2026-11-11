@@ -72,18 +72,29 @@ expiry remain unusable.
 
 ### Global scheduler
 
-`GlobalScheduler.lease_next(proof_id, worker_class, ttl_seconds=600, actor=...)`
-uses the existing weighted scoring policy and worker preferences. Worker
-matching remains advisory, not a capability guarantee or a new eligibility
-restriction. The caller supplies the actual worker identity and checks that
-the selected task can be executed; results still go through `CommitGate`.
+For the outer coordinator, configure `GlobalScheduler` with an actor for each
+available worker class and call `lease_best_global_move(proof_id)`. It ranks
+research moves, formal targets, and critic tasks together, then binds the
+selected move to its required class (`llm-research`, `formal-atp`, or `critic`).
+Unavailable classes are excluded before ranking; a task cannot receive a
+lease for a different class merely because that class scored well. Ties use
+the move ID for a stable order. The resulting lease and lease-audit event
+record the chosen worker class and actor.
 
-Selection reads a snapshot plus unapplied journal events. `claim_next` reserves
-the highest-ranked free target atomically, without replacing a live assignment;
+`GlobalScheduler.lease_next(proof_id, worker_class, ttl_seconds=600, actor=...)`
+remains the lower-level, class-supplied interface for existing callers. Its
+worker matching is advisory; callers must verify they can execute the selected
+task. Results from either path still go through `CommitGate`.
+
+Selection reads a snapshot plus unapplied journal events. `claim_next` and
+`claim_best_routed` reserve the highest-ranked free target in one transaction,
+without replacing a live assignment;
 a declaration and its related runs share that reservation. Lease IDs survive
 restarts. A concurrent journal change raises `STALE_BASE_REVISION`; callers
 may retry selection. `None` means no eligible work is free, not proof completion.
-Release with `scheduler.release(proof_id, lease_id, fencing_token=...)`.
+Release with `scheduler.release(proof_id, lease_id, fencing_token=...)`. A `None`
+result from global routing can also mean that no configured worker is available;
+it never means the proof is complete.
 
 Node enumeration still requires a dictionary-backed snapshot. Backend-neutral
 MORK enumeration and worker execution remain outside this scheduler repair.

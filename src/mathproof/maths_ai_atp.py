@@ -25,11 +25,10 @@ prove raises            internal-error
 missing request fields  invalid-request
 ======================  =============================================
 
-``formal_search_resume`` hands the same goal back to the reasoner -- its
-Thompson-sampler state persists across calls, so a resumed run continues the
-search rather than restarting it blind. ``formal_replay`` delegates to an
-injected independent verifier. Without one, replay rejects the candidate
-instead of claiming verification.
+``formal_search_resume`` reports unsupported checkpoint continuation rather
+than restarting the initial search. ``formal_replay`` delegates to an injected
+runner; without independent replay the default rejects verification, and
+production mode rejects explicit stubs as well.
 """
 
 from __future__ import annotations
@@ -40,6 +39,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from commit_gate.vocab import ExecutorResult, NON_KERNEL_TACTICS, RunDisposition
+from commit_gate.canon import content_hash
 from mathproof.formal_atp import (
     FormalATPAdapter,
     ReplayFn,
@@ -51,6 +51,7 @@ from mathproof.formal_atp import (
     stub_replay,
 )
 from mathproof.schemas import validate as validate_schema
+from mathproof.witness import build_witness, certificate_id_for_result
 from mathproof.soundness import validate_formal_search_result
 
 __all__ = ["MathsAIFormalATP", "default_reasoner_factory"]
@@ -116,7 +117,7 @@ def _node_annotations(node: Any) -> dict[str, float]:
     return annotations
 
 
-def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
+def _kernel_proof_traces(graph: Any):
     """Construct complete Lean-only witnesses for solved nodes in an AND/OR graph.
 
     An edge witnesses its source only when Lean accepted it and every child
@@ -134,11 +135,11 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
         ):
             outgoing.setdefault(edge.source_id, []).append(edge)
 
-    witnesses: dict[int, tuple[dict[str, Any], frozenset[int]]] = {}
+    witnesses: dict[int, tuple[dict[str, Any], frozenset[int], dict]] = {}
 
     def trace_for(
         node_id: int, visiting: frozenset[int]
-    ) -> tuple[dict[str, Any], frozenset[int]] | None:
+    ) -> tuple[dict[str, Any], frozenset[int], dict] | None:
         if node_id in visiting or node_id not in graph.nodes:
             return None
         cached = witnesses.get(node_id)
@@ -150,6 +151,15 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
             if any(child is None for child in children):
                 continue
             child_witnesses = [child for child in children if child is not None]
+            selected = {node_id: edge}
+            compatible = True
+            for child in child_witnesses:
+                for member, selected_edge in child[2].items():
+                    if member in selected and selected[member] is not selected_edge:
+                        compatible = False
+                    selected[member] = selected_edge
+            if not compatible:
+                continue
             trace = {
                 "goal": str(graph.nodes[node_id].goal.expression),
                 "tactic": str(edge.tactic.tactic_name),
@@ -157,34 +167,29 @@ def _kernel_proof_traces(graph: Any) -> dict[int, dict[str, Any]]:
                 "subgoals": [child[0] for child in child_witnesses],
             }
             used = frozenset({node_id}).union(*(child[1] for child in child_witnesses))
-            witness = (trace, used)
+            witness = (trace, used, selected)
             witnesses[node_id] = witness
             return witness
         return None
 
     traces: dict[int, dict[str, Any]] = {}
+    selections = {}
     for node_id in graph.nodes:
         witness = trace_for(node_id, frozenset())
         if witness is not None:
             traces[node_id] = witness[0]
-    return traces
+            selections[node_id] = witness[2]
+    return traces, selections
 
 
-def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict[str, Any]:
+def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int, *, identity_namespace=None) -> dict[str, Any]:
     run_id = request["run_id"]
     proof_id = request["proof_id"]
     env_hash = request["environment_hash"]
 
-    state_ids = {node_id: f"{proof_id}/fs-{node_id + 1}" for node_id in graph.nodes}
-    kernel_traces = _kernel_proof_traces(graph)
-
-    parent_edges = {}
-    multi_child = set()
-    for edge in graph.edges.values():
-        for child_id in edge.child_ids:
-            parent_edges[child_id] = edge
-        if len(edge.child_ids) > 1:
-            multi_child.update(edge.child_ids)
+    offset = (int(content_hash(["formal-run-identities", identity_namespace]).split(":")[1], 16) << 32) if identity_namespace else 0
+    state_ids = {node_id: f"{proof_id}/fs-{offset + node_id + 1}" for node_id in graph.nodes}
+    kernel_traces, selections = _kernel_proof_traces(graph)
 
     states = []
     for node_id, node in graph.nodes.items():
@@ -196,17 +201,20 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
         states.append(
             build_state(
                 proof_id,
-                node_id + 1,
-                _goal_text(node.goal),
+                offset + node_id + 1,
+                str(node.goal.expression),
                 env_hash,
-                kind="and" if node_id in multi_child else "or",
+                local_context=[str(h) for h in (node.goal.hypotheses or [])],
+                kind="or",
                 status=status,
                 annotations=_node_annotations(node),
             )
         )
 
     tactic_edges = []
+    tactic_ids = {}
     for serial, edge in enumerate(graph.edges.values(), start=1):
+        tactic_ids[id(edge)] = f"{proof_id}/ta-{offset + serial}"
         tactic_name = str(edge.tactic.tactic_name)
         if tactic_name in NON_KERNEL_TACTICS:
             executor_result = ExecutorResult.EMPTY_OUTPUT.value
@@ -220,7 +228,7 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
         tactic_edges.append(
             build_tactic_edge(
                 proof_id,
-                serial,
+                offset + serial,
                 state_ids[edge.source_id],
                 executor_result,
                 len(edge.child_ids),
@@ -271,6 +279,9 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
             checkpoint={"epoch_ms": wall_ms, "frontier_state_ids": []},
             artifacts=[{"sha256": certificate_hash, "role": "certificate"}],
         )
+        result["certificate"]["witness"] = build_witness(
+            result, certificate_id_for_result(result),
+            {state_ids[node]: tactic_ids[id(edge)] for node, edge in selections[graph.root_id].items()})
         return result
 
     if graph.is_exhausted():
@@ -286,7 +297,7 @@ def _convert_graph(graph: Any, request: Mapping[str, Any], wall_ms: int) -> dict
             disposition=RunDisposition.STAGNATED.value,
             obstructions=[
                 {
-                    "obstruction_id": f"{proof_id}/obs-1",
+                    "obstruction_id": f"{proof_id}/obs-{offset + 1}",
                     "kind": "search-policy",
                     "formal_run_id": run_id,
                     "formal_state_ids": dead_state_ids,
@@ -312,12 +323,16 @@ class MathsAIFormalATP(FormalATPAdapter):
         reasoner: Any | None = None,
         reasoner_factory: Callable[[], Any] | None = None,
         replay_fn: ReplayFn | None = None,
+        production: bool = False,
     ):
         if reasoner is None and reasoner_factory is None:
             reasoner_factory = default_reasoner_factory
         self._reasoner = reasoner
         self._factory = reasoner_factory
+        # A missing replay implementation is never positive evidence. The
+        # reference fake remains available only by explicit injection.
         self._replay = replay_fn or stub_replay("rejected")
+        self._production = production
         self._latest: dict[str, Mapping[str, Any]] = {}
         self._requests: dict[str, Mapping[str, Any]] = {}
         self._cancelled: set[str] = set()
@@ -333,7 +348,7 @@ class MathsAIFormalATP(FormalATPAdapter):
             graph = asyncio.run(
                 self._get_reasoner().prove(
                     str(request["goal_text"]),
-                    hypotheses=list(request.get("hypotheses") or []),
+                    hypotheses=list(request.get("local_context", request.get("hypotheses")) or []),
                 )
             )
             wall_ms = int((time.monotonic() - started) * 1000)
@@ -371,6 +386,10 @@ class MathsAIFormalATP(FormalATPAdapter):
         return result
 
     def formal_search_start(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if self._production and (validate_schema("formal-search-request", request) or "goal_text" in request):
+            result = build_result(RunDisposition.INVALID_REQUEST.value, request)
+            result["artifacts"][0]["note"] = "production request must match the strict public schema; private goal compilation is unavailable"
+            return result
         missing = missing_request_fields(request)
         if not missing and not request.get("goal_text"):
             missing = ["goal_text"]
@@ -385,10 +404,11 @@ class MathsAIFormalATP(FormalATPAdapter):
     ) -> Mapping[str, Any]:
         if run_id in self._cancelled:
             return {"run_id": run_id, "disposition": "cancelled"}
-        request = self._requests.get(run_id)
-        if request is None:
-            return build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
-        return self._run_search(run_id, request)
+        # The backend exposes no checkpoint continuation. Re-running prove()
+        # from the original goal would misrepresent a fresh search as resume.
+        result = build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
+        result["artifacts"][0]["note"] = "unsupported-checkpoint-resume; start an explicit new run"
+        return result
 
     def formal_search_status(self, run_id: str) -> Mapping[str, Any]:
         latest = self._latest.get(run_id)
@@ -403,4 +423,7 @@ class MathsAIFormalATP(FormalATPAdapter):
     def formal_replay(
         self, certificate: Mapping[str, Any], environment_hash: str
     ) -> Mapping[str, Any]:
+        if self._production and not getattr(self._replay, "_independent_lean_replay", False):
+            return {"status": "rejected", "environment_hash": environment_hash,
+                    "rejection_reason": "independent-replay-required"}
         return self._replay(certificate, environment_hash)

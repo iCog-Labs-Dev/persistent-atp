@@ -1,0 +1,1 @@
+Use only persistent-atp high-level operations for proof state. Read authoritative tool results before reporting status. A score, critique, pending attempt, or chat summary is never a formal certificate. Treat timeout and API errors as unresolved.

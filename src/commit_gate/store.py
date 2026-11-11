@@ -4,7 +4,8 @@ The journal is the durability authority: an event is committed when it is here.
 Every mutation runs inside one `BEGIN IMMEDIATE` transaction, so reading the
 head and inserting its successor cannot interleave with another writer.
 
-Only the commit gate may call the mutating methods.
+Only the commit gate appends proof events. The trusted scheduler changes lease
+and lease-audit records without advancing the proof journal revision.
 """
 
 from __future__ import annotations
@@ -21,7 +22,10 @@ from .canon import GENESIS_HASH, canonical_json, chain_hash
 from .reasons import Reason
 from .vocab import WorkerClass
 
-__all__ = ["JournalStore", "ConcurrencyError", "HashChainError", "LeaseRow", "LeaseCandidate"]
+__all__ = [
+    "JournalStore", "ConcurrencyError", "HashChainError", "LeaseRow",
+    "LeaseCandidate", "RoutedLeaseCandidate",
+]
 
 
 class ConcurrencyError(Exception):
@@ -76,19 +80,32 @@ class LeaseCandidate:
     conflict_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class RoutedLeaseCandidate:
+    """A ranked move with the worker identity selected by trusted routing."""
+
+    move_id: str
+    score_snapshot: dict[str, float]
+    actor: str
+    worker_class: str
+    conflict_ids: tuple[str, ...] = ()
+
+
 class JournalStore:
     """A SQLite-backed append-only journal of proof events."""
 
     def __init__(
         self, db_path: str = ":memory:", busy_timeout_ms: int = 5000,
         *, clock_ns: Callable[[], int] = time.time_ns,
+        allow_cross_thread: bool = False,
     ):
         # Autocommit mode: `with conn:` begins no transaction when
         # isolation_level is None, so `_write` opens them explicitly.
         # `busy_timeout_ms` is how long a writer waits for the lock before
         # giving up; giving up is reported as a rejection, never a hang.
         self._conn = sqlite3.connect(
-            db_path, isolation_level=None, timeout=busy_timeout_ms / 1000
+            db_path, isolation_level=None, timeout=busy_timeout_ms / 1000,
+            check_same_thread=not allow_cross_thread,
         )
         self._clock_ns = clock_ns
         self._conn.row_factory = sqlite3.Row
@@ -268,6 +285,12 @@ class JournalStore:
             return 0, GENESIS_HASH
         return row["revision"], row["event_hash"]
 
+    def proof_ids(self) -> tuple[str, ...]:
+        """Proof scopes present in the immutable journal, for projection recovery."""
+        return tuple(row[0] for row in self._conn.execute(
+            "SELECT DISTINCT proof_id FROM journal ORDER BY proof_id"
+        ))
+
     @staticmethod
     def _validate_holder(actor: str, worker_class: str, ttl_seconds: float) -> str:
         if not isinstance(actor, str) or not actor.strip():
@@ -368,7 +391,31 @@ class JournalStore:
         describes committed state when the reservation is made.
         """
         worker_class = self._validate_holder(actor, worker_class, ttl_seconds)
+        return self.claim_best_routed(
+            proof_id,
+            [RoutedLeaseCandidate(
+                candidate.move_id, candidate.score_snapshot, actor, worker_class,
+                candidate.conflict_ids,
+            ) for candidate in candidates],
+            base_revision=base_revision,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def claim_best_routed(
+        self, proof_id: str, candidates: Sequence[RoutedLeaseCandidate], *,
+        base_revision: int, ttl_seconds: float = 600.0,
+        lease_id_hint: str | None = None,
+    ) -> LeaseRow | None:
+        """Atomically reserve the first free move from ranked, routed choices.
+
+        The trusted scheduler provides each move's class and actual actor.
+        Routing and busy-target selection stay outside the proof hash chain.
+        """
+        if lease_id_hint is not None and (not isinstance(lease_id_hint, str)
+                or not lease_id_hint.startswith(proof_id + "/ls-")):
+            raise ValueError("dispatch lease identity must be proof-scoped")
         for candidate in candidates:
+            self._validate_holder(candidate.actor, candidate.worker_class, ttl_seconds)
             if not candidate.move_id.startswith(f"{proof_id}/") or candidate.move_id == f"{proof_id}/":
                 raise ValueError("a dispatch lease needs a move in the proof namespace")
         with self._write() as conn:
@@ -398,8 +445,13 @@ class JournalStore:
                     (proof_id, f"{proof_id}/ls-{serial}"),
                 ).fetchone() is not None:
                     serial += 1
+                lease_id = lease_id_hint or f"{proof_id}/ls-{serial}"
+                if conn.execute("SELECT 1 FROM leases WHERE proof_id=? AND lease_id=?", (proof_id, lease_id)).fetchone():
+                    raise ConcurrencyError(Reason.FENCING_TOKEN_SUPERSEDED,
+                                           "dispatch intent already owns a lease generation")
                 return self._insert_lease(
-                    conn, proof_id, f"{proof_id}/ls-{serial}", actor, worker_class,
+                    conn, proof_id, lease_id,
+                    candidate.actor, candidate.worker_class,
                     candidate.move_id, revision, ttl_seconds, now_ns, "issued",
                     candidate.score_snapshot,
                 )
@@ -479,6 +531,12 @@ class JournalStore:
                 (proof_id,),
             ).fetchall()
         return [self._lease_row(row) for row in rows]
+
+    def read_lease(self, proof_id: str, lease_id: str) -> LeaseRow | None:
+        """Trusted recovery lookup; does not renew or mutate a lease generation."""
+        row = self._conn.execute("SELECT * FROM leases WHERE proof_id=? AND lease_id=?",
+                                 (proof_id, lease_id)).fetchone()
+        return self._lease_row(row) if row is not None else None
 
     def read_lease_events(self, proof_id: str) -> Sequence[dict[str, Any]]:
         """Lease history lives in the existing audit table, outside proof history."""
