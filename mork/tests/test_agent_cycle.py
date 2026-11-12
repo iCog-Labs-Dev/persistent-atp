@@ -56,6 +56,7 @@ def test_real_mork_agent_cycle():
             "moves": [{
                 "detail": "Check the successor case", "why_it_helps": "It completes induction",
                 "first_test": "Run Lean on the successor case", "technique_tag": "induction",
+                "unresolved_gap": "The successor case has not been established.",
                 "prerequisite_claim_ids": [f"{proof_id}/c-1"],
                 "subgoals": [{"statement": "Prove the successor step", "why_needed": "Induction step"}],
             }],
@@ -151,7 +152,7 @@ def test_real_mork_formalization_draft_and_alignment():
     assert view.projected_revision(proof_id) == store.head(proof_id)[0] == 3
     assert view.edges_from(f"{proof_id}/fd-1", "DRAFTS_CLAIM")[0].dst_id == f"{proof_id}/c-1"
     assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"
-    assert view.node(f"{proof_id}/c-1").fields["status"] == "provisional"
+    assert view.node(f"{proof_id}/c-1").fields["status"] == "critic-accepted"
 
 
 def test_real_mork_critic_action_records_statement_diagnostic():
