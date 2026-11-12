@@ -34,6 +34,193 @@ The context compiler only reads committed state. It does not write directly to
 the commit gate. Any result produced by a worker must later be submitted as a
 proposal through the commit gate.
 
+### Scheduler runtime integration
+
+For research work, the coordinator-facing entry point is
+`ResearchLeaseCompiler`. It owns the read view, journal, artifact source, and
+runtime policy, so callers cannot accidentally compile a lease against the
+wrong proof revision:
+
+```python
+from context_compiler import ResearchLeaseCompiler, ResearchRuntimeConfig
+
+compiler = ResearchLeaseCompiler(
+    view=commit_gate.view,
+    journal=commit_gate.store,
+    artifacts=artifact_store,
+    config=ResearchRuntimeConfig(
+        instructions="Advance the selected proof strategy.",
+        output_schema="Return a structured research result.",
+        tool_policy="Use only the supplied context and allowed tools.",
+    ),
+)
+
+lease = scheduler.lease_next(
+    proof_id,
+    "llm-research",
+    actor="research-worker-1",
+)
+if lease is not None:
+    dispatch = compiler.compile(lease)
+    worker_input = dispatch.worker_input
+```
+
+`compile()` performs the complete context handoff:
+
+1. verifies that the journal head still equals the lease's `base_revision`;
+2. combines the projected read view with any unapplied journal events;
+3. resolves the selected move's active state, required claims, and theorem;
+4. retrieves bounded graph and artifact context;
+5. compiles the research packet and provenance manifest;
+6. binds them to the lease ID and fencing token in `CompiledDispatch`.
+
+Compilation fails closed when the lease is stale, the graph identities are
+ambiguous, required context is missing or truncated, or the lease is not for an
+`llm-research` worker. The coordinator should discard or re-plan stale work; it
+must not silently compile against the latest revision.
+
+`CompiledDispatch` contains the worker-facing input together with the context
+packet, packet digest, selection manifest, lease identity, fencing token, and
+base revision. The coordinator is responsible for sending `worker_input` to the
+worker and persisting the digest/manifest with the run. Worker results should
+reference that digest and still pass the commit gate's revision and fencing
+checks before they can change proof state.
+
+The runtime boundary is intentionally independent of LangGraph. A LangGraph or
+other coordinator can invoke `ResearchLeaseCompiler.compile()` from its worker
+dispatch node without changing context selection semantics.
+
+Formal work uses the matching `FormalLeaseCompiler` boundary:
+
+```python
+from context_compiler import (
+    FormalLeaseCompiler,
+    FormalRuntimeConfig,
+)
+from context_compiler.formal import CheckpointPolicy, PremiseAccessibility
+from context_compiler.contracts import FormalExecutionLimits
+
+formal_compiler = FormalLeaseCompiler(
+    view=commit_gate.view,
+    journal=commit_gate.store,
+    artifacts=artifact_store,
+    config=FormalRuntimeConfig(
+        execution_limits=FormalExecutionLimits(500, 60_000),
+        accessibility=PremiseAccessibility(frozenset()),
+        checkpoint_policy=CheckpointPolicy(every_steps=100),
+        search_policy="best-first",
+    ),
+)
+
+dispatch = formal_compiler.compile(formal_lease)
+formal_search_request = dispatch.worker_input
+```
+
+For an existing `FormalRun`, this resolves its unique `SEARCHES`, `HAS_ROOT`,
+and `RAN_UNDER` relationships, validates the declaration, theorem claim, root
+state, and pinned environment, and returns the formal-search schema mapping as
+`worker_input`. Optional premise declarations are explicit configuration seeds;
+the compiler still filters them through `PremiseAccessibility` before use.
+
+The scheduler can also lease an aligned `FormalDeclaration` before its run
+exists. Such a declaration does not yet identify the run ID, root state, or
+execution environment required for a reproducible formal request. The runtime
+therefore raises `FormalRunPreparationRequired` instead of inventing those
+records. The coordinator must first commit the prepared `FormalRun`, root
+`FormalState`, environment pin, and their relationships, then schedule or
+compile that run.
+
+Formal failures use the `obstruction-task` scheduler category. A committed
+`Obstruction` becomes eligible when it has one `RAISED_OBSTRUCTION` source run,
+that run is `stagnated` or `counterexample`, it identifies formal states through
+`AT_STATE`, has one theorem `Claim` through `RESOLVES`, and the run identifies
+one environment through `RAN_UNDER`.
+
+The default consumer is the coordinator, but it is an explicit runtime policy:
+
+```python
+from context_compiler import (
+    ObstructionLeaseCompiler,
+    ObstructionRuntimeConfig,
+)
+
+obstruction_compiler = ObstructionLeaseCompiler(
+    view=commit_gate.view,
+    journal=commit_gate.store,
+    artifacts=artifact_store,
+    config=ObstructionRuntimeConfig(),
+)
+
+lease = scheduler.lease_next(
+    proof_id,
+    "coordinator",
+    actor="coordinator-1",
+)
+if lease is not None:
+    dispatch = obstruction_compiler.compile(lease)
+    obstruction_request = dispatch.worker_input
+```
+
+Compilation resolves the failed run, states, attempts, diagnostics, theorem,
+and pinned environment from the exact lease revision. It returns the
+obstruction schema mapping as `worker_input`, together with the complete text
+packet, digest, manifest, lease ID, and fencing token.
+
+An obstruction lease conflicts with its run, formal states, and sibling
+obstructions, preventing concurrent analysis of the same failure. Permanent
+completion is deliberately policy-owned: `GlobalScheduler` accepts an
+`obstruction_is_handled(view, obstruction_id)` predicate. Until the coordinator
+defines and persists its handled marker, the default predicate returns false,
+so releasing a lease can make the obstruction eligible again. This avoids
+inventing an unapproved obstruction lifecycle while keeping the final rule in
+one replaceable boundary.
+
+### Unified scheduler handoff
+
+`ContextLeaseCompiler` is the single integration point for coordinators and
+future LangGraph nodes. It routes from the selected committed graph label, so
+worker-class reuse cannot accidentally choose the wrong compiler:
+
+```python
+from context_compiler import ContextLeaseCompiler
+
+context_runtime = ContextLeaseCompiler(
+    view=commit_gate.view,
+    journal=commit_gate.store,
+    artifacts=artifact_store,
+    research=research_runtime_config,
+    formal=formal_runtime_config,
+    obstruction=obstruction_runtime_config,
+)
+
+dispatch = context_runtime.lease_and_compile(
+    scheduler,
+    proof_id,
+    requested_worker_class,
+    actor=worker_actor,
+)
+```
+
+Routing is explicit:
+
+| Selected graph label | Compiler |
+| --- | --- |
+| `ResearchMove` | research context compiler |
+| `FormalRun` | formal context compiler |
+| `FormalDeclaration` | formal preparation-required path |
+| `Obstruction` | obstruction context compiler |
+
+Other scheduler work, such as provisional-claim critic tasks, is rejected as
+unsupported by this context runtime instead of being sent to the wrong
+compiler.
+
+`lease_and_compile()` returns `None` when the scheduler is idle. A successfully
+compiled lease remains active because the worker result must carry its lease ID
+and fencing token. If context compilation fails before worker handoff, the
+method releases the lease immediately so malformed or incomplete work does not
+block the frontier until TTL expiry. The original compilation error remains the
+reported failure even if lease release also fails.
+
 
 
 ## Main concepts
