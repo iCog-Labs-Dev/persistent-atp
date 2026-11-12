@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the inspectable Gemini-to-MORK terminal workflow in test mode."""
+"""Run an inspectable Gemini-to-MORK workflow with real or test ATP."""
 
 from __future__ import annotations
 
@@ -37,12 +37,13 @@ def _default_lean_project() -> Path | None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run all real Gemini agents and real Lean/MORK with test-only ATP/replay."
+        description="Run Gemini agents and Lean/MORK with real or test ATP/replay."
     )
     parser.add_argument("--output-root", type=Path, default=REPO / "runs" / "all-agent")
     parser.add_argument("--run-id", help="optional artifact directory name; must not already exist")
     parser.add_argument("--lean-project", type=Path, default=_default_lean_project())
     parser.add_argument("--rounds", type=int, default=4)
+    parser.add_argument("--formal-atp-url", help="use the real Mathematics-AI HTTP API")
     parser.add_argument(
         "--statement",
         default="If you add zero to any natural number, you get the same number back.",
@@ -55,7 +56,7 @@ def _load_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def _assert_workflow(events: list[dict], result: dict) -> list[str]:
+def _assert_workflow(events: list[dict], result: dict, *, real_atp: bool) -> list[str]:
     if not any(
         event.get("event") == "run_started" and event.get("backend") == "mork"
         for event in events
@@ -71,8 +72,9 @@ def _assert_workflow(events: list[dict], result: dict) -> list[str]:
         if event.get("event") == "agent_response"
     ]
     expected = (
-        "llm-research", "critic", "formalizer", "alignment-reviewer",
-        "formal-atp", "replayer",
+        "llm-research", "critic", "formalizer", "alignment-reviewer", "formal-atp"
+    ) if real_atp else (
+        "llm-research", "critic", "formalizer", "alignment-reviewer", "formal-atp", "replayer"
     )
     missing = [
         worker for worker in expected
@@ -104,13 +106,13 @@ def _assert_workflow(events: list[dict], result: dict) -> list[str]:
         for event in responses
     ):
         raise RuntimeError("alignment reviewer did not approve the Lean declaration")
-    if not any(
+    if not real_atp and not any(
         event.get("worker_class") == "formal-atp"
         and event["response"].get("disposition") == "proved-pending-replay"
         for event in responses
     ):
         raise RuntimeError("test-mode formal ATP did not produce a candidate certificate")
-    if not any(
+    if not real_atp and not any(
         event.get("worker_class") == "replayer"
         and event["response"].get("verdict") == "verified"
         and event["response"].get("test_mode") is True
@@ -124,7 +126,7 @@ def _assert_workflow(events: list[dict], result: dict) -> list[str]:
     ]
     if not alignment_checks or alignment_checks[-1].get("statement_checked") is not True:
         raise RuntimeError("real Lean statement elaboration did not succeed")
-    if result.get("outcome") != "test-verified" or result.get("verification_mode") != "test":
+    if not real_atp and (result.get("outcome") != "test-verified" or result.get("verification_mode") != "test"):
         raise RuntimeError("workflow did not reach the explicitly test-verified outcome")
     return list(expected)
 
@@ -168,9 +170,10 @@ def main() -> int:
             result = run_proof(
                 journal, proof_id, rounds=args.rounds, backend="mork",
                 lean_project=args.lean_project.resolve(), event_sink=logger.emit,
-                run_id=logger.run_id, test_mode=True, log_agent_responses=True,
+                run_id=logger.run_id, test_mode=not bool(args.formal_atp_url),
+                formal_atp_url=args.formal_atp_url, log_agent_responses=True,
             )
-        agents = _assert_workflow(_load_events(log_file), result)
+        agents = _assert_workflow(_load_events(log_file), result, real_atp=bool(args.formal_atp_url))
     except Exception as exc:
         raise SystemExit(
             f"experiment failed: {exc}\nartifacts retained at {run_dir}"
@@ -183,6 +186,8 @@ def main() -> int:
         "verification_mode": result["verification_mode"],
         "verification_notice": (
             "TEST VERIFICATION ONLY: ATP and replay were faked; this is not a real Lean proof."
+            if not args.formal_atp_url else
+            "Real ATP used; only an independently accepted provider trace counts as verified."
         ),
         "proof_id": proof_id,
         "input_statement": args.statement,
