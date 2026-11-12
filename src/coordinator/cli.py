@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -100,7 +101,8 @@ def inspect(journal: Path, proof_id: str) -> dict:
         "verification_mode": (
             "test" if any(replay.fields.get("test_mode") is True for replay in replays)
             else "simulated" if any(replay.fields.get("simulated") is True for replay in replays)
-            else "replayed" if replays
+            else "replayed" if any(replay.fields.get("status") == "verified" for replay in replays)
+            else "replay-rejected" if replays
             else "not-replayed"
         ),
         "frontier": frontier_by_category(
@@ -123,6 +125,7 @@ def run_proof(
     fake_formal: bool = False,
     test_mode: bool = False,
     log_agent_responses: bool = False,
+    formal_atp_url: str | None = None,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -138,8 +141,10 @@ def run_proof(
         raise ValueError(f"unknown backend: {backend}")
     if lean_project is not None and not lean_project.is_dir():
         raise ValueError(f"Lean project does not exist: {lean_project}")
-    if fake_formal and test_mode:
-        raise ValueError("choose either --fake-formal or --test-mode, not both")
+    if sum(bool(option) for option in (fake_formal, test_mode, formal_atp_url)) > 1:
+        raise ValueError("choose one of --fake-formal, --test-mode, or --formal-atp-url")
+    if formal_atp_url and lean_project is None:
+        raise ValueError("real formal ATP requires --lean-project")
     if (fake_formal or test_mode) and lean_project is None:
         raise ValueError("fake formal execution requires --lean-project for environment pinning")
 
@@ -172,6 +177,31 @@ def run_proof(
                 test_mode=test_mode,
             )
             adapters.update({"formal-atp": fake, "replayer": fake})
+            slots = AGENT_PORTFOLIO
+        elif formal_atp_url:
+            from mathproof import maths_ai_http_atp
+
+            provider = maths_ai_http_atp(formal_atp_url)
+
+            class AwaitSearch:
+                def formal_search_start(self, request):
+                    result = provider.formal_search_start(request)
+                    deadline = time.monotonic() + 180
+                    while result["disposition"] == "searching":
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("formal ATP search is still running; inspect the provider run")
+                        time.sleep(1)
+                        result = provider.formal_search_status(request["run_id"])
+                    return result
+
+                def formal_search_resume(self, run_id):
+                    return provider.formal_search_resume(run_id)
+
+                def formal_replay(self, certificate, environment_hash):
+                    return provider.formal_replay(certificate, environment_hash)
+
+            adapter = AwaitSearch()
+            adapters.update({"formal-atp": adapter, "replayer": adapter})
             slots = AGENT_PORTFOLIO
         else:
             slots = tuple(
@@ -214,6 +244,8 @@ def run_proof(
         raise
     summary = inspect(journal, proof_id)
     outcome_reason = _outcome_reason(result["outcome"], result["tracks"])
+    if formal_atp_url and result["outcome"] == "halted":
+        outcome_reason = "no runnable work remains; inspect the journal and agent responses"
     reported_outcome = result["outcome"]
     if fake_formal and summary["verification_mode"] == "simulated":
         reported_outcome = "simulated-complete"
@@ -225,6 +257,9 @@ def run_proof(
         outcome_reason = (
             "test mode forced fake ATP and replay acceptance; no real Lean proof was verified"
         )
+    if formal_atp_url and summary["verification_mode"] == "replayed":
+        reported_outcome = "verified"
+        outcome_reason = "formal search and independent replay completed"
     output = {
         **summary,
         "outcome": reported_outcome,
@@ -280,6 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.add_argument("--rounds", type=int, default=3)
             command.add_argument("--backend", choices=("memory", "mork"), default="memory")
             command.add_argument("--lean-project", type=Path)
+            command.add_argument("--formal-atp-url", help="Mathematics-AI formal search API URL")
             command.add_argument(
                 "--fake-formal", action="store_true",
                 help="exercise fake ATP and replay; never reports a real verified proof",
@@ -318,6 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     fake_formal=args.fake_formal,
                     test_mode=args.test_mode,
                     log_agent_responses=args.log_agent_responses,
+                    formal_atp_url=args.formal_atp_url,
                 )
     except (ValueError, OSError, MorkUnavailable) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")

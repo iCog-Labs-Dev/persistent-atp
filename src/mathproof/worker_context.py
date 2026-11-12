@@ -399,13 +399,12 @@ def compile_formal_request(
         "base_revision": lease.base_revision,
         "lease_id": lease.lease_id,
         "fencing_token": lease.fencing_token,
-        "lean_source_artifact": (declaration.fields or {}).get(
-            "lean_value", (declaration.fields or {}).get("statement_source", "")
-        ),
+        "lean_source_artifact": (declaration.fields or {}).get("lean_source_artifact")
+        or content_hash((declaration.fields or {}).get("statement_source", "")),
         "environment_id": environment["environment_id"],
         "environment_hash": environment["environment_hash"],
         "goal_text": (declaration.fields or {}).get("lean_type", ""),
-        "search_policy": search_policy,
+        "search_policy": {"policy_name": search_policy, "deny_sorry": True},
     }
     if budget is not None:
         request["budget"] = dict(budget)

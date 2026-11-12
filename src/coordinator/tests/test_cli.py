@@ -308,3 +308,64 @@ def test_test_mode_reaches_terminal_path_without_claiming_real_verification(tmp_
     assert certificate.fields["test_mode"] is True
     assert replay.fields["status"] == "verified"
     assert replay.fields["test_mode"] is True
+
+
+def test_real_atp_registration_polls_and_records_exhaustion(tmp_path, monkeypatch):
+    from coordinator import cli
+    from mathproof.formal_atp import build_result
+    from mathproof.lean_statement import StatementCheck
+    from mathproof.schemas import validate
+
+    class Checked:
+        def __init__(self, project):
+            assert project == tmp_path
+
+        def check(self, lean_type, imports):
+            return StatementCheck(True, "elaborated")
+
+    class Provider:
+        def __init__(self):
+            self.request = None
+            self.polled = False
+
+        def formal_search_start(self, request):
+            self.request = request
+            return {
+                "run_id": request["run_id"], "proof_id": request["proof_id"],
+                "declaration_id": request["formal_declaration_id"],
+                "environment_hash": request["environment_hash"],
+                "disposition": "searching", "states": [], "tactic_edges": [],
+                "artifacts": [],
+            }
+
+        def formal_search_status(self, run_id):
+            assert run_id == self.request["run_id"]
+            self.polled = True
+            return build_result("stagnated", self.request)
+
+    provider = Provider()
+    monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
+    monkeypatch.setattr("mathproof.maths_ai_http_atp", lambda url: provider)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    write_lean_environment(tmp_path)
+    journal = tmp_path / "real-atp.sqlite"
+    proof_id = "real-atp"
+    initialize(journal, proof_id, "True", "Find a direct argument")
+    llm = MockLLMClient(responses=[
+        {"moves": [], "candidate_argument": {
+            "claim_id": f"{proof_id}/theorem", "argument": "True.intro proves True.",
+            "prerequisite_claim_ids": [],
+        }, "reasoning": "Direct argument"},
+        {"verdict": "supported", "reasoning": "Valid", "earliest_gap": None,
+         "repair": None, "evidence_ids": []},
+        {"lean_type": "True", "imports": ["Init"], "reasoning": "Literal"},
+        {"verdict": "aligned", "relation": "exact", "reasoning": "Same proposition"},
+    ])
+    result = run_proof(
+        journal, proof_id, rounds=3, backend="memory", lean_project=tmp_path,
+        llm=llm, formal_atp_url="http://localhost:8001",
+    )
+    assert provider.polled, repr(result["reports"][-1]["slots"])
+    assert validate("formal-search-request", provider.request) == []
+    assert result["verification_mode"] == "not-replayed"
+    assert result["outcome"] != "verified"

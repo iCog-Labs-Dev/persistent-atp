@@ -23,7 +23,7 @@
     "claim_id": {
       "type": "string",
       "description": "The research claim this search serves.",
-      "pattern": "^[^/]+/c-[1-9][0-9]*$"
+      "pattern": "^[^/]+/(c-[1-9][0-9]*|theorem)$"
     },
     "formal_declaration_id": {
       "type": "string",
