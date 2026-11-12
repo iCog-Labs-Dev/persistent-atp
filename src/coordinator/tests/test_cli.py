@@ -178,7 +178,7 @@ def test_research_argument_flows_to_critic_formalizer_and_alignment(tmp_path, mo
     view = MemoryView()
     project(view, JournalStore(str(journal)), proof_id)
     claim = view.node(f"{proof_id}/theorem")
-    assert claim.fields["status"] == "provisional"
+    assert claim.fields["status"] == "critic-accepted"
     assert claim.fields["argument"] == "True.intro is a direct witness of True."
     assert view.node(f"{proof_id}/at-1").fields["status"] == "supported"
     assert view.node(f"{proof_id}/fd-1").fields["status"] == "aligned"

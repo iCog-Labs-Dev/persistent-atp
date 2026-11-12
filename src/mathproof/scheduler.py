@@ -401,8 +401,16 @@ class GlobalScheduler:
                         ))
             if record.label == "FormalDeclaration" and record.fields.get("status") == DeclarationStatus.DRAFT.value:
                 drafted = [edge.dst_id for edge in view.edges_from(node_id, "DRAFTS_CLAIM")]
-                reviewed = bool(view.edges_to(node_id, "ALIGNS_DECLARATION"))
-                if len(drafted) == 1 and drafted[0] in nodes and not reviewed:
+                reviews = [
+                    view.node(edge.src_id)
+                    for edge in view.edges_to(node_id, "ALIGNS_DECLARATION")
+                ]
+                retryable = (
+                    len(reviews) < 2
+                    and all(review is not None and review.fields.get("lifecycle") == "review-needed"
+                            for review in reviews)
+                )
+                if len(drafted) == 1 and drafted[0] in nodes and retryable:
                     candidates.append(Candidate(
                         move_id=node_id,
                         category="alignment-task",
