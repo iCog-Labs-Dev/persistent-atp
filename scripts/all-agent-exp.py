@@ -44,6 +44,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lean-project", type=Path, default=_default_lean_project())
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--formal-atp-url", help="use the real Mathematics-AI HTTP API")
+    parser.add_argument("--artifact-db-url", help="PostgreSQL artifact store for real ATP")
     parser.add_argument(
         "--statement",
         default="If you add zero to any natural number, you get the same number back.",
@@ -172,6 +173,7 @@ def main() -> int:
                 lean_project=args.lean_project.resolve(), event_sink=logger.emit,
                 run_id=logger.run_id, test_mode=not bool(args.formal_atp_url),
                 formal_atp_url=args.formal_atp_url, log_agent_responses=True,
+                artifact_db_url=args.artifact_db_url,
             )
         agents = _assert_workflow(_load_events(log_file), result, real_atp=bool(args.formal_atp_url))
     except Exception as exc:

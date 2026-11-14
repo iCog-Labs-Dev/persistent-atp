@@ -6,8 +6,11 @@ import argparse
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
 
+from artifacts.errors import ArtifactStoreError
+from artifacts.hashing import hash_content
 from alignment.reviewer import LLMAlignmentReviewer
 from alignment.worker import AlignmentWorker
 from commit_gate.gate import CommitGate
@@ -126,6 +129,8 @@ def run_proof(
     test_mode: bool = False,
     log_agent_responses: bool = False,
     formal_atp_url: str | None = None,
+    artifact_db_url: str | None = None,
+    artifact_store=None,
 ) -> dict:
     """Run configured agents over one proof, then summarize journal state."""
     if rounds < 1:
@@ -155,6 +160,7 @@ def run_proof(
             raise ValueError("install the coordinator extra to run: uv sync --extra coordinator") from exc
         raise
     client = llm or GeminiLLMClient()
+    owned_artifacts = False
     handlers = {
         "llm-research": ResearchWorker(client).run,
         "critic": CriticWorker(client).run,
@@ -163,7 +169,28 @@ def run_proof(
     environment = None
     if lean_project is not None:
         environment = LeanEnvironment.discover(lean_project)
-        handlers["formalizer"] = FormalizerWorker(client).run
+        if formal_atp_url and artifact_store is None:
+            from artifacts.store import ArtifactStore
+            artifact_store = ArtifactStore(artifact_db_url)
+            owned_artifacts = True
+        if formal_atp_url:
+            try:
+                artifact_store.exists("sha256:" + "0" * 64)
+            except Exception:
+                if owned_artifacts:
+                    artifact_store.close()
+                raise
+        formalizer = FormalizerWorker(client)
+        if formal_atp_url:
+            def durable_formalizer(lease, packet):
+                result = formalizer.run(lease, packet)
+                result["lean_source_artifact"] = artifact_store.put(
+                    result["statement_source"].encode("utf-8")
+                )
+                return result
+            handlers["formalizer"] = durable_formalizer
+        else:
+            handlers["formalizer"] = formalizer.run
         adapters = {
             "alignment-reviewer": AlignmentWorker(
                 actor="alignment-reviewer",
@@ -181,11 +208,13 @@ def run_proof(
         elif formal_atp_url:
             from mathproof import maths_ai_http_atp
 
-            provider = maths_ai_http_atp(formal_atp_url)
+            from mathproof.worker_context import compile_formal_request
+
+            provider = maths_ai_http_atp(formal_atp_url, artifact_store=artifact_store)
 
             class AwaitSearch:
-                def formal_search_start(self, request):
-                    result = provider.formal_search_start(request)
+                @staticmethod
+                def _await_terminal(request, result):
                     deadline = time.monotonic() + 180
                     while result["disposition"] == "searching":
                         if time.monotonic() >= deadline:
@@ -194,10 +223,40 @@ def run_proof(
                         result = provider.formal_search_status(request["run_id"])
                     return result
 
+                @staticmethod
+                def _restore(run_id):
+                    lease = SimpleNamespace(
+                        proof_id=proof_id, selected_move_id=run_id,
+                        base_revision=0, lease_id="artifact-recovery", fencing_token=1,
+                    )
+                    request = compile_formal_request(lease, view)
+                    declaration = view.node(request["formal_declaration_id"])
+                    if declaration is None:
+                        raise ValueError("replay declaration is missing")
+                    source_bytes = declaration.fields["statement_source"].encode("utf-8")
+                    if (hash_content(source_bytes) != request["lean_source_artifact"]
+                            or artifact_store.get(request["lean_source_artifact"]) != source_bytes):
+                        raise ValueError("replay source differs from its committed artifact hash")
+                    provider.restore_run(request)
+                    return request
+
+                def formal_search_start(self, request):
+                    declaration = view.node(request["formal_declaration_id"])
+                    if declaration is None:
+                        raise ValueError("formal declaration is missing")
+                    source_bytes = declaration.fields["statement_source"].encode("utf-8")
+                    if (hash_content(source_bytes) != request["lean_source_artifact"]
+                            or artifact_store.get(request["lean_source_artifact"]) != source_bytes):
+                        raise ValueError("formal source differs from its committed artifact hash")
+                    result = provider.formal_search_start(request)
+                    return self._await_terminal(request, result)
+
                 def formal_search_resume(self, run_id):
-                    return provider.formal_search_resume(run_id)
+                    request = self._restore(run_id)
+                    return self._await_terminal(request, provider.formal_search_resume(run_id))
 
                 def formal_replay(self, certificate, environment_hash):
+                    self._restore(certificate["producer_run_id"])
                     return provider.formal_replay(certificate, environment_hash)
 
             adapter = AwaitSearch()
@@ -242,6 +301,9 @@ def run_proof(
                 "message": (" ".join(str(exc).split()) or type(exc).__name__)[:1000],
             })
         raise
+    finally:
+        if owned_artifacts:
+            artifact_store.close()
     summary = inspect(journal, proof_id)
     outcome_reason = _outcome_reason(result["outcome"], result["tracks"])
     if formal_atp_url and result["outcome"] == "halted":
@@ -316,6 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.add_argument("--backend", choices=("memory", "mork"), default="memory")
             command.add_argument("--lean-project", type=Path)
             command.add_argument("--formal-atp-url", help="Mathematics-AI formal search API URL")
+            command.add_argument("--artifact-db-url", help="PostgreSQL artifact store URL for real ATP")
             command.add_argument(
                 "--fake-formal", action="store_true",
                 help="exercise fake ATP and replay; never reports a real verified proof",
@@ -355,8 +418,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     test_mode=args.test_mode,
                     log_agent_responses=args.log_agent_responses,
                     formal_atp_url=args.formal_atp_url,
+                    artifact_db_url=args.artifact_db_url,
                 )
-    except (ValueError, OSError, MorkUnavailable) as exc:
+    except (ValueError, OSError, MorkUnavailable, ArtifactStoreError) as exc:
         parser.exit(1, f"{parser.prog}: {exc}\n")
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0

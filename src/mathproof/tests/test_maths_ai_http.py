@@ -1,8 +1,10 @@
 """Contract tests for the Mathematics-ai-atp HTTP translation adapter."""
 
 import unittest
+import os
 from unittest.mock import call, patch
 
+from artifacts.hashing import hash_content
 from mathproof.formal_atp import FormalATPAdapter
 from mathproof.maths_ai_http import MathsAIAPIError, MathsAIHTTPFormalATP
 from mathproof.schemas import validate
@@ -269,10 +271,74 @@ class TestMathsAIHTTPFormalATP(unittest.TestCase):
         atp = started_adapter()
         with patch.object(atp, "_call", return_value=snapshot(atp, "found", result=provider_result())):
             certificate = atp.formal_search_status(REQUEST["run_id"])["certificate"]
-        with patch.object(atp, "_call", return_value={"verified": True, "status": "verified"}):
+        with patch.object(atp, "_call", side_effect=[
+            {"verified": True, "status": "verified"},
+            snapshot(atp, "found", result=provider_result()),
+        ]):
             with self.assertRaisesRegex(MathsAIAPIError, "verification unavailable"):
                 atp.formal_replay(certificate, REQUEST["environment_hash"])
         self.assertEqual(atp._latest[REQUEST["run_id"]]["certificate"]["status"], "candidate")
+
+    def test_replay_loads_durable_trace_after_adapter_restart(self):
+        class Blobs:
+            def __init__(self):
+                self.data = {}
+
+            def put(self, content):
+                digest = hash_content(content)
+                self.data[digest] = content
+                return digest
+
+            def get(self, digest):
+                return self.data[digest]
+
+        db_url = os.environ.get("ARTIFACT_TEST_DB_URL")
+        if db_url:
+            from artifacts.store import ArtifactStore
+            blobs = ArtifactStore(db_url)
+        else:
+            blobs = Blobs()
+        first = MathsAIHTTPFormalATP("http://localhost:8000", artifact_store=blobs)
+        with patch.object(first, "_call", return_value=snapshot(first, "queued")):
+            first.formal_search_start(REQUEST)
+        with patch.object(first, "_call", return_value=snapshot(first, "found", result=provider_result())):
+            certificate = first.formal_search_status(REQUEST["run_id"])["certificate"]
+        self.assertEqual(hash_content(blobs.get(certificate["artifact_hash"])),
+                         certificate["artifact_hash"])
+
+        if db_url:
+            blobs.close()
+            blobs = ArtifactStore(db_url)
+
+        restarted = MathsAIHTTPFormalATP("http://localhost:8000", artifact_store=blobs)
+        with patch.object(restarted, "_call", return_value=snapshot(restarted, "found", result=provider_result())):
+            restored = restarted.restore_run(REQUEST)
+        self.assertEqual(restored["certificate"]["artifact_hash"], certificate["artifact_hash"])
+        verified = snapshot(restarted, "verified", result=provider_result())
+        with patch.object(restarted, "_call", side_effect=[
+            {"verified": True, "status": "verified"}, verified,
+        ]) as remote:
+            verdict = restarted.formal_replay(certificate, REQUEST["environment_hash"])
+        self.assertEqual(verdict["status"], "verified")
+        self.assertEqual(remote.call_args_list[0].args[:2], ("POST", "/formal-replay"))
+
+        if db_url:
+            import psycopg
+            original = blobs.get(certificate["artifact_hash"])
+            with psycopg.connect(db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE artifacts SET content = %s WHERE hash = %s",
+                                (b"tampered", certificate["artifact_hash"]))
+        else:
+            blobs.data[certificate["artifact_hash"]] = b"tampered"
+        with self.assertRaisesRegex(MathsAIAPIError, "artifact hash"):
+            restarted.formal_replay(certificate, REQUEST["environment_hash"])
+        if db_url:
+            with psycopg.connect(db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE artifacts SET content = %s WHERE hash = %s",
+                                (original, certificate["artifact_hash"]))
+            blobs.close()
 
     def test_replay_rejects_wrong_attested_environment_or_certificate(self):
         atp = started_adapter()

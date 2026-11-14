@@ -311,6 +311,7 @@ def test_test_mode_reaches_terminal_path_without_claiming_real_verification(tmp_
 
 
 def test_real_atp_registration_polls_and_records_exhaustion(tmp_path, monkeypatch):
+    from artifacts.hashing import hash_content
     from coordinator import cli
     from mathproof.formal_atp import build_result
     from mathproof.lean_statement import StatementCheck
@@ -344,8 +345,24 @@ def test_real_atp_registration_polls_and_records_exhaustion(tmp_path, monkeypatc
             return build_result("stagnated", self.request)
 
     provider = Provider()
+    class Blobs:
+        def __init__(self):
+            self.data = {}
+
+        def put(self, content):
+            digest = hash_content(content)
+            self.data[digest] = content
+            return digest
+
+        def exists(self, digest):
+            return digest in self.data
+
+        def get(self, digest):
+            return self.data[digest]
+
+    blobs = Blobs()
     monkeypatch.setattr(cli, "LeanStatementChecker", Checked)
-    monkeypatch.setattr("mathproof.maths_ai_http_atp", lambda url: provider)
+    monkeypatch.setattr("mathproof.maths_ai_http_atp", lambda url, **kwargs: provider)
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
     write_lean_environment(tmp_path)
     journal = tmp_path / "real-atp.sqlite"
@@ -363,9 +380,13 @@ def test_real_atp_registration_polls_and_records_exhaustion(tmp_path, monkeypatc
     ])
     result = run_proof(
         journal, proof_id, rounds=3, backend="memory", lean_project=tmp_path,
-        llm=llm, formal_atp_url="http://localhost:8001",
+        llm=llm, formal_atp_url="http://localhost:8001", artifact_store=blobs,
     )
     assert provider.polled, repr(result["reports"][-1]["slots"])
     assert validate("formal-search-request", provider.request) == []
+    assert provider.request["lean_source_artifact"] in blobs.data
+    view = MemoryView()
+    project(view, JournalStore(str(journal)), proof_id)
+    assert view.node(f"{proof_id}/fd-1").fields["lean_source_artifact"] == provider.request["lean_source_artifact"]
     assert result["verification_mode"] == "not-replayed"
     assert result["outcome"] != "verified"

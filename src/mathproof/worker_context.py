@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping
 
 from commit_gate.canon import content_hash
 from commit_gate.state import ReadView, belongs_to_proof
+from artifacts.hashing import hash_content
 from .actions import STATEMENT_CHECK, statement_check_action
 from .scheduler import Lease
 from .review_fingerprint import critic_input_digest
@@ -400,7 +401,7 @@ def compile_formal_request(
         "lease_id": lease.lease_id,
         "fencing_token": lease.fencing_token,
         "lean_source_artifact": (declaration.fields or {}).get("lean_source_artifact")
-        or content_hash((declaration.fields or {}).get("statement_source", "")),
+        or hash_content((declaration.fields or {}).get("statement_source", "").encode("utf-8")),
         "environment_id": environment["environment_id"],
         "environment_hash": environment["environment_hash"],
         "goal_text": (declaration.fields or {}).get("lean_type", ""),

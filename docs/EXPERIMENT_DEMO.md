@@ -128,6 +128,12 @@ To send the formalized proposition to a running Mathematics-AI API, pass its
 URL. The coordinator uses the merged HTTP adapter and records the provider's
 actual search result:
 
+Real ATP also requires a PostgreSQL artifact database. Create an empty database,
+set `ARTIFACT_DB_URL`, then apply the schema once with
+`PYTHONPATH=src .venv/bin/python -m artifacts.schema`. Lean source and candidate
+proof traces are stored there by content hash before the journal references
+them. Keep this database when continuing a proof after restarting the CLI.
+
 ```bash
 .venv/bin/python scripts/all-agent-exp.py \
   --formal-atp-url http://127.0.0.1:8001 \

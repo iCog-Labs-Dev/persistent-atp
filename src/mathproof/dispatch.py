@@ -112,6 +112,8 @@ def formalizer_result_to_ops(result: Mapping[str, Any], lease, view: ReadView) -
         "lean_name": result["lean_name"],
         "lean_type": result["lean_type"],
         "statement_source": result["statement_source"],
+        **({"lean_source_artifact": result["lean_source_artifact"]}
+           if result.get("lean_source_artifact") else {}),
         "imports": result["imports"],
         "namespace": result["namespace"],
         "reasoning": result["reasoning"],

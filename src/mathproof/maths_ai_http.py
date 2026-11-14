@@ -20,6 +20,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
+from artifacts.hashing import hash_content
+from artifacts.store import ArtifactStore
+from commit_gate.canon import canonical_json
 from commit_gate.vocab import NON_KERNEL_TACTICS, RunDisposition
 from mathproof.formal_atp import (
     FormalATPAdapter,
@@ -230,7 +233,8 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
     _RETRYABLE = frozenset({"interrupted", "failed", "cancelled"})
     _TERMINAL = frozenset({"found", "verified", "unsolved", "exhausted"})
 
-    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0,
+                 artifact_store: ArtifactStore | None = None):
         parsed = urlsplit(base_url)
         if (
             parsed.scheme not in {"http", "https"}
@@ -244,6 +248,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.artifact_store = artifact_store
         self._requests: dict[str, dict[str, Any]] = {}
         self._envelopes: dict[str, dict[str, Any]] = {}
         self._latest: dict[str, dict[str, Any]] = {}
@@ -363,7 +368,8 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 + json.dumps(diagnostic, sort_keys=True)
             )
 
-    def _translate(self, snapshot: Mapping[str, Any], run_id: str) -> dict[str, Any]:
+    def _translate(self, snapshot: Mapping[str, Any], run_id: str,
+                   *, restoring: bool = False) -> dict[str, Any]:
         request = self._requests[run_id]
         try:
             status = self._check_snapshot(snapshot, run_id)
@@ -406,7 +412,16 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
 
                 result = _convert_graph(graph, request, 0)
                 if graph.is_solved():
-                    certificate_hash = _digest("certificate", run_id, proof_trace)
+                    if self.artifact_store is not None:
+                        trace_bytes = canonical_json(proof_trace)
+                        certificate_hash = hash_content(trace_bytes)
+                        if restoring:
+                            if self.artifact_store.get(certificate_hash) != trace_bytes:
+                                raise MathsAIAPIError("stored proof trace differs from provider trace")
+                        elif self.artifact_store.put(trace_bytes) != certificate_hash:
+                            raise MathsAIAPIError("artifact store returned the wrong proof trace hash")
+                    else:
+                        certificate_hash = _digest("certificate", run_id, proof_trace)
                     result["certificate"]["artifact_hash"] = certificate_hash
                     result["artifacts"] = [
                         {"sha256": certificate_hash, "role": "certificate"}
@@ -484,6 +499,29 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         path = "/formal-search/" + quote(run_id, safe="/")
         return self._translate(self._call("GET", path), run_id)
 
+    def restore_run(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Recover a provider run from its journal-backed request after restart."""
+        if missing_request_fields(request) or validate_schema("formal-search-request", request):
+            raise MathsAIAPIError("cannot restore an invalid formal-search request")
+        run_id = str(request["run_id"])
+        if run_id in self._requests:
+            for field in ("environment_hash", "lean_source_artifact", "goal_text", "formal_declaration_id"):
+                if self._requests[run_id][field] != request[field]:
+                    raise MathsAIAPIError(f"restored run {field} differs from the active request")
+            return self._latest[run_id]
+        self._requests[run_id] = dict(request)
+        self._envelopes[run_id] = self._provider_envelope(request)
+        try:
+            snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
+            self._check_snapshot(snapshot, run_id)
+            self._admitted.add(run_id)
+            return self._translate(snapshot, run_id, restoring=True)
+        except Exception:
+            self._requests.pop(run_id, None)
+            self._envelopes.pop(run_id, None)
+            self._admitted.discard(run_id)
+            raise
+
     def formal_search_resume(
         self, run_id: str, budget: Mapping[str, Any] | None = None
     ) -> Mapping[str, Any]:
@@ -529,7 +567,16 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         latest_certificate = (self._latest.get(run_id) or {}).get("certificate") or {}
         if certificate.get("artifact_hash") != latest_certificate.get("artifact_hash"):
             raise MathsAIAPIError("certificate artifact does not match the stored proof trace")
-        proof_trace = self._proof_traces.get(run_id)
+        if self.artifact_store is not None:
+            trace_bytes = self.artifact_store.get(certificate["artifact_hash"])
+            if hash_content(trace_bytes) != certificate["artifact_hash"]:
+                raise MathsAIAPIError("stored proof trace does not match its artifact hash")
+            try:
+                proof_trace = json.loads(trace_bytes)
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise MathsAIAPIError("stored proof trace is not valid JSON") from exc
+        else:
+            proof_trace = self._proof_traces.get(run_id)
         if proof_trace is None:
             raise MathsAIAPIError("producer run has no replayable proof trace")
         payload = {
@@ -555,13 +602,18 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             }
         else:
             if body.get("verified") is True and body.get("status") == "verified":
-                if (body.get("run_id") != run_id
-                    or body.get("certificate_hash") != latest_certificate["artifact_hash"]
-                    or body.get("environment_hash") != environment_hash):
-                    raise MathsAIAPIError(
-                        "replay verification unavailable: provider did not attest "
-                        "the run, certificate, and actual environment"
-                    )
+                if all(key in body for key in ("run_id", "certificate_hash", "environment_hash")):
+                    if (body["run_id"] != run_id
+                        or body["certificate_hash"] != latest_certificate["artifact_hash"]
+                        or body["environment_hash"] != environment_hash):
+                        raise MathsAIAPIError("replay verification unavailable: attestation does not match the certificate")
+                else:
+                    snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
+                    if self._check_snapshot(snapshot, run_id) != "verified":
+                        raise MathsAIAPIError("replay verification unavailable: run is not verified")
+                    remote_trace = (snapshot.get("result") or {}).get("proof_trace")
+                    if hash_content(canonical_json(remote_trace)) != certificate["artifact_hash"]:
+                        raise MathsAIAPIError("replay verification unavailable: provider trace changed")
                 verdict = {"status": "verified", "environment_hash": environment_hash}
             elif body.get("verified") is False and body.get("status") == "rejected":
                 verdict = {
@@ -591,6 +643,8 @@ def maths_ai_http_atp(
     *,
     token: str | None = None,
     timeout: float = 30.0,
+    artifact_store: ArtifactStore | None = None,
 ) -> MathsAIHTTPFormalATP:
     """Build a Mathematics-ai-atp HTTP adapter."""
-    return MathsAIHTTPFormalATP(base_url, token=token, timeout=timeout)
+    return MathsAIHTTPFormalATP(base_url, token=token, timeout=timeout,
+                                artifact_store=artifact_store)
