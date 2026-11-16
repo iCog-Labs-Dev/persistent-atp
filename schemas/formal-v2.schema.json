@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:icog:formal-atp:2:gnn-slice-1",
+  "$ref": "#/$defs/start",
+  "$comment": "Provisional executable contract for issue 93. Consumers pin the SHA-256 of these exact bytes; this is not a released cross-team protocol.",
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "positive": {"type": "integer", "minimum": 1},
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "input": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind", "artifact_hash", "declaration", "starting_state"], "properties": {
+          "kind": {"const": "source"}, "artifact_hash": {"$ref": "#/$defs/hash"},
+          "declaration": {"type": "string", "minLength": 1},
+          "starting_state": {"const": "declaration-body"}
+        }},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "goal_text", "hypotheses", "universe_levels"], "properties": {
+          "kind": {"const": "goal"}, "goal_text": {"type": "string", "minLength": 1, "maxLength": 16000},
+          "hypotheses": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 8000}},
+          "universe_levels": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}}
+        }}
+      ]
+    },
+    "source": {"type": "object", "additionalProperties": false, "required": ["format", "prefix", "header", "declaration"], "properties": {
+      "format": {"const": "lean-declaration-v1"}, "prefix": {"type": "string", "maxLength": 1000000},
+      "header": {"type": "string", "minLength": 1, "maxLength": 100000},
+      "declaration": {"type": "string", "minLength": 1}
+    }},
+    "budget": {"type": "object", "additionalProperties": false, "required": ["max_steps", "wall_clock_ms"], "properties": {
+      "max_steps": {"$ref": "#/$defs/positive"}, "wall_clock_ms": {"$ref": "#/$defs/positive"},
+      "max_nodes": {"$ref": "#/$defs/positive"}, "max_depth": {"$ref": "#/$defs/positive"},
+      "model_calls": {"$ref": "#/$defs/positive"}, "top_k": {"$ref": "#/$defs/positive"}
+    }},
+    "backend": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {
+      "name": {"type": "string", "minLength": 1}, "profile": {"type": "string", "minLength": 1}
+    }},
+    "start": {"type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contract_hash", "proof_id", "claim_id", "formal_declaration_id", "run_id", "base_revision", "lease_id", "fencing_token", "environment_id", "environment_hash", "input", "budget"],
+      "properties": {
+        "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"},
+        "proof_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "claim_id": {"type": "string", "pattern": "^[^/]+/c-[1-9][0-9]*$"},
+        "formal_declaration_id": {"type": "string", "pattern": "^[^/]+/fd-[1-9][0-9]*$"},
+        "run_id": {"type": "string", "pattern": "^[^/]+/fr-[1-9][0-9]*$"},
+        "base_revision": {"$ref": "#/$defs/nonnegative"}, "lease_id": {"type": "string", "minLength": 1},
+        "fencing_token": {"$ref": "#/$defs/positive"}, "environment_id": {"type": "string", "minLength": 1},
+        "environment_hash": {"$ref": "#/$defs/hash"}, "input": {"$ref": "#/$defs/input"}, "budget": {"$ref": "#/$defs/budget"},
+        "backend": {"$ref": "#/$defs/backend"}, "deployment_id": {"type": "string", "minLength": 1},
+        "deployment_hash": {"$ref": "#/$defs/hash"},
+        "search_policy": {"type": "object", "additionalProperties": false, "required": ["deny_sorry"], "properties": {
+          "deny_sorry": {"const": true}, "max_tactic_steps": {"$ref": "#/$defs/positive"}
+        }}
+      }
+    },
+    "usage": {"type": "object", "additionalProperties": false, "required": ["tactic_steps", "model_calls", "wall_clock_ms", "has_unknown_costs"], "properties": {
+      "tactic_steps": {"$ref": "#/$defs/nonnegative"}, "model_calls": {"$ref": "#/$defs/nonnegative"},
+      "wall_clock_ms": {"$ref": "#/$defs/nonnegative"}, "has_unknown_costs": {"type": "boolean"}
+    }},
+    "resolved": {"type": "object", "additionalProperties": false, "required": ["backend", "profile", "deployment_id", "deployment_hash", "environment_id", "environment_hash", "budget"], "properties": {
+      "backend": {"type": "string"}, "profile": {"type": "string"}, "deployment_id": {"type": "string"},
+      "deployment_hash": {"$ref": "#/$defs/hash"}, "environment_id": {"type": "string"},
+      "environment_hash": {"$ref": "#/$defs/hash"}, "budget": {"$ref": "#/$defs/budget"}
+    }},
+    "snapshot": {"type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contract_hash", "run_id", "request_hash", "request", "attempt", "status", "disposition", "termination_reason", "resolved", "usage", "input_artifact_hash", "certificate_hash", "report_artifact_hash", "error"],
+      "properties": {
+        "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"},
+        "run_id": {"type": "string"}, "request_hash": {"$ref": "#/$defs/hash"}, "request": {"$ref": "#/$defs/start"},
+        "attempt": {"$ref": "#/$defs/positive"},
+        "status": {"enum": ["queued", "running", "cancelling", "stopped"]},
+        "disposition": {"enum": ["searching", "proved-pending-replay", "budget-exhausted", "stagnated", "invalid-request", "environment-error", "internal-error", "cancelled"]},
+        "termination_reason": {"type": ["string", "null"]}, "resolved": {"$ref": "#/$defs/resolved"}, "usage": {"$ref": "#/$defs/usage"},
+        "input_artifact_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "certificate_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "report_artifact_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "error": {"type": ["string", "null"]}
+      },
+      "allOf": [
+        {"if": {"properties": {"disposition": {"const": "proved-pending-replay"}}}, "then": {"properties": {
+          "status": {"const": "stopped"}, "certificate_hash": {"$ref": "#/$defs/hash"}, "input_artifact_hash": {"$ref": "#/$defs/hash"}, "report_artifact_hash": {"$ref": "#/$defs/hash"}
+        }}},
+        {"if": {"properties": {"status": {"enum": ["queued", "running", "cancelling"]}}}, "then": {"properties": {"disposition": {"const": "searching"}, "certificate_hash": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "stopped"}}}, "then": {"properties": {"disposition": {"not": {"const": "searching"}}}}}
+      ]
+    },
+    "operation": {"type": "object", "additionalProperties": false, "required": ["protocol_version", "contract_hash", "operation_id", "request_hash", "attempt"], "properties": {
+      "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"}, "operation_id": {"type": "string", "minLength": 1, "maxLength": 128},
+      "request_hash": {"$ref": "#/$defs/hash"}, "attempt": {"$ref": "#/$defs/positive"}
+    }},
+    "certificate": {"type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contract_hash", "run_id", "attempt", "request_hash", "formal_declaration_id", "input_artifact_hash", "environment_hash", "deployment_hash", "steps"],
+      "properties": {
+        "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"}, "run_id": {"type": "string"}, "attempt": {"$ref": "#/$defs/positive"},
+        "request_hash": {"$ref": "#/$defs/hash"}, "formal_declaration_id": {"type": "string"}, "input_artifact_hash": {"$ref": "#/$defs/hash"},
+        "environment_hash": {"$ref": "#/$defs/hash"}, "deployment_hash": {"$ref": "#/$defs/hash"},
+        "steps": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "replay": {"type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contract_hash", "replay_id", "run_id", "request_hash", "certificate_hash", "input_artifact_hash", "environment_hash", "budget"],
+      "properties": {
+        "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"}, "replay_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "run_id": {"type": "string"}, "request_hash": {"$ref": "#/$defs/hash"}, "certificate_hash": {"$ref": "#/$defs/hash"},
+        "input_artifact_hash": {"$ref": "#/$defs/hash"}, "environment_hash": {"$ref": "#/$defs/hash"},
+        "budget": {"type": "object", "additionalProperties": false, "required": ["wall_clock_ms"], "properties": {"wall_clock_ms": {"$ref": "#/$defs/positive"}}}
+      }
+    },
+    "receipt": {"type": "object", "additionalProperties": false,
+      "required": ["protocol_version", "contract_hash", "replay_id", "run_id", "request_hash", "certificate_hash", "input_artifact_hash", "source_artifact_hash", "environment_hash", "actual_environment_hash", "status", "verdict", "reason", "usage", "verification_artifact_hash"],
+      "properties": {
+        "protocol_version": {"const": 2}, "contract_hash": {"$ref": "#/$defs/hash"}, "replay_id": {"type": "string"}, "run_id": {"type": "string"},
+        "request_hash": {"$ref": "#/$defs/hash"}, "certificate_hash": {"$ref": "#/$defs/hash"}, "input_artifact_hash": {"$ref": "#/$defs/hash"},
+        "environment_hash": {"$ref": "#/$defs/hash"}, "status": {"enum": ["queued", "running", "stopped"]},
+        "actual_environment_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "source_artifact_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "verdict": {"enum": [null, "verified", "rejected", "inconclusive"]}, "reason": {"type": ["string", "null"]},
+        "usage": {"type": "object", "additionalProperties": false, "required": ["wall_clock_ms", "has_unknown_costs"], "properties": {
+          "wall_clock_ms": {"$ref": "#/$defs/nonnegative"}, "has_unknown_costs": {"type": "boolean"}
+        }},
+        "verification_artifact_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {"if": {"properties": {"status": {"enum": ["queued", "running"]}}}, "then": {"properties": {"verdict": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "stopped"}}}, "then": {"properties": {"verdict": {"enum": ["verified", "rejected", "inconclusive"]}}}},
+        {"if": {"properties": {"verdict": {"const": "verified"}}}, "then": {"properties": {
+          "status": {"const": "stopped"}, "verification_artifact_hash": {"$ref": "#/$defs/hash"},
+          "source_artifact_hash": {"$ref": "#/$defs/hash"}, "actual_environment_hash": {"$ref": "#/$defs/hash"},
+          "usage": {"properties": {"has_unknown_costs": {"const": false}}}
+        }}}
+      ]
+    }
+  }
+}
