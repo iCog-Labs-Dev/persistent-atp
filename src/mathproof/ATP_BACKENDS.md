@@ -1,5 +1,17 @@
 # Formal ATP backends
 
+## Current Mathematics-ai-atp v2 integration
+
+Use `FormalV2HTTPATP` for PR94's strict v2 provider, together with
+`FormalRuntimeConfig(protocol_version=2)` and the lease-bound helpers in
+`mathproof.formal_v2_admission`. V2 lifecycle calls return admission/status
+envelopes; `result()` exposes validated canonical evidence after settlement.
+Replay has an explicit separate allowance and frontier resume is unsupported.
+See [`schemas/FORMAL_V2.md`](../../schemas/FORMAL_V2.md) for request compilation,
+durable recovery and commit-gate admission.
+
+The five-call adapters documented below retain their legacy wire contracts.
+
 The coordinator uses the five methods on `FormalATPAdapter`. Its canonical
 request and result formats remain the JSON schemas under `schemas/`; provider
 APIs are translated at the adapter boundary.
