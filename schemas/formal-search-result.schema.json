@@ -77,15 +77,21 @@
           ]
         },
         "producer_run_id": { "type": "string" },
+        "binding_artifact_hash": { "$ref": "#/$defs/sha256" },
         "replay_result": {
           "description": "Attached only after independent replay (6.11).",
           "type": "object",
           "additionalProperties": false,
           "required": ["status"],
+          "allOf": [{
+            "if": {"properties": {"status": {"enum": ["verified", "rejected"]}}},
+            "then": {"properties": {"environment_hash": {"$ref": "#/$defs/sha256"}}}
+          }],
           "properties": {
-            "status": { "enum": ["verified", "rejected"] },
-            "environment_hash": { "$ref": "#/$defs/sha256" },
-            "rejection_reason": { "type": "string" }
+            "status": { "enum": ["verified", "rejected", "inconclusive"] },
+            "environment_hash": { "type": "string" },
+            "rejection_reason": { "type": "string" },
+            "attestation_artifact_hash": { "$ref": "#/$defs/sha256" }
           }
         }
       }
@@ -106,6 +112,10 @@
           "note": { "type": "string" }
         }
       }
+    },
+    "provider": {
+      "type": "object",
+      "description": "Validated v2 admission and cumulative budget metadata; this is not a saved search frontier."
     },
     "budget_used": {
       "type": "object",

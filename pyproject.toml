@@ -60,3 +60,9 @@ testpaths = [
 
 [tool.uv.sources]
 mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }
+
+[tool.setuptools.package-data]
+mathproof = ["contracts/formal-v2/manifest.json", "contracts/formal-v2/schemas/*.json"]
+
+[tool.setuptools.data-files]
+"share/persistent-atp/schemas" = ["schemas/*.schema.json"]
