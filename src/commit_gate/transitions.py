@@ -152,9 +152,9 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
         {"lean_name", "lean_type", "lean_value", "module_path", "universe_level"}
     ),
     "FormalRun": frozenset({"actor", "start_time", "environment_hash"}),
-    "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash"}),
+    "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash", "binding_artifact_hash"}),
     "LeanReplay": frozenset(
-        {"actor", "replayed_at", "status", "sorry_detected", "rejection_reason", "environment_hash", "certificate_id", "artifact_hash"}
+        {"actor", "replayed_at", "status", "sorry_detected", "rejection_reason", "environment_hash", "certificate_id", "artifact_hash", "attestation_artifact_hash"}
     ),
     "Obstruction": frozenset({"kind", "description", "actor"}),
     "Proof": frozenset({"actor"}),

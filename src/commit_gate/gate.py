@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .apply import apply_ops
+from .artifact_refs import check_artifact_references
 from .proposal import Proposal
 from .reasons import Reason, Rejection
 from .state import JournalOverlayView, ProjectionView, ReadView
@@ -84,9 +85,10 @@ class CommitGate:
     brought current for validation by the journal overlay.
     """
 
-    def __init__(self, view: ReadView, store: JournalStore):
+    def __init__(self, view: ReadView, store: JournalStore, *, artifacts=None):
         self._view = view
         self._store = store
+        self._artifacts = artifacts
         self._projection = view if isinstance(view, ProjectionView) else None
         # Reentrant: `commit` calls `validate`, which takes it again.
         self._lock = threading.RLock()
@@ -194,9 +196,9 @@ class CommitGate:
                 f"journal events cannot be replayed for validation: {exc}",
             )]
         try:
-            return validate_proposal(
-                proposal, JournalOverlayView(snapshot, head_revision, ops)
-            )
+            committed = JournalOverlayView(snapshot, head_revision, ops)
+            return (validate_proposal(proposal, committed)
+                    + check_artifact_references(proposal, committed, self._artifacts))
         except Exception as exc:
             return [Rejection(
                 Reason.READ_VIEW_OUT_OF_SYNC,
