@@ -43,8 +43,26 @@ def test_provider_certificate_commits_rebuilds_and_replays_after_restart(tmp_pat
     journal = JournalStore(journal_path)
     token = journal.acquire_lease('example', 'lease', actor='worker', worker_class='formal-atp')
     fields = {**result['certificate'], 'actor':'worker', 'environment_hash':request['environment_hash']}
+    ops = [UpsertNode('FormalState', state['state_id'],
+                      {k: v for k, v in state.items() if k != 'state_id'})
+           for state in result['states']]
+    ops.extend(UpsertNode('TacticApplication', edge['tactic_id'],
+                          {k: v for k, v in edge.items()
+                           if k not in {'tactic_id', 'source_state_id', 'produced_goal_ids'}})
+               for edge in result['tactic_edges'])
+    for index, edge in enumerate(result['tactic_edges']):
+        ops.append(AddEdge('HAS_TACTIC', edge['source_state_id'], edge['tactic_id'],
+                           f'example/e-tactic-{index}'))
+        for child_index, child in enumerate(edge['produced_goal_ids']):
+            ops.append(AddEdge('FORMAL_REQUIRES', edge['tactic_id'], child,
+                               f'example/e-child-{index}-{child_index}',
+                               {'child_index': child_index}))
+        if not edge['produced_goal_ids']:
+            ops.append(AddEdge('CLOSES_STATE', edge['tactic_id'], edge['source_state_id'],
+                               f'example/e-closes-{index}'))
+    ops.append(UpsertNode('Certificate', 'example/cert-1', fields))
     proposal = Proposal(proof_id='example', actor='worker', worker_class='formal-atp',
-                        ops=(UpsertNode('Certificate','example/cert-1', fields),),
+                        ops=tuple(ops),
                         base_revision=0, lease_id='lease', fencing_token=token)
     gate = CommitGate(MemoryView(), journal, artifacts=artifacts)
     outcome = gate.commit(proposal)
@@ -56,8 +74,17 @@ def test_provider_certificate_commits_rebuilds_and_replays_after_restart(tmp_pat
     rebuilt = MemoryView()
     for event in restarted_journal.read_events_between('example',0,1):
         apply_ops(rebuilt, Proposal.from_dict(event).ops)
+    assert rebuilt.node(result['root_state_id']).label == 'FormalState'
+    for edge in result['tactic_edges']:
+        assert rebuilt.node(edge['tactic_id']).label == 'TacticApplication'
+        required = rebuilt.edges_from(edge['tactic_id'], 'FORMAL_REQUIRES')
+        assert {e.dst_id for e in required} == set(edge['produced_goal_ids'])
     certificate = dict(rebuilt.node('example/cert-1').fields)
     reopened = DiskArtifacts(tmp_path/'blobs')
+    binding = json.loads(reopened.get(certificate['binding_artifact_hash']))
+    raw_root = binding['snapshot']['result']['root_state_id']
+    assert raw_root.startswith(f"{request['run_id']}/attempt-1/fs-")
+    assert raw_root != result['root_state_id']
     restarted = MathsAIHTTPFormalATP('http://localhost:8000', artifacts=reopened)
     with patch.object(restarted, '_call', return_value=attestation(request,run)):
         assert restarted.formal_replay(certificate, request['environment_hash'])['status'] == 'verified'

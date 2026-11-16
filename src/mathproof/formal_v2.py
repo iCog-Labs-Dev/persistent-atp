@@ -9,8 +9,8 @@ from typing import Protocol
 from jsonschema import Draft202012Validator, validators
 
 CONTRACT_DIR = Path(__file__).parent / "contracts" / "formal-v2"
-PROVIDER_COMMIT = "b781c86125b84727c41293b3ca0a160add1fc418"
-MANIFEST_HASH = "sha256:5d65eb6f1c7fb66ec9fc1c40831b9389eb9d1726ba3c90a1cdbf975f9110e404"
+PROVIDER_COMMIT = "947a98a30eb30b869009d130e5d7bf7fecbb7644"
+MANIFEST_HASH = "sha256:780199744f9c3b8a41ec9843f4707ee3a9f3bec46a44c20f8d1379a85995df76"
 
 
 class ArtifactRepository(Protocol):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -260,14 +261,18 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
 
     @staticmethod
     def _scope_graph(result, request, attempt):
-        # The provider numbers fs/ta from 1 for every attempt. Give those
-        # provider-local ids stable, disjoint identities in our shared graph.
+        # Provider ids include their run and attempt. Validate that binding
+        # before mapping them into persistent-ATP's flat fs/ta id grammar.
+        scope = f"{request['run_id']}/attempt-{attempt}"
         def ids(records, field, prefix):
             original = [r[field] for r in records]
             if len(set(original)) != len(original):
                 raise MathsAIAPIError(f"duplicate provider {field}")
             if any(not i.startswith(request["proof_id"] + "/") for i in original):
                 raise MathsAIAPIError("provider graph crosses proof scopes")
+            pattern = re.escape(scope) + rf"/{prefix}-[1-9][0-9]*"
+            if any(re.fullmatch(pattern, i) is None for i in original):
+                raise MathsAIAPIError("provider graph ids do not match the run and attempt")
             return {i: f"{request['proof_id']}/{prefix}-{int(content_hash([request['run_id'], attempt, i])[7:], 16) or 1}"
                     for i in original}
         states = ids(result["states"], "state_id", "fs")

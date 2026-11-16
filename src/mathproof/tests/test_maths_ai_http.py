@@ -327,11 +327,26 @@ def test_real_http_transport_uses_binary_artifacts_and_v2_routes():
     assert next(raw for _,p,raw in calls if p == '/formal-artifacts').startswith(b'import Mathlib')
 
 
+def rebind_graph_ids(result, run_id, attempt):
+    """Give a constructed graph the provider coordinates of its test run."""
+    def identity(value):
+        return f"{run_id}/attempt-{attempt}/{value.rsplit('/', 1)[-1]}"
+    result['root_state_id'] = identity(result['root_state_id'])
+    for state in result['states']:
+        state['state_id'] = identity(state['state_id'])
+    for edge in result['tactic_edges']:
+        edge['tactic_id'] = identity(edge['tactic_id'])
+        edge['source_state_id'] = identity(edge['source_state_id'])
+        edge['produced_goal_ids'] = [identity(i) for i in edge['produced_goal_ids']]
+
+
 def test_provider_local_graph_ids_are_stable_and_disjoint_between_runs_and_attempts():
     atp, request, result, run, _ = proved('source')
     baseline = deepcopy(run['result'])
     other = deepcopy(request); other['run_id'] = 'example/fr-2'
     first, second, third = deepcopy(baseline), deepcopy(baseline), deepcopy(baseline)
+    rebind_graph_ids(second, other['run_id'], 1)
+    rebind_graph_ids(third, request['run_id'], 2)
     atp._scope_graph(first, request, 1)
     atp._scope_graph(second, other, 1)
     atp._scope_graph(third, request, 2)
@@ -386,3 +401,26 @@ def test_recorded_terminal_nonproof_outcomes_stay_nonproof(name):
     assert result['disposition'] == run['disposition']
     assert 'certificate' not in result
     assert 'checkpoint' not in result
+
+
+@pytest.mark.parametrize('coordinate', ['run', 'attempt'])
+@pytest.mark.parametrize('kind', ['state', 'tactic'])
+def test_provider_graph_cannot_belong_to_another_run_or_attempt(coordinate, kind):
+    atp, request, admission, run, remote, call, transport = setup_adapter('source')
+    with patch.object(atp, '_call', side_effect=call):
+        atp.formal_search_start(request)
+    result = run['result']
+    other_run = 'example/fr-2' if coordinate == 'run' else request['run_id']
+    other_attempt = 2 if coordinate == 'attempt' else run['attempts']
+    if kind == 'state':
+        rebind_graph_ids(result, other_run, other_attempt)
+    else:
+        for edge in result['tactic_edges']:
+            local = edge['tactic_id'].rsplit('/', 1)[-1]
+            edge['tactic_id'] = f'{other_run}/attempt-{other_attempt}/{local}'
+    # Shape validation alone accepts these ids. They must also match this run.
+    assert validate('formal-run', run) == []
+    with patch.object(atp, '_call', return_value=run), patch.object(atp, '_transport', side_effect=transport):
+        with pytest.raises(MathsAIAPIError, match='run and attempt'):
+            atp.formal_search_status(request['run_id'])
+    assert 'certificate' not in atp._latest[request['run_id']]

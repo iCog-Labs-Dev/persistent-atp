@@ -60,17 +60,17 @@ The in-process legacy reasoner adapter does not implement this service contract.
 The nine runtime schemas and original upstream manifest are vendored under
 `mathproof/contracts/formal-v2/`:
 
-- Provider commit: `b781c86125b84727c41293b3ca0a160add1fc418`.
+- Provider commit: `947a98a30eb30b869009d130e5d7bf7fecbb7644`.
 - SHA-256 of the exact `manifest.json` bytes:
-  `sha256:5d65eb6f1c7fb66ec9fc1c40831b9389eb9d1726ba3c90a1cdbf975f9110e404`.
+  `sha256:780199744f9c3b8a41ec9843f4707ee3a9f3bec46a44c20f8d1379a85995df76`.
 - The manifest and schema hashes are verified before validation. The manifest
   also lists upstream files that are intentionally omitted from the runtime.
 - All 30 recorded examples are kept as separate files under
   `fixtures/formal_v2/examples/`; tests verify their original hashes and index.
   These scripted examples establish wire shapes, rather than native Lean or
   deployment readiness.
-- [Resolution rules](https://github.com/iCog-Labs-Dev/Mathematics-ai-atp/blob/b781c86125b84727c41293b3ca0a160add1fc418/contracts/formal-v2/rules.md)
-  and [backend capabilities](https://github.com/iCog-Labs-Dev/Mathematics-ai-atp/blob/b781c86125b84727c41293b3ca0a160add1fc418/contracts/formal-v2/capabilities.md)
+- [Resolution rules](https://github.com/Leul-Negash/Mathematics-ai-atp/blob/947a98a30eb30b869009d130e5d7bf7fecbb7644/contracts/formal-v2/rules.md)
+  and [backend capabilities](https://github.com/Leul-Negash/Mathematics-ai-atp/blob/947a98a30eb30b869009d130e5d7bf7fecbb7644/contracts/formal-v2/capabilities.md)
   remain in the pinned upstream package.
 
 ### Configuration and requests
@@ -138,8 +138,10 @@ terminal run, with its remaining allowance. A changed budget is refused.
 The result explicitly reports `frontier_resume: false`; no MCTS/PUCT frontier
 continuation is claimed and no synthetic checkpoint is produced.
 
-The provider numbers exported states and tactics from 1 in each attempt. The adapter maps
-those ids to positive decimal ids derived from run id, attempt and provider id.
+The provider scopes exported states and tactics to the run and attempt, for
+example `proof/fr-1/attempt-2/fs-1`. The adapter checks that every id belongs
+to the result's run and attempt before mapping it to a positive decimal id
+derived from the run id, attempt and provider id.
 This preserves the existing `proof/fs-N` and `proof/ta-N` grammar while avoiding
 collisions between attempts. The original graph is retained in the binding
 artifact; certificate bytes and hashes are copied unchanged.
