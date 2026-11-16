@@ -45,14 +45,27 @@ def release(store, value):
     store.release_lease(value.proof_id, value.lease_id, fencing_token=value.fencing_token)
 
 
-def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_kind", ["frozen", "mcts"])
+def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tmp_path_factory, monkeypatch, provider_kind):
     native = pytest.importorskip("maths_ai.formal.tests.test_frozen_native")
-    provider_path = tmp_path / "provider"
-    provider_path.mkdir()
-    fixture = native.native.__wrapped__(provider_path)
-    http, env_hash, _ = next(fixture)
+    if provider_kind == "mcts":
+        trained = pytest.importorskip("maths_ai.formal.tests.test_trained_http")
+        fixture = trained.trained_http.__wrapped__(tmp_path_factory)
+        endpoint = next(fixture)
+        wire_client = FormalV2HTTPATP(endpoint, timeout=90)
+        cap = wire_client.capabilities()["deployments"]["mcts"]
+        env_hash, provider_env_id = cap["environment_hash"], cap["environment_id"]
+        http = None
+    else:
+        provider_path = tmp_path / "provider"
+        provider_path.mkdir()
+        fixture = native.native.__wrapped__(provider_path)
+        http, env_hash, _ = next(fixture)
+        provider_env_id = "init-4.10-rc1"
     try:
         def transport(method, path, payload=None, *, raw=False, data=None):
+            if http is None:
+                return wire_client._call(method, path, payload, raw=raw, data=data)
             response = http.request(method, path, json=payload, content=data)
             if response.status_code >= 400:
                 raise FormalV2Error(response.text, status_code=response.status_code)
@@ -72,7 +85,7 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, mo
             UpsertNode("Claim", "native/c-1", {"status": "provisional"}),
             UpsertNode("FormalDeclaration", "native/fd-1", {"status": "searching", "lean_name": "Demo.goal",
                 "lean_source_artifact": source_hash}),
-            UpsertNode("Environment", "native/env-1", {"environment_hash": env_hash, "provider_environment_id": "init-4.10-rc1"}),
+            UpsertNode("Environment", "native/env-1", {"environment_hash": env_hash, "provider_environment_id": provider_env_id}),
             UpsertNode("FormalRun", "native/fr-1", {"status": "searching", "actor": "searcher", "environment_hash": env_hash}),
             UpsertNode("Alignment", "native/al-1", {"actor": "seed", "lifecycle": "reviewed", "verdict": "aligned"}),
             AddEdge("SEARCHES", "native/fr-1", "native/fd-1", "native/e-search"),
@@ -87,8 +100,11 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, mo
         body = native.request(env_hash, input={"kind": "source", "artifact_hash": source_hash,
             "declaration": "Demo.goal", "starting_state": "binders-introduced"})
         body.update(base_revision=worker.base_revision, lease_id=worker.lease_id, fencing_token=worker.fencing_token)
+        if provider_kind == "mcts":
+            body.update(environment_id=provider_env_id, deployment_id="mcts", backend={"name": "mcts-actor-critic", "profile": "puct"},
+                        budget={"max_steps": 128, "wall_clock_ms": 60000})
         search.formal_search_start(body)
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
         while search.result(body["run_id"]) is None:
             assert time.monotonic() < deadline
             time.sleep(.03)
@@ -108,11 +124,17 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, mo
         release(store, worker)
 
         checker = lease(store, "checker", "replayer", cert)
-        independent = FormalV2HTTPATP("http://fixture", timeout=60)
+        independent = FormalV2HTTPATP("http://fixture", timeout=90)
+        replay_wall = 60000 if provider_kind == "mcts" else 15000
         monkeypatch.setattr(independent, "_call", transport)
+        if provider_kind == "mcts":
+            independent.restore(search.binding(body["run_id"]))
+            limited = independent.submit_replay(body["run_id"], max_steps=1, wall_clock_ms=replay_wall)
+            assert limited["status"] == "inconclusive", limited
+            assert limited["verification_cost"]["tactic_steps"] == 1
         with pytest.raises(FormalV2Error, match="independent replayer"):
             replay_proposal(independent, replace(checker, actor="searcher"), committed(), artifacts,
-                            certificate_id=cert, max_steps=32, wall_clock_ms=15000)
+                            certificate_id=cert, max_steps=32, wall_clock_ms=replay_wall)
         def missing_audit(*args, **kwargs):
             value = transport(*args, **kwargs)
             if args[1] == "/formal-replay":
@@ -120,11 +142,11 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, mo
             return value
         monkeypatch.setattr(independent, "_call", missing_audit)
         with pytest.raises(FormalV2Error, match="no-sorry"):
-            replay_proposal(independent, checker, committed(), artifacts, certificate_id=cert, max_steps=32, wall_clock_ms=15000)
+            replay_proposal(independent, checker, committed(), artifacts, certificate_id=cert, max_steps=32, wall_clock_ms=replay_wall)
         assert committed().node(cert).fields["status"] == "replay-pending"
         monkeypatch.setattr(independent, "_call", transport)
         checked = replay_proposal(independent, checker, committed(), artifacts,
-                                  certificate_id=cert, max_steps=32, wall_clock_ms=15000)
+                                  certificate_id=cert, max_steps=32, wall_clock_ms=replay_wall)
         outcome = gate.commit(checked)
         assert outcome.accepted, outcome.to_dict()
         assert committed().node(cert).fields["status"] == "replay-accepted"
