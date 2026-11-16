@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
 from shared.vocab import (
@@ -307,6 +307,20 @@ class TranspositionEntry:
 
 
 @dataclass(frozen=True)
+class FormalV2Selection:
+    """Explicit provider deployment and input mode, owned by the coordinator."""
+
+    deployment_id: str
+    backend: str
+    profile: str
+    input_kind: str
+    universe_levels: tuple[str, ...] = ()
+    proposal_mode: str | None = None
+    seed: int | None = None
+    provider_environment_id: str | None = None
+
+
+@dataclass(frozen=True)
 class FormalRequestPayload:
     proof_id: str
     task_id: str
@@ -367,6 +381,51 @@ class FormalRequestPayload:
             policy["max_tactic_steps"] = self.max_tactic_steps
         request["search_policy"] = policy
         request["budget"] = dict(self.limits)
+        return request
+
+    def to_v2_schema_dict(self, *, deployment_id: str, backend: str,
+                          profile: str, input_kind: str,
+                          universe_levels: tuple[str, ...] = (),
+                          proposal_mode: str | None = None,
+                          seed: int | None = None,
+                          provider_environment_id: str | None = None) -> dict[str, Any]:
+        """Export the explicit source/goal union for the maths-AI v2 service.
+
+        Choose input_kind deliberately: a source failure must never fall back
+        to a different text goal. The adapter resolves source bytes by hash.
+        """
+        request = self.to_schema_dict()
+        request.pop("lean_source_artifact")
+        request.pop("goal_text")
+        if provider_environment_id is not None:
+            request["environment_id"] = provider_environment_id
+        if input_kind == "source":
+            if not self.lean_name:
+                raise ContextValidationError("v2 source input requires the declaration's lean_name")
+            if self.lean_source_artifact == self.declaration_hash:
+                raise ContextValidationError("v2 source input requires a stored Lean source artifact; the declaration record hash is not source bytes")
+            request["input"] = {"kind": "source", "artifact_hash": self.lean_source_artifact,
+                                "declaration": self.lean_name,
+                                "starting_state": "binders-introduced"}
+        elif input_kind == "goal":
+            request["input"] = {"kind": "goal", "goal_text": self.root_state["goal_text"],
+                                "hypotheses": list(self.root_state.get("hypotheses", ())),
+                                "universe_levels": list(universe_levels)}
+        else:
+            raise ContextValidationError("v2 input_kind must be source or goal")
+        request.update(protocol_version=2, deployment_id=deployment_id,
+                       backend={"name": backend, "profile": profile})
+        if proposal_mode is not None:
+            request["backend"]["proposal_mode"] = proposal_mode
+        if seed is not None:
+            request["backend"]["seed"] = seed
+        request["search_policy"].pop("max_tactic_steps", None)
+        if self.max_tactic_steps is not None:
+            request["budget"]["max_steps"] = min(request["budget"]["max_steps"], self.max_tactic_steps)
+        from mathproof.formal_v2 import validate
+        errors = validate("formal-search-request", request)
+        if errors:
+            raise ContextValidationError("invalid v2 request: " + "; ".join(errors))
         return request
 
     def to_context_dict(self) -> dict[str, Any]:
@@ -537,6 +596,7 @@ def compile_formal(
     accessibility: PremiseAccessibility,
     *,
     context_limits: FormalContextLimits | None = None,
+    v2_selection: FormalV2Selection | None = None,
     compiler_version: str = DEFAULT_COMPILER_VERSION,
     rendering_version: str = DEFAULT_RENDERING_VERSION,
 ) -> FormalCompilation:
@@ -833,6 +893,7 @@ def compile_formal(
         "source_hash": root.ref.content_hash,
     }
     for optional_key in (
+        "hypotheses",
         "kind",
         "context_digest",
         "environment_id",
@@ -884,7 +945,8 @@ def compile_formal(
     )
 
     envelope = {
-        "request": payload.to_schema_dict(),
+        "request": (payload.to_schema_dict() if v2_selection is None
+                    else payload.to_v2_schema_dict(**asdict(v2_selection))),
         "context": payload.to_context_dict(),
     }
     packet = ContextPacket(

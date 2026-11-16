@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from commit_gate.state import ReadView
 from shared.vocab import WorkerClass
@@ -19,6 +20,7 @@ from .formal import (
     CheckpointPolicy,
     CorpusManifest,
     FormalTask,
+    FormalV2Selection,
     ModelBundle,
     PremiseAccessibility,
     compile_formal,
@@ -52,8 +54,11 @@ class FormalRuntimeConfig:
     max_depth: int = 4
     max_nodes: int = 300
     require_complete_retrieval: bool = True
+    v2_selection: FormalV2Selection | None = None
 
     def __post_init__(self) -> None:
+        if self.v2_selection is not None and not isinstance(self.v2_selection, FormalV2Selection):
+            raise ContextValidationError("v2_selection must be FormalV2Selection")
         if not isinstance(self.execution_limits, FormalExecutionLimits):
             raise ContextValidationError(
                 "execution_limits must be FormalExecutionLimits"
@@ -234,9 +239,10 @@ def compile_formal_for_lease(
         task,
         config.accessibility,
         context_limits=config.context_limits,
+        v2_selection=config.v2_selection,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,
         compilation=compilation,
-        worker_input=compilation.payload.to_schema_dict(),
+        worker_input=json.loads(compilation.packet.content)["request"],
     )
