@@ -31,7 +31,7 @@ real-atp = [
 package-dir = {"" = "src", "mork" = "mork"}
 
 [tool.setuptools.data-files]
-"share/persistent-atp/schemas" = ["schemas/formal-v2.schema.json"]
+"share/persistent-atp/schemas" = ["schemas/*.schema.json"]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

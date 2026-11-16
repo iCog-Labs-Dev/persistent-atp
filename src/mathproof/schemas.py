@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -18,6 +19,8 @@ from referencing.jsonschema import DRAFT202012
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS_DIR = REPO_ROOT / "schemas"
+if not SCHEMAS_DIR.is_dir():
+    SCHEMAS_DIR = Path(sys.prefix) / "share/persistent-atp/schemas"
 
 __all__ = ["SCHEMAS_DIR", "load_schema", "validator_for", "validate"]
 
