@@ -349,8 +349,13 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         # Keep admission/accounting available without claiming a saved search frontier.
         result["provider"] = {k: deepcopy(v) for k, v in snapshot.items() if k not in {"result", "replays"}}
         result["provider"]["frontier_resume"] = False
+        # Replay history grows after search finishes. Attestations have their
+        # own artifacts; they must not change the immutable candidate binding.
+        binding_snapshot = deepcopy(snapshot)
+        if "replays" in binding_snapshot:
+            binding_snapshot["replays"] = []
         binding = self._put(canonical_json({"format": "persistent-atp-formal-v2-binding-v1",
-                                           "request": request, "snapshot": snapshot}))
+                                           "request": request, "snapshot": binding_snapshot}))
         if result.get("certificate"):
             result["certificate"]["binding_artifact_hash"] = binding
         self._requests[request["run_id"]] = deepcopy(request)

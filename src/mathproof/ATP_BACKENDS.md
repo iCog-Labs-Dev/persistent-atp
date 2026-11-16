@@ -160,8 +160,11 @@ canonical JSON and the run/input/source/environment bindings of the certificate
 and admitted-input manifest. A storage failure emits no candidate certificate.
 
 The local binding artifact stores the original v2 request and validated provider
-snapshot. Persist `binding_artifact_hash` alongside the Certificate's
-`artifact_hash`, `producer_run_id` and `environment_hash` in the journal proposal.
+search snapshot. Mutable replay history is excluded from its hash; each replay
+attestation is stored separately. This keeps the binding stable when a new
+client restores the run after replay. Persist `binding_artifact_hash` alongside
+the Certificate's `artifact_hash`, `producer_run_id` and `environment_hash` in
+the journal proposal.
 The binding field is immutable. Configure the same artifact repository on
 CommitGate: it verifies certificate, binding, input and source bytes before
 commit, and checks replay attestation availability when promoting a claim.

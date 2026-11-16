@@ -424,3 +424,17 @@ def test_provider_graph_cannot_belong_to_another_run_or_attempt(coordinate, kind
         with pytest.raises(MathsAIAPIError, match='run and attempt'):
             atp.formal_search_status(request['run_id'])
     assert 'certificate' not in atp._latest[request['run_id']]
+
+
+def test_restoring_run_after_replay_preserves_certificate_binding_hash():
+    atp, request, original, run, remote = proved('source')
+    # A real provider adds these summaries after independent replay. That
+    # mutable history must not change an immutable certificate binding.
+    run['replays'] = [{'replay': 1, 'status': 'verified'}]
+    assert validate('formal-run', run) == []
+    restarted = MathsAIHTTPFormalATP('http://localhost:8000', artifacts=atp.artifacts)
+    with patch.object(restarted, '_call', return_value=run), patch.object(restarted, '_fetch_artifact', side_effect=remote.get):
+        restored = restarted.restore_run(request)
+    assert restored['certificate']['artifact_hash'] == original['certificate']['artifact_hash']
+    assert restored['certificate']['binding_artifact_hash'] == original['certificate']['binding_artifact_hash']
+    assert restarted._snapshots[request['run_id']]['replays'] == run['replays']
