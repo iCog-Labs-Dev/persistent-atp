@@ -70,3 +70,13 @@ def test_v2_scheduler_dispatch_matches_the_hashed_packet():
     assert dispatch.worker_input["budget"]["max_steps"] == 50
     assert dispatch.worker_input["base_revision"] == lease.base_revision
     assert dispatch.worker_input["fencing_token"] == lease.fencing_token
+
+
+def test_provider_environment_id_is_distinct_from_proof_graph_node_id():
+    args = list(make())
+    args[2].bodies[DECL]["lean_name"] = "Demo.goal"
+    args[2].bodies["env-1"]["provider_environment_id"] = "mathlib-4.10-rc1"
+    out = compile_formal(*args, protocol_version=2)
+    body = json.loads(out.packet.content)["request"]
+    assert body["environment_id"] == "mathlib-4.10-rc1"
+    assert out.payload.environment["environment_id"] == "env-1"

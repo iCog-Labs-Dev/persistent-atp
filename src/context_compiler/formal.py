@@ -380,6 +380,7 @@ class FormalRequestPayload:
         request["search_policy"] = policy
         request["budget"] = dict(self.limits)
         if protocol_version == 2:
+            request["environment_id"] = self.environment.get("provider_environment_id") or self.environment["environment_id"]
             request.pop("lean_source_artifact")
             request.pop("goal_text")
             request["protocol_version"] = 2
@@ -910,6 +911,8 @@ def compile_formal(
         root_state=root_state,
         environment={
             "environment_id": environment.ref.source_id,
+            **({"provider_environment_id": environment.body["provider_environment_id"]}
+               if environment.body.get("provider_environment_id") is not None else {}),
             "environment_hash": env_hash,
             "lake_manifest_hash": environment.body.get("lake_manifest_hash"),
             "mathlib_commit": environment.body.get("mathlib_commit"),

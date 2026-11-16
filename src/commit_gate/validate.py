@@ -1171,6 +1171,15 @@ def _certificate_binding_issue(
         return Reason.CERTIFICATE_BINDING_INCOMPLETE, "producing run is not linked to certificate"
     if _edge_targets_after(proposal, view, run_id, "SEARCHES") != {declaration_id}:
         return Reason.CERTIFICATE_BINDING_INCOMPLETE, "run did not search certified declaration"
+    if cert.get("protocol_version") == 2:
+        declaration = _fields_after(declaration_id, created, proposal, view) or {}
+        for field in ("request_digest", "input_artifact_hash", "source_artifact_hash"):
+            if not _is_sha256(cert.get(field)) or run.get(field) != cert.get(field):
+                return Reason.CERTIFICATE_BINDING_INCOMPLETE, f"v2 {field} is not bound to the producing run"
+        if declaration.get("lean_source_artifact") != cert["source_artifact_hash"]:
+            return Reason.CERTIFICATE_BINDING_INCOMPLETE, "v2 certificate source differs from current declaration"
+        if cert.get("input_kind") == "source" and declaration.get("lean_name") != cert.get("source_declaration"):
+            return Reason.CERTIFICATE_BINDING_INCOMPLETE, "v2 certificate changed the source declaration locator"
 
     pinned = _edge_targets_after(proposal, view, declaration_id, "PINNED_ENVIRONMENT")
     if len(pinned) != 1:
@@ -1219,6 +1228,14 @@ def _promotion_environment_issue(
     return None
 
 
+def _v2_replay_matches(cert, replay):
+    if cert is None or cert.get("protocol_version") != 2:
+        return True
+    return replay is not None and replay.get("protocol_version") == 2 and all(
+        replay.get(field) == cert.get(field) for field in ("request_digest", "input_artifact_hash", "source_artifact_hash")
+    ) and replay.get("run_id") == cert.get("producer_run_id")
+
+
 def check_replay_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
     """A REPLAYED_BY assertion must name the replay's one checked certificate."""
     created = _created_fields(proposal, view)
@@ -1234,6 +1251,7 @@ def check_replay_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejecti
             or not _is_sha256(replay.get("artifact_hash"))
             or replay.get("artifact_hash") != cert.get("artifact_hash")
             or sources != {op.src_id}
+            or not _v2_replay_matches(cert, replay)
         ):
             yield Rejection(
                 Reason.REPLAY_BINDING_MISMATCH,
@@ -1298,6 +1316,7 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                         and fields.get("artifact_hash") != cert_fields.get("artifact_hash")
                     )
                     or not _is_sha256(fields.get("artifact_hash"))
+                    or not _v2_replay_matches(cert_fields, fields)
                 ):
                     continue
                 actor = fields.get("actor")
