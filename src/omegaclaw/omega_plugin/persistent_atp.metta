@@ -1,4 +1,22 @@
 ; Base catalogue: exactly nine string-argument tools. No workers call MeTTa.
+; The loader imports into this plugin's space on every reload. Remove old
+; function definitions as well as catalogue entries, so one tool call cannot
+; execute several compiled copies of the wrapper.
+!(collapse (match &plugin-persistent_atp (= $signature $body)
+   (remove-atom &plugin-persistent_atp (= $signature $body))))
+
+; Restore declarations before compiling callbacks and wrapper bodies.
+!(import_prolog_function proof-create)
+!(import_prolog_function proof-cycle)
+!(import_prolog_function proof-status)
+!(import_prolog_function proof-audit)
+!(import_prolog_function proof-export)
+!(import_prolog_function formal-search)
+!(import_prolog_function formal-resume)
+!(import_prolog_function statement-align)
+!(import_prolog_function lemma-bridge)
+!(import_prolog_function persistent-atp-collect-results)
+
 (= (loadOmegaPlugin)
    (let* (($enabled (configGetByKey persistentAtpEnabled disabled))
           ($workspace (configGetByKey persistentAtpWorkspace reference)))

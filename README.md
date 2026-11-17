@@ -51,8 +51,18 @@ uv run python scripts/omegaclaw-install-omega.py --omega-root /path/to/PeTTa/rep
 The installer preserves the plugin catalogue and patches the launcher's import.
 For bare PeTTa, run that generated launcher from the PeTTa directory. The added
 import shim checks the provisioned checkout's exact Git revision and never
-fetches another runtime. Keep its `.git` metadata available; a metadata-free
-image needs an independently pinned build and its own verified launcher.
+fetches another runtime. The installer checks the Git revision and unchanged
+core sources, then writes a SHA-256 build manifest covering the runtime and
+installed overlay. The launcher validates those bytes even when `.git` is
+removed. The immutable image/build remains the trust anchor; the manifest is
+not a signature.
+
+To export a container overlay, supply `--bundle-dir /path/to/context` and
+`--base-image registry/omega@sha256:<digest>` to the installer. The generated
+Dockerfile preserves the base image's entrypoint, checks its PeTTa revision and
+Python dependencies, copies the sealed overlay and patched launcher, and
+verifies the runtime manifest. Use an approved Omega base image pinned by its
+full digest; container execution also requires receiver connectivity.
 
 The plugin is disabled by default. Set `OMEGA_persistentAtpEnabled=enabled`
 and configure the same workspace alias in `OMEGA_persistentAtpWorkspace` and
@@ -68,6 +78,13 @@ export destinations are registered aliases.
 Keep `PERSISTENT_ATP_OMEGA_STATE` across agent restarts. Prepared requests,
 operation references, event cursors, and unacknowledged notifications are
 reconciled with the receiver. This cache grants no proof or admission authority.
+Heartbeat resumes waiting work after capacity returns and drains remaining
+event pages after execution finishes. Uncertain delivery uses SDK request
+lookup before any resubmission. `PERSISTENT_ATP_OMEGA_RETRY_LIMIT` bounds attempts;
+`PERSISTENT_ATP_OMEGA_RETRY_BASE_SECONDS` sets exponential backoff, capped at
+30 seconds. Exhausted or permanent errors stop automatic dispatch and preserve
+the request for review. Stale-state errors include refreshed authoritative
+status; they do not silently change a prepared request or theorem semantics.
 `PERSISTENT_ATP_OMEGA_MAX_CYCLES` bounds coordinator cycle attempts per proof;
 the receiver remains responsible for execution budgets and leases.
 

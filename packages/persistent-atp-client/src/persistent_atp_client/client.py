@@ -122,6 +122,30 @@ class AsyncClient:
                                request_id=request_id, deadline=deadline)
         return await self.submit(request)
 
+    async def reconcile(self, request: ActionRequest, *, timeout: float = 30.0) -> "OperationHandle":
+        """One recovery pass: lookup first, resubmit only on authoritative absence.
+
+        Hosts checkpoint the prepared request and schedule bounded passes. This
+        method owns admission validation and never generates a replacement ID.
+        A failed lookup must not be treated as absence.
+        """
+        if self._closed:
+            raise RuntimeError("client is closed")
+        if not isinstance(request, ActionRequest):
+            raise TypeError("reconcile requires a prepared ActionRequest")
+        _duration(timeout, "timeout")
+        end = time.monotonic() + timeout
+        try:
+            receipt = await _before(self.lookup_request(workspace_id=request.workspace_id, request_id=request.request_id), end)
+            if receipt is None:
+                return await _before(self.submit(request), end)
+        except TimeoutError as exc:
+            raise SubmissionUncertain("reconciliation timed out; retain the original request", request=request) from exc
+        _admission(receipt, request.workspace_id, request.request_id, fingerprint(request))
+        if not receipt.accepted:
+            raise AdmissionRejected(receipt)
+        return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
+
     async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
         return await self.submit_action(ProofCreate(spec_artifact), workspace_id=workspace_id, **request_options)
 
@@ -381,6 +405,9 @@ class SyncClient:
 
     def submit(self, request):
         return self._run(self._client.submit(request))
+
+    def reconcile(self, request, **kwargs):
+        return self._run(self._client.reconcile(request, **kwargs))
 
     def status(self, **kwargs):
         return self._run(self._client.status(**kwargs))

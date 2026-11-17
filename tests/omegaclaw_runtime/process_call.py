@@ -33,12 +33,30 @@ metadata = Path(omega_root) / ".git"
 hidden_metadata = Path(omega_root) / ".git-hidden"
 metadata.rename(hidden_metadata)
 try:
+    execute(expression)  # Sealed images do not need Git metadata at runtime.
+    core = Path(omega_root) / "src/loop.metta"
+    original_core = core.read_bytes()
+    core.write_bytes(original_core + b"\n; altered core\n")
     try:
         execute(expression)
     except janus_swi.PrologError as exc:
-        assert "pinned_omega_metadata" in str(exc), exc
+        assert "pinned_omega_content" in str(exc), exc
     else:
-        raise AssertionError("launcher accepted missing runtime metadata")
+        raise AssertionError("launcher accepted altered sealed runtime content")
+    finally:
+        core.write_bytes(original_core)
+    manifest = Path(omega_root) / "persistent_atp_runtime.json"
+    hidden_manifest = manifest.with_suffix(".json-hidden")
+    manifest.rename(hidden_manifest)
+    try:
+        try:
+            execute(expression)
+        except janus_swi.PrologError as exc:
+            assert "pinned_omega_metadata" in str(exc), exc
+        else:
+            raise AssertionError("launcher accepted neither Git metadata nor a build manifest")
+    finally:
+        hidden_manifest.rename(manifest)
 finally:
     hidden_metadata.rename(metadata)
 for module in ("utils.py", "helper.py", "utils", "logger.py", "log", "config.py", "config", "skills", "plugin.py", "plugin"):
@@ -77,6 +95,12 @@ skills_twice = execute("!(getSkills)")[0]
 assert skills_twice == skills_once, "reloading the plugin changed skill registration"
 listener_count = janus_swi.query_once("findall(1, clause('heartbeat-listener'(persistent_atp, _, _), _), Bodies), length(Bodies, Count)")["Count"]
 assert listener_count == 1, listener_count
+for name, arity in (("proof-create", 3), ("proof-cycle", 3), ("proof-status", 3),
+                    ("proof-audit", 3), ("proof-export", 4), ("formal-search", 5),
+                    ("formal-resume", 5), ("statement-align", 5), ("lemma-bridge", 4)):
+    args = ",".join("_" for _ in range(arity))
+    count = janus_swi.query_once(f"findall(1, clause('{name}'({args}), _), L), length(L, Count)")["Count"]
+    assert count == 1, (name, count)
 
 def await_reply(receipt, *, read=False, allow_error=False):
     receipt = json.loads(receipt)
@@ -233,9 +257,48 @@ for name, arguments in all_calls.items():
     assert not result.get("formal_verified"), result
     if name in {"formal-search", "formal-resume", "lemma-bridge"}:
         assert result.get("error_code"), result
+
+# Run Omega's real recursive loop with a bounded test communication channel.
+# Only provider/channel I/O is substituted; context, heartbeat, tool dispatch,
+# history and next-turn request construction use the pinned upstream code.
+import logging
+logging.basicConfig(filename=str(Path(omega_root) / "loop-test.log"), level=logging.INFO, force=True)
+os.environ["OPENAI_API_KEY"] = "mock-no-openai-network"
+execute("!(import! &self (library lib_llm))")
+for module in ("channels.py", "channels", "providers", "memory", "loop"):
+    execute(f"!(import! &self (library Omega ./src/{module}))")
+import channels
+class LoopChannel(channels.CommChannel):
+    received = 0
+    confirmed = False
+    def receive(self):
+        self.received += 1
+        logging.info("TEST_LOOP_RECEIVE %s confirmed=%s", self.received, self.confirmed)
+        if self.confirmed: raise RuntimeError("OMEGA_LOOP_COMPLETE")
+        if self.received > 20: raise RuntimeError("OMEGA_LOOP_TIMEOUT")
+        return json.dumps({"proof": proof}) if self.received == 1 else ""
+    def send(self, message):
+        if message == "OMEGA_LOOP_CONFIRMED": self.confirmed = True
+channel = LoopChannel()
+channels.registerCommChannel("atp-test", channel)
+channels.commChannelStart("atp-test")
+os.environ["OMEGA_provider"] = "DeepSeek"
+os.environ["DEEPSEEK_API_URL"] = saved_url
+config.init_config(["sleepInterval=0.05", "maxOutputToken=128", "maxNewInputLoops=100"])
+providers.llmProviderStart("DeepSeek")
+execute("!(configure maxFeedback 50000)")
+execute("!(configure maxHistory 200000)")
+execute("!(initLoop)")
+try:
+    execute("!(omega 2)")
+except janus_swi.PrologError as exc:
+    assert "OMEGA_LOOP_COMPLETE" in str(exc), str(exc)
+else:
+    raise AssertionError("real Omega loop did not reach its bounded test-channel stop")
+assert channel.confirmed
 print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "next_model_request_saw_digest": envelope["event_hash"] in next_request.messages[1].content,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
     "sdk_provider_roundtrip": sdk_roundtrip,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
-    "registered_skills": 9, "total_tools": len(tools)}, sort_keys=True), flush=True)
+    "registered_skills": 9, "total_tools": len(tools), "actual_loop_verified": channel.confirmed}, sort_keys=True), flush=True)

@@ -10,7 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 import re
 import shutil
-from .runtime import OMEGA_REVISION
+from .runtime import OMEGA_REVISION, PETTA_REVISION, MANIFEST, seal_runtime, verify_checkout, verify_manifest
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -25,6 +25,7 @@ ROUTE_MARKER = "location = /deepseek/chat/completions {"
 
 def install(omega_root: Path) -> dict:
     omega_root = omega_root.resolve()
+    verify_checkout(omega_root)
     catalogue = omega_root / "config" / "plugins.yaml"
     proxy = omega_root / "proxy" / "nginx.conf.template"
     if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
@@ -86,7 +87,7 @@ def install(omega_root: Path) -> dict:
     # journal and executor implementations stay on the trusted host.
     adapter_package = plugin_dir / "omegaclaw"
     adapter_package.mkdir(exist_ok=True)
-    for name in ("__init__.py", "specification.py"):
+    for name in ("__init__.py", "specification.py", "runtime.py"):
         shutil.copy2(PACKAGE_ROOT / name, adapter_package / name)
     shutil.copytree(PACKAGE_ROOT / "frameworks", adapter_package / "frameworks", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -97,15 +98,42 @@ def install(omega_root: Path) -> dict:
     shutil.copy2(source / "persistent_atp_pinned_import.pl", omega_root / "persistent_atp_pinned_import.pl")
     if updated_launcher != original_launcher:
         launcher.write_text(updated_launcher)
+    seal_runtime(omega_root)
     return {"omega_root": str(omega_root), "required_omega_revision": OMEGA_REVISION, "plugin_location": str(plugin_dir),
             "catalogue": str(catalogue), "proxy_template": str(proxy)}
+
+
+def bundle_runtime(omega_root: Path, destination: Path, base_image: str) -> dict:
+    """Export a sealed overlay for an explicitly digest-pinned Omega image."""
+    if not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", base_image):
+        raise ValueError("base image must be pinned as image@sha256:<64 hex digits>")
+    verify_manifest(omega_root)
+    # Refuse to overwrite an existing context, or to copy one into its source.
+    if destination.resolve().is_relative_to(omega_root.resolve()):
+        raise ValueError("container context must be outside the Omega source")
+    destination.mkdir(parents=True, exist_ok=False)
+    manifest = json.loads((omega_root / MANIFEST).read_text())
+    for name in [*manifest["files"], MANIFEST]:
+        target = destination / "omega" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(omega_root / name, target)
+    template = (PACKAGE_ROOT / "config" / "omega.Dockerfile").read_text()
+    (destination / "Dockerfile").write_text(template.replace("@@BASE_IMAGE@@", base_image).replace("@@PETTA_REVISION@@", PETTA_REVISION))
+    return {"container_context": str(destination), "base_image": base_image}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--omega-root", type=Path, required=True)
+    parser.add_argument("--bundle-dir", type=Path)
+    parser.add_argument("--base-image")
     args = parser.parse_args(argv)
-    print(json.dumps(install(args.omega_root), sort_keys=True))
+    if bool(args.bundle_dir) != bool(args.base_image):
+        parser.error("--bundle-dir and --base-image must be supplied together")
+    result = install(args.omega_root)
+    if args.bundle_dir:
+        result.update(bundle_runtime(args.omega_root.resolve(), args.bundle_dir, args.base_image))
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

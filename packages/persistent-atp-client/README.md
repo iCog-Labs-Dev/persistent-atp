@@ -8,7 +8,14 @@ Omega/PeTTa skill → Omega bridge → persistent_atp_client → ReceiverPort
                            persistent-ATP receiver → service → commit gate
 ```
 
-The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The package version is `0.2.0`; the original nine actions retain contract `2.0`, and coordinator reads and actions use capability-gated contract `2.1`.
+The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The original nine actions retain contract `2.0`, and coordinator reads and actions use capability-gated contract `2.1`.
+
+Checkpointed coordinators can call `reconcile(prepared_request)` for one recovery
+pass. It validates an existing admission, or submits the unchanged prepared
+request only after an authoritative lookup reports absence. An unavailable
+lookup does not authorize resubmission. Both clients expose reconciliation;
+the synchronous client also exposes operation listing, snapshot reads, bounded
+event pages, and control forwarding. Hosts schedule bounded recovery passes.
 
 The receiver and Omega commands below require `feat/omegaclaw-integration`; this branch supplies the standalone library and its contract tests.
 

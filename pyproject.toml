@@ -9,7 +9,7 @@ description = "A durable, race-safe metagraph memory system for long-horizon aut
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "persistent-atp-client[http]>=0.2.0,<0.3",
+    "persistent-atp-client[http]>=0.2.1,<0.3",
     "python-dotenv>=1.0",
     "neo4j>=5.14",
     "psycopg[binary]>=3.3.6",
@@ -57,6 +57,7 @@ include = [
 omegaclaw = [
     "config/*.yaml",
     "config/*.conf",
+    "config/*.Dockerfile",
     "omega_plugin/*.metta",
     "omega_plugin/*.txt",
     "omega_plugin/*.py",

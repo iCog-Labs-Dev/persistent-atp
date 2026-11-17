@@ -15,6 +15,8 @@ _adapter = None
 _enabled = False
 _last_poll = 0.0
 _errors = []
+_dispatch_offset = 0
+_observe_offset = 0
 
 
 def reporting_policy():
@@ -55,9 +57,19 @@ def _submit(identity, function):
         try:
             function()
         except Exception:
-            with _lock:
-                _errors.append({"transport_status": "error", "error_code": "BRIDGE_WORKER_FAILED",
-                                "request_id": identity, "message": "Work requires reconciliation; no mathematical result is inferred."})
+            error = {"transport_status": "error", "error_code": "BRIDGE_WORKER_FAILED",
+                     "request_id": identity, "message": "Work requires reconciliation; no mathematical result is inferred."}
+            adapter = _adapter
+            if adapter is not None:
+                rows = adapter.state.snapshot()["intents"]
+                if identity in rows:
+                    error["operation_ref"] = rows[identity].get("ref")
+                    values = {"observation_suspended": True} if error["operation_ref"] else {"state": "needs-input"}
+                    adapter.state.patch(identity, last_error=error, **values)
+                adapter.stage_report(f"worker:{identity}", error)
+            else:
+                with _lock:
+                    _errors.append(error)
         finally:
             with _lock:
                 _inflight.discard(identity)
@@ -80,7 +92,8 @@ def _observe(adapter, identity):
 
 def _execute(adapter, identity):
     result = adapter.execute(identity)
-    adapter.stage_report(f"admission:{identity}:{result.get('phase', result.get('error_code', 'status'))}", result)
+    suffix = ":exhausted" if result.get("retry_exhausted") else ""
+    adapter.stage_report(f"admission:{identity}:{result.get('phase', result.get('error_code', 'status'))}{suffix}", result)
     if adapter.state.intent(identity).get("ref"):
         _observe(adapter, identity)
 
@@ -92,14 +105,7 @@ def startup(workspace):
     if workspace != adapter.workspace:
         return json.dumps({"transport_status": "error", "error_code": "UNREGISTERED_WORKSPACE"})
     _enabled = True
-    def recover():
-        adapter.startup()
-        for row in adapter.state.snapshot()["intents"].values():
-            if row["state"] in {"reserved", "prepared", "uncertain"} and row["arguments"] is not None:
-                _submit(row["id"], lambda identity=row["id"]: _execute(adapter, identity))
-            elif row["state"] == "accepted" and row.get("ref"):
-                _submit(row["id"], lambda identity=row["id"]: _observe(adapter, identity))
-    _submit("startup", recover)
+    _submit("startup", lambda: adapter.bootstrap())
     return json.dumps({"phase": "starting", "durable_admission": False})
 
 
@@ -111,8 +117,13 @@ def _invoke(kind, workspace, **arguments):
             raise ValueError("tool arguments must be strings")
         adapter = _get_adapter()
         identity = adapter.reserve(kind, workspace, arguments)
-        scheduled = _submit(identity, lambda: _execute(adapter, identity))
-        return json.dumps({"phase": "dispatching" if scheduled else "waiting-on-resource",
+        row = adapter.state.intent(identity)
+        if row["state"] in {"rejected", "needs-input"} or row.get("retry_exhausted"):
+            return json.dumps(row["last_error"])
+        ready = row.get("next_attempt_at", 0) <= adapter._clock()
+        scheduled = ready and _submit(identity, lambda: _execute(adapter, identity))
+        phase = "dispatching" if scheduled else "waiting-on-resource" if ready else "waiting-on-retry"
+        return json.dumps({"phase": phase,
             "transport_status": "accepted" if scheduled else "busy", "durable_admission": False,
             "request_id": identity,
             "message": "Bridge intent checkpointed; receiver admission and results arrive separately."})
@@ -133,25 +144,41 @@ def _render(report):
 
 def take_completed():
     """Called by the loop thread; reports stay durable until history append ACK."""
-    global _last_poll
+    global _last_poll, _dispatch_offset, _observe_offset
     if not _enabled:
         return ""
     adapter = _get_adapter()
     now = time.monotonic()
     if now - _last_poll >= 0.25:
         _last_poll = now
-        for row in adapter.active_intents():
+        if adapter.bootstrap_due():
+            _submit("startup", lambda: adapter.bootstrap())
+        # Bounded round-robin batches leave capacity for both dispatch and
+        # observation, even when either list exceeds the executor's queue.
+        pending = adapter.dispatchable_intents()
+        batch = _rotate(pending, _dispatch_offset)
+        _dispatch_offset += len(batch)
+        for row in batch:
+            _submit(row["id"], lambda identity=row["id"]: _execute(adapter, identity))
+        active = adapter.active_intents()
+        batch = _rotate(active, _observe_offset)
+        _observe_offset += len(batch)
+        for row in batch:
             _submit(row["id"], lambda identity=row["id"]: _observe(adapter, identity))
         selected = adapter.state.snapshot().get("selected_proof")
         if selected:
-            def refresh():
-                status = adapter.status(selected)
-                adapter.stage_report(f"status:{selected}:{status['revision']}", status)
-            _submit(f"status:{selected}", refresh)
+            _submit(f"status:{selected}", lambda: adapter.refresh_status(selected))
     with _lock:
         errors = _errors[:]
         _errors.clear()
     return "\n".join(_render(report) for report in adapter.pending_reports() + errors)
+
+
+def _rotate(rows, offset):
+    if not rows:
+        return []
+    offset %= len(rows)
+    return (rows[offset:] + rows[:offset])[:4]
 
 
 def ack_completed(raw, write_receipt):

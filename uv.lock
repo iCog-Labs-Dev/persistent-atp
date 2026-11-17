@@ -1490,7 +1490,7 @@ provides-extras = ["dev", "provider-sdk", "real-atp"]
 
 [[package]]
 name = "persistent-atp-client"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "packages/persistent-atp-client" }
 
 [package.optional-dependencies]

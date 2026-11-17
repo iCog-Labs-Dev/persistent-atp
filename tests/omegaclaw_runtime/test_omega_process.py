@@ -1,6 +1,7 @@
 """O01/O02: real PeTTa process, pinned Omega plugin and HTTP gate path."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,14 +24,20 @@ SDK_PATH = Path(os.environ.get("OMEGACLAW_PROVIDER_SDK_PATH",
 
 class DeepSeekMockHandler(BaseHTTPRequestHandler):
     requests = []
+    loop_request_id = None
+    loop_verified = False
 
     def do_POST(self):
-        if self.path not in {"/chat/completions", "/deepseek/chat/completions"}:
+        if self.path not in {"/chat/completions", "/deepseek/chat/completions", "/loop/chat/completions"}:
             self.send_error(404)
             return
         body = self.rfile.read(int(self.headers["Content-Length"]))
-        self.requests.append({"body": json.loads(body), "path": self.path,
+        decoded = json.loads(body)
+        is_loop = "PROMPT: " in decoded["messages"][0]["content"] and " SKILLS: " in decoded["messages"][0]["content"]
+        self.requests.append({"body": decoded, "path": self.path, "loop": is_loop,
                               "auth": self.headers.get("Authorization")})
+        if is_loop:
+            return self._loop_response(decoded)
         n = len(self.requests)
         messages = self.requests[-1]["body"]["messages"]
         user = next(message["content"] for message in messages if message["role"] == "user")
@@ -50,6 +57,37 @@ class DeepSeekMockHandler(BaseHTTPRequestHandler):
                     "function": {"name": name, "arguments": json.dumps(custom["arguments"] if custom else {
                         "proof": 12 if n == 4 else proof, "workspace": "reference"})}}]}}]}
         data = json.dumps(response).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _loop_response(self, body):
+        cls = type(self)
+        loop_rows = [row for row in self.requests if row.get("loop")]
+        proof = json.loads(next(message["content"] for message in self.requests[0]["body"]["messages"]
+                                if message["role"] == "user"))["proof"]
+        if len(loop_rows) == 1:
+            name, arguments = "proof-status", {"proof": proof, "workspace": "reference"}
+        else:
+            for message in body["messages"]:
+                if message["role"] == "tool":
+                    match = re.search(r'"request_id":\s*"([a-f0-9]+)"', message["content"].replace('\\"', '"'))
+                    if match: cls.loop_request_id = match[1]
+            system = body["messages"][0]["content"].replace('\\"', '"').replace("_quote_", '"').replace("_newline_", "\n")
+            for match in re.finditer("PERSISTENT_ATP_RESULT ", system):
+                try:
+                    record, _ = json.JSONDecoder().raw_decode(system[match.end():])
+                except ValueError:
+                    continue
+                if (record.get("request_id") == cls.loop_request_id and record.get("proof_id") == proof
+                        and record.get("revision") and not record.get("formal_verified")):
+                    cls.loop_verified = True
+            name, arguments = ("send", {"content": "OMEGA_LOOP_CONFIRMED"}) if cls.loop_verified else ("nop", {})
+        data = json.dumps({"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": [{"id": f"loop-{len(loop_rows)}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)}}]}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -109,6 +147,8 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     DeepSeekMockHandler.requests = []
+    DeepSeekMockHandler.loop_request_id = None
+    DeepSeekMockHandler.loop_verified = False
     deepseek_server = ThreadingHTTPServer(("127.0.0.1", 0), DeepSeekMockHandler)
     deepseek_thread = threading.Thread(target=deepseek_server.serve_forever, daemon=True)
     deepseek_thread.start()
@@ -125,12 +165,18 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         env["PYTHONPATH"] += os.pathsep + str(SDK_PATH)
         env["OMEGACLAW_SDK_PROCESS_TEST"] = "1"
     try:
-        completed = subprocess.run([process_python, str(ROOT / "tests/omegaclaw_runtime/process_call.py")],
-            cwd=petta_root, env=env, capture_output=True, text=True, timeout=30)
+        try:
+            completed = subprocess.run([process_python, str(ROOT / "tests/omegaclaw_runtime/process_call.py")],
+                cwd=petta_root, env=env, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired as exc:
+            (tmp_path / "process-output.log").write_bytes(exc.stdout or b"")
+            (tmp_path / "process-error.log").write_bytes(exc.stderr or b"")
+            pytest.fail(f"Omega loop timed out; {len(DeepSeekMockHandler.requests)} model requests; logs: {tmp_path}")
         assert completed.returncode == 0, completed.stderr[-6000:] + completed.stdout[-6000:]
         result_line = next(line for line in completed.stdout.splitlines() if line.startswith("PROCESS_RESULT="))
         result = json.loads(result_line.split("=", 1)[1])
         assert result["registered_skills"] == 9
+        assert result["actual_loop_verified"] and DeepSeekMockHandler.loop_verified
         assert result["next_model_request_saw_digest"] is True
         proof = result["create"]["proof_id"]
         assert service.store.head(proof)[0] >= 2
@@ -138,8 +184,9 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         assert service.artifacts.exists(result["create"]["artifact_pointers"][0])
         assert result["deepseek_mock_roundtrip"] is True
         assert result["sdk_provider_roundtrip"] is sdk_enabled
-        assert len(DeepSeekMockHandler.requests) == (16 if result["sdk_provider_roundtrip"] else 15)
-        first, second = (record["body"] for record in DeepSeekMockHandler.requests[:2])
+        transport_rows = [row for row in DeepSeekMockHandler.requests if not row.get("loop")]
+        assert len(transport_rows) == (16 if result["sdk_provider_roundtrip"] else 15)
+        first, second = (record["body"] for record in transport_rows[:2])
         for record in DeepSeekMockHandler.requests[:5]:
             assert record["auth"] == "Bearer mock-transport-only"
         gateway_record = DeepSeekMockHandler.requests[5]

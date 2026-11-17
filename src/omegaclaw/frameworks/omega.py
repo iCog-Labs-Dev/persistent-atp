@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 
@@ -17,7 +19,7 @@ from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.codecs import fingerprint, request_from_dict, to_dict
 from persistent_atp_client.errors import (
-    ClientError, CursorExpired, ReceiverProtocolError, SubmissionUncertain,
+    AdmissionRejected, ClientError, CursorExpired, ReceiverProtocolError,
     UnsupportedCapability,
 )
 
@@ -33,7 +35,8 @@ SKILLS = {
 
 
 class OmegaAdapter:
-    def __init__(self, port, *, workspace, cache_path=None, receiver_id="local", max_cycles_per_proof=10):
+    def __init__(self, port, *, workspace, cache_path=None, receiver_id="local", max_cycles_per_proof=10,
+                 retry_limit=4, retry_base_seconds=0.5, clock=time.time):
         # SDK validation of the configured scope; this is never model authority.
         OperationRef(workspace, "scope-check")
         self.workspace = workspace
@@ -45,6 +48,11 @@ class OmegaAdapter:
         if type(max_cycles_per_proof) is not int or max_cycles_per_proof <= 0:
             raise ValueError("max_cycles_per_proof must be a positive finite allowance")
         self.max_cycles_per_proof = max_cycles_per_proof
+        if type(retry_limit) is not int or not 1 <= retry_limit <= 10:
+            raise ValueError("retry_limit must be within 1..10")
+        if type(retry_base_seconds) not in (int, float) or not math.isfinite(retry_base_seconds) or retry_base_seconds <= 0:
+            raise ValueError("retry_base_seconds must be finite and positive")
+        self.retry_limit, self.retry_base_seconds, self._clock = retry_limit, retry_base_seconds, clock
 
     @classmethod
     def from_environment(cls):
@@ -58,8 +66,10 @@ class OmegaAdapter:
         workspace = os.environ.get("PERSISTENT_ATP_OMEGA_WORKSPACE", "reference")
         path = os.environ.get("PERSISTENT_ATP_OMEGA_STATE", str(Path.home() / ".local/state/persistent-atp/omega.json"))
         limit = int(os.environ.get("PERSISTENT_ATP_OMEGA_MAX_CYCLES", "10"))
+        retry_limit = int(os.environ.get("PERSISTENT_ATP_OMEGA_RETRY_LIMIT", "4"))
+        retry_base = float(os.environ.get("PERSISTENT_ATP_OMEGA_RETRY_BASE_SECONDS", "0.5"))
         return cls(HTTPReceiverAdapter(url, token), workspace=workspace, cache_path=path, receiver_id=url,
-                   max_cycles_per_proof=limit)
+                   max_cycles_per_proof=limit, retry_limit=retry_limit, retry_base_seconds=retry_base)
 
     def reserve(self, kind, workspace, arguments, *, intent_id=None, new_intent=False):
         """Checkpoint workflow intent without doing network I/O on Omega's loop."""
@@ -137,6 +147,29 @@ class OmegaAdapter:
             self._started = True
             return to_dict(self.caps)
 
+    def bootstrap_due(self):
+        row = self.state.snapshot().get("bootstrap", {})
+        return (not self._started and row.get("attempts", 0) < self.retry_limit
+                and row.get("next_attempt_at", 0) <= self._clock() and not row.get("stopped"))
+
+    def bootstrap(self):
+        """Recover an empty cache after temporary startup failure, with a cap."""
+        with self._startup_lock:
+            if not self.bootstrap_due():
+                return
+            row = self.state.snapshot().get("bootstrap", {})
+            attempts = row.get("attempts", 0) + 1
+            try:
+                self.startup()
+            except (ClientError, ValueError, TypeError, KeyError) as exc:
+                retryable = isinstance(exc, ClientError) and exc.retryable
+                self.state.update(lambda data: data.update(bootstrap={"attempts": attempts,
+                    "stopped": not retryable, "next_attempt_at": self._clock() + min(30,
+                        self.retry_base_seconds * 2 ** (attempts - 1))}))
+                report = {**self.error(exc), "automatic_retry": retryable and attempts < self.retry_limit,
+                          "retry_exhausted": retryable and attempts >= self.retry_limit}
+                self.stage_report(f"startup:{self._error_code(exc)}:{attempts}", report)
+
     @staticmethod
     def _request(row):
         request = request_from_dict(row["request"])
@@ -158,7 +191,7 @@ class OmegaAdapter:
     def _action(self, row):
         kind, args = row["kind"], row["arguments"]
         if kind == "proof-create":
-            raw = json.dumps(args["spec"], sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
+            raw = self._spec_bytes(row)
             return ProofCreate(self.client.put_artifact(raw, workspace_id=self.workspace, media_type="application/json")), None
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
@@ -188,9 +221,23 @@ class OmegaAdapter:
 
     def execute(self, identity):
         """Submit once through the SDK; never wait for execution completion."""
+        row = self.state.intent(identity)
+        if row.get("ref"):
+            return self._admission(row)
+        if row["state"] in {"rejected", "needs-input"} or row.get("retry_exhausted"):
+            return row.get("last_error", {"request_id": identity, "transport_status": "error"})
+        if row.get("attempts", 0) >= self.retry_limit:
+            report = {**row.get("last_error", self.error(ValueError(), identity)),
+                      "automatic_retry": False, "retry_exhausted": True}
+            self.state.patch(identity, retry_exhausted=True, last_error=report)
+            return report
+        if row.get("next_attempt_at", 0) > self._clock():
+            return row["last_error"]
+        self.state.patch(identity, attempts=row.get("attempts", 0) + 1)
         try:
-            if not self._started:
-                self.startup()
+            with self._startup_lock:
+                if not self._started:
+                    self.startup()
             row = self.state.intent(identity)
             if row.get("ref"):
                 return self._admission(row)
@@ -204,15 +251,39 @@ class OmegaAdapter:
                 action, pre = self._action(row)
                 request = self.client.prepare(action, workspace_id=self.workspace, request_id=identity, preconditions=pre)
                 self.state.patch(identity, request=to_dict(request), fingerprint=fingerprint(request), state="prepared")
-            handle = self.client.submit(request)
-            row = self.state.patch(identity, ref=to_dict(handle.ref), state="accepted")
+            if row.get("artifact_repair_pending"):
+                self.client.put_artifact(self._spec_bytes(row), workspace_id=self.workspace,
+                    media_type="application/json", expected_hash=request.action.spec_artifact.hash)
+            handle = self.client.reconcile(request) if row.get("request") else self.client.submit(request)
+            row = self.state.patch(identity, ref=to_dict(handle.ref), state="accepted",
+                                   observation_pending=True, next_attempt_at=0, artifact_repair_pending=False)
             return self._admission(row)
         except (ClientError, ValueError, TypeError, KeyError) as exc:
             row = self.state.intent(identity)
-            uncertain = isinstance(exc, SubmissionUncertain) or (isinstance(exc, ClientError) and exc.retryable)
-            # An observation failure never cancels or rejects already admitted work.
-            self.state.patch(identity, state="accepted" if row.get("ref") else "uncertain" if uncertain else "rejected")
-            return self.error(exc, identity, row.get("ref"))
+            code = self._error_code(exc)
+            retryable = code in {"SUBMISSION_UNCERTAIN", "TRANSIENT_UNAVAILABLE", "RATE_LIMITED"}
+            repair = code == "HASH_MISMATCH" and row["kind"] == "proof-create"
+            report = self.error(exc, identity, row.get("ref"))
+            if code == "STALE_PRECONDITION" and (row.get("arguments") or {}).get("proof"):
+                try:
+                    report["current_status"] = self.status(row["arguments"]["proof"])
+                except ClientError as refresh_error:
+                    report["refresh_error_code"] = self._error_code(refresh_error)
+            attempts = row.get("attempts", 1)
+            exhausted = (retryable or repair) and attempts >= self.retry_limit
+            next_attempt = self._clock() + min(30, self.retry_base_seconds * 2 ** (attempts - 1))
+            report.update(automatic_retry=(retryable or repair) and not exhausted,
+                          retry_exhausted=exhausted)
+            self.state.patch(identity,
+                state="uncertain" if retryable or repair else "needs-input" if code in {
+                    "STALE_PRECONDITION", "HASH_MISMATCH", "ARTIFACT_UNAVAILABLE", "REVIEW_REQUIRED"} else "rejected",
+                next_attempt_at=next_attempt, retry_exhausted=exhausted, last_error=report,
+                artifact_repair_pending=repair)
+            return report
+
+    @staticmethod
+    def _spec_bytes(row):
+        return json.dumps(row["arguments"]["spec"], sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
 
     def _admission(self, row):
         return {"phase": "admitted", "transport_status": "accepted", "durable_admission": True,
@@ -220,10 +291,26 @@ class OmegaAdapter:
                 "operation_ref": row["ref"], "message": "Operation accepted/queued; mathematical outcome is not established."}
 
     @staticmethod
+    def _error_code(exc):
+        return exc.admission.error_code if isinstance(exc, AdmissionRejected) else getattr(exc, "code", "INVALID_REQUEST")
+
+    @staticmethod
     def error(exc, identity=None, ref=None):
-        return {"transport_status": "error", "error_code": getattr(exc, "code", "INVALID_REQUEST"),
+        code = OmegaAdapter._error_code(exc)
+        action, message = {
+            "STALE_PRECONDITION": ("refresh-and-review", "State changed. Review the refreshed target/revision before authorizing a new request."),
+            "HASH_MISMATCH": ("repair-artifact", "Artifact bytes did not match. Repair the original artifact; do not substitute another theorem or source."),
+            "ARTIFACT_UNAVAILABLE": ("authorized-upload-required", "Supply the original artifact through the trusted upload path."),
+            "SUBMISSION_UNCERTAIN": ("lookup-original-request", "Admission is uncertain. Reconcile the original request before resubmission."),
+            "TRANSIENT_UNAVAILABLE": ("bounded-retry", "Receiver temporarily unavailable; retain the request identity."),
+            "RATE_LIMITED": ("bounded-retry", "Receiver rate limit reached; wait before retrying the original request."),
+            "FORBIDDEN": ("stop", "Receiver denied this action. Do not retry or change identity to bypass authorization."),
+            "IDEMPOTENCY_CONFLICT": ("stop", "Request identity conflicts with the admitted body. Stop and reconcile."),
+            "UNSUPPORTED_CAPABILITY": ("stop", "Receiver capability is unavailable; no fallback execution was started."),
+        }.get(code, ("stop-and-review", "Reconcile this request; no mathematical outcome is inferred."))
+        return {"transport_status": "error", "error_code": code, "recovery_action": action,
                 "request_id": identity or getattr(exc, "request_id", None), "operation_ref": ref,
-                "message": "Reconcile this request; do not infer proof success or resubmit with a new identity."}
+                "message": message}
 
     def status(self, proof):
         digest = self.client.status(workspace_id=self.workspace, proof_id=proof)
@@ -287,7 +374,11 @@ class OmegaAdapter:
                 fingerprints[event.event_id] = fingerprint(event)
                 reports.append({"notification_id": event.event_id, "event": to_dict(event),
                                 "request_id": identity, "operation_ref": row["ref"]})
-            if snapshot.observation_version != row["version"] or refreshed:
+            terminal = snapshot.lifecycle in TERMINAL_LIFECYCLES
+            # A terminal snapshot does not imply its event stream was drained.
+            # One empty page after the terminal snapshot confirms catch-up.
+            drained = terminal and not events and not refreshed
+            if snapshot.observation_version != row["version"] or refreshed or drained != (row.get("observation_pending") is False):
                 outcome = dict(snapshot.result or {})
                 disposition = snapshot.mathematical_disposition or outcome.get("cycle_disposition")
                 message = "Operation lifecycle changed; this is not proof completion."
@@ -298,9 +389,11 @@ class OmegaAdapter:
                     message = "Claim passed a research review; formal verification is not implied."
                 if outcome.get("audit_recommended") or outcome.get("cycle_disposition") in {"idle", "blocked", "waiting-on-review"}:
                     message = "No free eligible work or waiting for review; this is not proof completion."
-                report = {**to_dict(snapshot), "notification_id": f"{ref.operation_id}:{snapshot.observation_version}:{int(refreshed)}",
+                report = {**to_dict(snapshot), "notification_id": f"{ref.operation_id}:{snapshot.observation_version}:{int(refreshed)}:{int(drained)}",
                           "operation_id": ref.operation_id, "operation_ref": row["ref"],
-                          "request_id": identity, "message": message, "history_incomplete": refreshed,
+                          "request_id": identity, "message": message,
+                          "history_incomplete": refreshed or (drained and event_version < snapshot.observation_version),
+                          "event_history_complete": drained, "events_pending": not drained,
                           "requested_budget": (row.get("request") or {}).get("action", {}).get("budget"),
                           "effective_budget": outcome.get("budget"), "mathematical_disposition": disposition}
                 reports.append(report)
@@ -309,6 +402,7 @@ class OmegaAdapter:
                 item.update(cursor=cursor if refreshed else cursor or row["cursor"], event_ids=ordered_ids[-2000:],
                             event_fingerprints={key: fingerprints[key] for key in ordered_ids[-2000:] if key in fingerprints},
                             event_sequence=sequence, event_version=event_version, version=snapshot.observation_version,
+                            observation_pending=not drained, observation_failures=0, observation_retry_at=0,
                             state="completed" if snapshot.lifecycle in TERMINAL_LIFECYCLES else "accepted")
                 outbox = data.setdefault("outbox", {})
                 for report in reports:
@@ -321,6 +415,10 @@ class OmegaAdapter:
                 self.stage_report(key, status)
             return reports
         except (ClientError, ValueError, TypeError, KeyError) as exc:
+            failures = row.get("observation_failures", 0) + 1
+            self.state.patch(identity, observation_failures=failures,
+                observation_retry_at=self._clock() + min(30, self.retry_base_seconds * 2 ** min(failures - 1, 6)),
+                observation_suspended=not (isinstance(exc, ClientError) and exc.retryable))
             return [self.error(exc, identity, row["ref"])]
 
     def stage_report(self, identity, report):
@@ -340,7 +438,47 @@ class OmegaAdapter:
         self.state.update(ack)
 
     def active_intents(self):
-        return [row for row in self.state.snapshot()["intents"].values() if row["state"] == "accepted" and row.get("ref")]
+        return [row for row in self.state.snapshot()["intents"].values()
+                if row.get("ref") and row.get("observation_pending", True)
+                and not row.get("observation_suspended") and row.get("observation_retry_at", 0) <= self._clock()]
+
+    def dispatchable_intents(self):
+        return [row for row in self.state.snapshot()["intents"].values()
+                if row["state"] in {"reserved", "prepared", "uncertain"} and not row.get("ref")
+                and row.get("arguments") is not None and not row.get("retry_exhausted")
+                and row.get("attempts", 0) < self.retry_limit
+                and row.get("next_attempt_at", 0) <= self._clock()]
+
+    def resume_reconciliation(self, identity):
+        """Trusted host action after reviewing exhausted transient delivery.
+
+        Not a model skill. Permanent/semantic errors cannot be overridden here.
+        """
+        row = self.state.intent(identity)
+        if row["state"] != "uncertain" or not row.get("retry_exhausted"):
+            raise ValueError("only exhausted transient delivery can be resumed")
+        if row.get("request"):
+            self._request(row)
+        self.state.patch(identity, attempts=0, next_attempt_at=0, retry_exhausted=False)
+        return identity
+
+    def refresh_status(self, proof):
+        """Background status observation with backoff and permanent-error stop."""
+        row = self.state.snapshot().get("status_observation", {}).get(proof, {})
+        if row.get("suspended") or row.get("next_attempt_at", 0) > self._clock():
+            return
+        try:
+            status = self.status(proof)
+            # Projection recovery can change the digest without a new commit.
+            key = f"status:{proof}:{status['revision']}:{status['projection_watermark']}:{int(status['formal_verified'])}"
+            self.stage_report(key, status)
+            value = {"failures": 0, "next_attempt_at": 0}
+        except (ClientError, ValueError, TypeError, KeyError) as exc:
+            failures = row.get("failures", 0) + 1
+            value = {"failures": failures, "suspended": not (isinstance(exc, ClientError) and exc.retryable),
+                     "next_attempt_at": self._clock() + min(30, self.retry_base_seconds * 2 ** min(failures - 1, 6))}
+            self.stage_report(f"status-error:{proof}:{self._error_code(exc)}", {**self.error(exc), "proof_id": proof})
+        self.state.update(lambda data: data.setdefault("status_observation", {}).update({proof: value}))
 
     def control(self, name, value):
         """Trusted UI path only; controls are never registered as model skills."""
