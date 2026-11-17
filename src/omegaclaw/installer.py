@@ -10,6 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 import re
 import shutil
+from .runtime import OMEGA_REVISION
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -28,6 +29,19 @@ def install(omega_root: Path) -> dict:
     proxy = omega_root / "proxy" / "nginx.conf.template"
     if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
         raise ValueError("--omega-root must be a full derived Omega checkout")
+    launcher = omega_root / "run.metta"
+    unpinned = '!(git-import! "https://github.com/singnet/Omega.git")'
+    pinned = f'!(git-import! "https://github.com/singnet/Omega.git" "" "./repos" {OMEGA_REVISION})'
+    shim_import = '!(import_prolog_functions_from_file "./repos/Omega/persistent_atp_pinned_import.pl" (quote (git-import!)))'
+    original_launcher = launcher.read_text()
+    if unpinned in original_launcher:
+        updated_launcher = original_launcher.replace(unpinned, shim_import + "\n" + pinned)
+    elif pinned in original_launcher and shim_import in original_launcher:
+        updated_launcher = original_launcher
+    else:
+        raise ValueError("derived Omega launcher has an unexpected runtime import")
+    if not CLIENT_ROOT.is_dir():
+        raise ValueError("installed persistent-atp-client package files are required for Omega installation")
     plugin_dir = omega_root / "plugins" / "persistent_atp"
     source = PACKAGE_ROOT / "omega_plugin"
     files = {name: source / name for name in PLUGIN_FILES}
@@ -66,15 +80,24 @@ def install(omega_root: Path) -> dict:
     plugin_dir.mkdir(parents=True, exist_ok=True)
     for name, origin in files.items():
         shutil.copy2(origin, plugin_dir / name)
-    if not CLIENT_ROOT.is_dir():
-        raise ValueError("installed persistent-atp-client package files are required for Omega installation")
     shutil.copytree(CLIENT_ROOT, plugin_dir / "persistent_atp_client", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # Only the framework package is installed on the agent side. Receiver,
+    # journal and executor implementations stay on the trusted host.
+    adapter_package = plugin_dir / "omegaclaw"
+    adapter_package.mkdir(exist_ok=True)
+    for name in ("__init__.py", "specification.py"):
+        shutil.copy2(PACKAGE_ROOT / name, adapter_package / name)
+    shutil.copytree(PACKAGE_ROOT / "frameworks", adapter_package / "frameworks", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     if updated_catalogue != original_catalogue:
         catalogue.write_text(updated_catalogue)
     if updated_proxy != original_proxy:
         proxy.write_text(updated_proxy)
-    return {"omega_root": str(omega_root), "plugin_location": str(plugin_dir),
+    shutil.copy2(source / "persistent_atp_pinned_import.pl", omega_root / "persistent_atp_pinned_import.pl")
+    if updated_launcher != original_launcher:
+        launcher.write_text(updated_launcher)
+    return {"omega_root": str(omega_root), "required_omega_revision": OMEGA_REVISION, "plugin_location": str(plugin_dir),
             "catalogue": str(catalogue), "proxy_template": str(proxy)}
 
 

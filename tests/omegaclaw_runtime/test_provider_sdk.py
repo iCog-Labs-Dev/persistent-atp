@@ -10,6 +10,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from omegaclaw.runtime import DEFAULT_OMEGA_ROOT
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +48,7 @@ class CompatibleHandler(BaseHTTPRequestHandler):
 def test_openai_sdk_multiple_providers_in_omega_process(tmp_path):
     if importlib.util.find_spec("openai") is None:
         pytest.skip("OpenAI SDK unavailable; install persistent-atp[provider-sdk]")
-    omega = Path(os.environ.get("OMEGA_PINNED_ROOT", str(ROOT / "tmp/repos/Omega")))
+    omega = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
     if not (omega / "src/providers.py").is_file():
         pytest.skip("pinned Omega checkout unavailable")
     plugin_dir = tmp_path / "plugin"

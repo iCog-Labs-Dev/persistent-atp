@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from .api import serve
 from .service import OperationService
 from .receiver import ReferenceReceiver
+from .runtime import DEFAULT_OMEGA_ROOT, OMEGA_REVISION, PETTA_REVISION
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -46,15 +47,15 @@ def doctor(profile: str) -> dict:
         load_dotenv()
     if profile in ("omega", "deepseek", "persistence", "lean", "real-atp"):
         if profile in ("omega", "deepseek"):
-            path = os.environ.get("OMEGA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "Omega"))
+            path = os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT))
             if not (Path(path) / "src" / "plugin.metta").is_file():
-                blockers.append(f"OMEGA_PINNED_ROOT must name the pinned Omega checkout (default: {ROOT / 'tmp' / 'repos' / 'Omega'})")
-            elif subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != "63a78265be9b8efc6e47cc39f3b4bc7a13e06ed5":
+                blockers.append(f"OMEGA_PINNED_ROOT must name the pinned Omega checkout (default: {DEFAULT_OMEGA_ROOT})")
+            elif subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != OMEGA_REVISION:
                 blockers.append("Omega checkout has the wrong revision")
             petta = os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa"))
             if not (Path(petta) / "src" / "main.pl").is_file():
                 blockers.append(f"PETTA_PINNED_ROOT must name the pinned PeTTa v1.0.4 checkout (default: {ROOT / 'tmp' / 'repos' / 'PeTTa'})")
-            elif subprocess.run(["git", "-C", petta, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != "7037f4c2ad378c52fc328004fe216d5118b674f0":
+            elif subprocess.run(["git", "-C", petta, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != PETTA_REVISION:
                 blockers.append("PeTTa checkout has the wrong revision")
             if shutil.which("swipl") is None:
                 blockers.append("SWI-Prolog is unavailable")

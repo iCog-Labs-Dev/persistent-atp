@@ -19,3 +19,66 @@ packets for formal ATP, research, and obstruction-analysis tasks. See the
 [context compiler guide](src/context_compiler/README.md) for its architecture,
 end-to-end usage, selection behavior, outputs, and current integration
 boundaries.
+
+## Omega integration
+
+The Omega plugin exposes nine proof tools through the standalone
+`persistent-atp-client` SDK. `OmegaAdapter` owns SDK calls and request recovery;
+`OmegaState` stores serializable workflow checkpoints. The bridge parks network
+work on worker threads and delivers results to Omega history on heartbeat.
+Dispatch receipts and receiver admission are separate from execution results
+and mathematical verification.
+
+Use Python 3.11 or later, SWI-Prolog with `janus_swi`, and these exact runtimes:
+
+- Omega: `ba185cd359d9fe231b904110b988af39fafa5014`.
+- PeTTa: `7037f4c2ad378c52fc328004fe216d5118b674f0`.
+
+Install the project and its editable SDK with `uv sync --extra dev`. Copy the
+trusted receiver settings from `.env.example` into your environment, then run:
+
+```bash
+uv run persistent-atp-omega serve --config reference
+```
+
+Install the plugin into a derived Omega checkout under your PeTTa runtime's
+`repos/Omega` directory:
+
+```bash
+uv run python scripts/omegaclaw-install-omega.py --omega-root /path/to/PeTTa/repos/Omega
+```
+
+The installer preserves the plugin catalogue and patches the launcher's import.
+For bare PeTTa, run that generated launcher from the PeTTa directory. The added
+import shim checks the provisioned checkout's exact Git revision and never
+fetches another runtime. Keep its `.git` metadata available; a metadata-free
+image needs an independently pinned build and its own verified launcher.
+
+The plugin is disabled by default. Set `OMEGA_persistentAtpEnabled=enabled`
+and configure the same workspace alias in `OMEGA_persistentAtpWorkspace` and
+`PERSISTENT_ATP_OMEGA_WORKSPACE`. Receiver credentials belong only in the trusted
+environment. The reporting policy remains loaded while workflows are disabled.
+
+`proof-create` accepts JSON containing `theorem`, `definitions`, `assumptions`,
+`quantifier_domains`, `allowed_background`, `targets`, and `verification_policy`.
+The complete specification is retained as a hashed artifact and included in
+worker context. Lean source arguments are authorized artifact hashes;
+export destinations are registered aliases.
+
+Keep `PERSISTENT_ATP_OMEGA_STATE` across agent restarts. Prepared requests,
+operation references, event cursors, and unacknowledged notifications are
+reconciled with the receiver. This cache grants no proof or admission authority.
+`PERSISTENT_ATP_OMEGA_MAX_CYCLES` bounds coordinator cycle attempts per proof;
+the receiver remains responsible for execution budgets and leases.
+
+Run the reference and pinned-runtime checks without paid model calls:
+
+```bash
+bash scripts/omegaclaw-test.sh --tier reference
+bash scripts/omegaclaw-test.sh --tier omega
+```
+
+The supplied receiver is a reference implementation with scripted research
+execution. Real formal execution, durable backend resume, independent Lean
+replay, and production MORK persistence remain separate integration work.
+Unsupported formal actions and controls are reported explicitly.

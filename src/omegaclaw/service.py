@@ -27,6 +27,7 @@ from .contracts import ContractError, validate_request
 from .jobs import JobLedger
 from .export import check_export, referenced_artifacts
 from .context import compile_packet, verify_packet
+from .specification import SPEC_FIELDS, parse_json, validate_spec
 
 _ID = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
 ACTOR = "omega-coordinator"
@@ -285,20 +286,31 @@ class OperationService:
 
     def _create(self, raw_spec: str, operation_id: str) -> dict:
         try:
-            spec = json.loads(raw_spec)
-        except json.JSONDecodeError as exc:
+            spec = parse_json(raw_spec)
+        except (ValueError, TypeError) as exc:
             raise ContractError("spec is not JSON") from exc
-        if not isinstance(spec, dict) or set(spec) != {"proof_id", "literal_target", "title"}:
-            raise ContractError("spec requires only proof_id, literal_target and title")
-        proof_id, target = spec["proof_id"], spec["literal_target"]
+        complete = isinstance(spec, dict) and set(spec) == SPEC_FIELDS
+        if complete:
+            try:
+                validate_spec(spec)
+            except ValueError as exc:
+                raise ContractError(str(exc)) from exc
+            proof_id = "proof" + operation_id.replace("-", "")[:24]
+            target, title = spec["theorem"], "Literal theorem"
+        else:
+            # Compatibility for the existing trusted reference-service fixtures.
+            # The model-facing adapter accepts only the complete contract.
+            if not isinstance(spec, dict) or set(spec) != {"proof_id", "literal_target", "title"}:
+                raise ContractError("invalid theorem specification")
+            proof_id, target, title = spec["proof_id"], spec["literal_target"], spec["title"]
         if not isinstance(proof_id, str) or not _ID.fullmatch(proof_id):
             raise ContractError("invalid proof id")
         if not isinstance(target, str) or not target.strip() or len(target.encode()) > 16_384:
             raise ContractError("invalid literal target")
-        if not isinstance(spec["title"], str) or not spec["title"].strip():
+        if not isinstance(title, str) or not title.strip():
             raise ContractError("invalid title")
         claim_id = f"{proof_id}/c-1"
-        if validate_schema("proof-spec", {"proof_id": proof_id, "actor": ACTOR, "title": spec["title"], "target_claim_ids": [claim_id]}):
+        if validate_schema("proof-spec", {"proof_id": proof_id, "actor": ACTOR, "title": title, "target_claim_ids": [claim_id]}):
             raise ContractError("proof spec failed schema validation")
         self.catch_up(proof_id)
         revision, head = self.store.head(proof_id)
@@ -308,19 +320,21 @@ class OperationService:
                 return self._status(proof_id)
             raise ContractError("proof id already exists")
         target_ref = self.artifacts.put(target.encode("utf-8"))
+        spec_ref = self.artifacts.put(raw_spec.encode("utf-8")) if complete else target_ref
         lease_id = f"{proof_id}/init-{uuid.uuid4().hex}"
         token = self.store.acquire_lease(proof_id, lease_id, actor=ACTOR, worker_class="coordinator", ttl_seconds=30)
         try:
             proposal = Proposal(proof_id=proof_id, actor=ACTOR, worker_class="coordinator",
-                ops=(UpsertNode("Proof", f"{proof_id}/proof", {"title": spec["title"], "actor": ACTOR, "operation_id": operation_id, "target_artifact": target_ref}),
-                     UpsertNode("Claim", claim_id, {"status": "provisional", "claim_text": target, "literal_target_hash": target_ref}),
+                ops=(UpsertNode("Proof", f"{proof_id}/proof", {"title": title, "actor": ACTOR, "operation_id": operation_id, "target_artifact": spec_ref}),
+                     UpsertNode("Claim", claim_id, {"status": "provisional", "claim_text": target, "literal_target_hash": target_ref,
+                         **({"theorem_spec_artifact": spec_ref, "assumptions": spec["assumptions"]} if complete else {})}),
                      AddEdge("HAS_TARGET", f"{proof_id}/proof", claim_id, f"{proof_id}/target-1")),
                 base_revision=revision, lease_id=lease_id, fencing_token=token)
             result = self.gate.commit(proposal)
             if not result.accepted:
                 raise ContractError("gate rejected bootstrap: " + ", ".join(r.reason.value for r in result.rejections))
             self.catch_up(proof_id)
-            return {**self._status(proof_id), "artifact_pointers": [target_ref], "event_hash": result.event_hash}
+            return {**self._status(proof_id), "event_hash": result.event_hash}
         finally:
             self.store.release_lease(proof_id, lease_id, fencing_token=token)
 
@@ -328,11 +342,14 @@ class OperationService:
         self.catch_up(proof_id)
         revision, event_hash = self.store.head(proof_id)
         claim = self.view.node(f"{proof_id}/c-1")
+        project = self.view.node(f"{proof_id}/proof")
         status = claim.fields.get("status") if claim else None
         return {"proof_id": proof_id, "revision": revision, "event_hash": event_hash,
             "claim_status": status, "formal_verified": status == "lean-verified",
             "projection_lag": revision - self.view.snapshot(proof_id)[0],
-            "artifact_pointers": [claim.fields["literal_target_hash"]] if claim else [],
+            "literal_target": claim.fields["claim_text"] if claim else None,
+            "target_media_type": "application/json" if claim and project and project.fields["target_artifact"] != claim.fields["literal_target_hash"] else "text/plain; charset=utf-8",
+            "artifact_pointers": list(dict.fromkeys([project.fields["target_artifact"], claim.fields["literal_target_hash"]])) if claim and project else [],
             "summary": f"claim remains {status}; independent Lean replay not recorded"}
 
     def _cycle(self, proof_id: str, operation_id: str, *, category: str | None = None,

@@ -1,106 +1,170 @@
-"""Omega string-tool adapter over the public persistent-atp-client contract."""
-from __future__ import annotations
-
+"""String-only Omega bridge. Workers never call Janus or mutate atomspaces."""
+from concurrent.futures import ThreadPoolExecutor
 import json
-import os
 import threading
+import time
+from pathlib import Path
 
-from persistent_atp_client import (
-    AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,
-    ProofAudit, ProofCreate, ProofCycle, ProofExport, StatementAlign, SyncClient,
-    SelectedProofCycle, QueueResearchMoves, ResearchGuidance, Preconditions,
-)
-from persistent_atp_client.adapters.http import HTTPReceiverAdapter
-from persistent_atp_client.errors import ClientError
-
+from omegaclaw.frameworks.omega import OmegaAdapter
 
 _lock = threading.RLock()
-_pending = {}  # Nonauthoritative identity cache for uncertain in-process retries.
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="omega-atp")
+_slots = threading.BoundedSemaphore(32)
+_inflight = set()
+_adapter = None
+_enabled = False
+_last_poll = 0.0
+_errors = []
 
 
-def _client():
-    token = os.environ.get("PERSISTENT_ATP_OMEGA_TOKEN", "")
-    if not token:
-        raise ValueError("TOKEN_MISSING")
-    endpoint = os.environ.get("PERSISTENT_ATP_OMEGA_URL", "http://127.0.0.1:8765")
-    return SyncClient(AsyncClient(HTTPReceiverAdapter(endpoint, token)))
+def reporting_policy():
+    return Path(__file__).with_name("coordinator-policy.txt").read_text()
 
 
-def _budget(raw):
-    value = json.loads(raw)
-    if not isinstance(value, dict) or set(value) != {"max_steps", "wall_clock_ms"}:
-        raise ValueError("INVALID_BUDGET")
-    return Budget(**value)
+def disable():
+    global _enabled
+    _enabled = False
+    return True
 
 
-def _invoke(kind: str, workspace: str, **arguments: str) -> str:
+def configure_adapter(adapter, *, enabled=True):
+    """Trusted host/test injection. This function is not a model skill."""
+    global _adapter, _enabled
+    with _lock:
+        if _inflight:
+            raise RuntimeError("cannot replace adapter during active work")
+        _adapter, _enabled = adapter, enabled
+
+
+def _get_adapter():
+    global _adapter
+    with _lock:
+        if _adapter is None:
+            _adapter = OmegaAdapter.from_environment()
+        return _adapter
+
+
+def _submit(identity, function):
+    with _lock:
+        if identity in _inflight:
+            return True
+        if not _slots.acquire(blocking=False):
+            return False
+        _inflight.add(identity)
+    def run():
+        try:
+            function()
+        except Exception:
+            with _lock:
+                _errors.append({"transport_status": "error", "error_code": "BRIDGE_WORKER_FAILED",
+                                "request_id": identity, "message": "Work requires reconciliation; no mathematical result is inferred."})
+        finally:
+            with _lock:
+                _inflight.discard(identity)
+                _slots.release()
     try:
-        if any(not isinstance(value, str) for value in (kind, workspace, *arguments.values())):
+        _pool.submit(run)
+    except BaseException:
+        with _lock:
+            _inflight.discard(identity)
+            _slots.release()
+        raise
+    return True
+
+
+def _observe(adapter, identity):
+    for report in adapter.observe(identity):
+        if "notification_id" not in report:
+            adapter.stage_report(f"observation:{identity}:{report.get('error_code', 'error')}", report)
+
+
+def _execute(adapter, identity):
+    result = adapter.execute(identity)
+    adapter.stage_report(f"admission:{identity}:{result.get('phase', result.get('error_code', 'status'))}", result)
+    if adapter.state.intent(identity).get("ref"):
+        _observe(adapter, identity)
+
+
+def startup(workspace):
+    """Schedule capability negotiation and recovery without blocking the loop."""
+    global _enabled
+    adapter = _get_adapter()
+    if workspace != adapter.workspace:
+        return json.dumps({"transport_status": "error", "error_code": "UNREGISTERED_WORKSPACE"})
+    _enabled = True
+    def recover():
+        adapter.startup()
+        for row in adapter.state.snapshot()["intents"].values():
+            if row["state"] in {"reserved", "prepared", "uncertain"} and row["arguments"] is not None:
+                _submit(row["id"], lambda identity=row["id"]: _execute(adapter, identity))
+            elif row["state"] == "accepted" and row.get("ref"):
+                _submit(row["id"], lambda identity=row["id"]: _observe(adapter, identity))
+    _submit("startup", recover)
+    return json.dumps({"phase": "starting", "durable_admission": False})
+
+
+def _invoke(kind, workspace, **arguments):
+    try:
+        if not _enabled:
+            raise ValueError("PLUGIN_DISABLED")
+        if not all(isinstance(value, str) for value in (workspace, *arguments.values())):
             raise ValueError("tool arguments must be strings")
-        client = _client()
-        if kind == "proof-status":
-            digest = client.status(workspace_id=workspace, proof_id=arguments["proof"])
-            return json.dumps({"proof_id": digest.proof_id, "revision": digest.revision,
-                "event_hash": digest.journal_hash, "claim_status": digest.claim_status,
-                "formal_verified": digest.formal_verified,
-                "literal_target": digest.literal_target,
-                "artifact_pointers": [digest.target_artifact.hash],
-                "summary": digest.summary, "component_mode": digest.component_mode,
-                "transport_status": "ok", "contract_version": "2.0"}, ensure_ascii=False)
-        if kind == "coordination-page":
-            from persistent_atp_client.codecs import to_dict
-            page = client.coordination_page(arguments["proof"], workspace_id=workspace,
-                cursor=arguments["cursor"] or None, page_size=int(arguments["page_size"]))
-            return json.dumps({**to_dict(page), "transport_status": "ok",
-                "contract_version": "2.1"}, ensure_ascii=False)
-        if kind == "proof-create":
-            spec = json.loads(arguments["spec"])
-            if not isinstance(spec, dict) or set(spec) != {"proof_id", "literal_target", "title"}:
-                raise ValueError("INVALID_SPEC")
-            data = json.dumps(spec, sort_keys=True, ensure_ascii=False).encode("utf-8")
-            ref = client.put_artifact(data, workspace_id=workspace, media_type="application/json")
-            action = ProofCreate(ref)
-        elif kind == "proof-cycle": action = ProofCycle(arguments["proof"])
-        elif kind == "proof-cycle-selected": action = SelectedProofCycle(arguments["proof"], arguments["category"])
-        elif kind == "queue-research-moves":
-            raw = json.loads(arguments["moves"])
-            if not isinstance(raw, list):
-                raise ValueError("INVALID_GUIDANCE")
-            moves = tuple(ResearchGuidance(**item) for item in raw)
-            action = QueueResearchMoves(arguments["proof"], arguments["intent_key"], moves)
-        elif kind == "proof-audit": action = ProofAudit(arguments["proof"])
-        elif kind == "proof-export": action = ProofExport(arguments["proof"], arguments["destination"])
-        elif kind == "formal-search": action = FormalSearch(arguments["proof"], arguments["claim"], _budget(arguments["budget"]))
-        elif kind == "formal-resume": action = FormalResume(arguments["proof"], arguments["run"], _budget(arguments["budget"]))
-        elif kind == "statement-align": action = StatementAlign(arguments["proof"], arguments["claim"], ArtifactRef(arguments["lean_source"]))
-        elif kind == "lemma-bridge": action = LemmaBridge(arguments["proof"], arguments["obstruction"])
-        else: raise ValueError("UNKNOWN_ACTION")
-        if kind.startswith("formal-") and client.capabilities().backend_mode != "real":
-            raise ValueError("FORMAL_BACKEND_UNAVAILABLE")
-        key = json.dumps([kind, workspace, arguments], sort_keys=True, ensure_ascii=False)
-        with _lock:
-            request = _pending.get(key)
-            if request is None:
-                preconditions = (Preconditions(expected_revision=int(arguments["expected_revision"]))
-                    if kind == "queue-research-moves" else None)
-                request = client.prepare(action, workspace_id=workspace, preconditions=preconditions)
-                _pending[key] = request
-        handle = client.submit(request)
-        snapshot = client.wait(handle, timeout=10)
-        with _lock:
-            _pending.pop(key, None)
-        outcome = dict(snapshot.result or {})
-        outcome.update({"operation_id": snapshot.ref.operation_id, "request_id": request.request_id,
-                        "contract_version": request.contract_version,
-                        "receiver_mode": client.capabilities(contract_version=request.contract_version).receiver_mode})
-        return json.dumps(outcome, sort_keys=True, ensure_ascii=False)
-    except ClientError as exc:
-        code = "API_UNAVAILABLE" if exc.code in {"TRANSIENT_UNAVAILABLE", "SUBMISSION_UNCERTAIN"} else exc.code
-        return json.dumps({"transport_status": "error", "error_code": code,
-                           "request_id": exc.request_id}, sort_keys=True)
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        code = str(exc) if str(exc) in {"TOKEN_MISSING", "INVALID_BUDGET", "INVALID_SPEC", "INVALID_GUIDANCE", "FORMAL_BACKEND_UNAVAILABLE", "UNKNOWN_ACTION"} else "INVALID_REQUEST"
-        return json.dumps({"transport_status": "error", "error_code": code}, sort_keys=True)
+        adapter = _get_adapter()
+        identity = adapter.reserve(kind, workspace, arguments)
+        scheduled = _submit(identity, lambda: _execute(adapter, identity))
+        return json.dumps({"phase": "dispatching" if scheduled else "waiting-on-resource",
+            "transport_status": "accepted" if scheduled else "busy", "durable_admission": False,
+            "request_id": identity,
+            "message": "Bridge intent checkpointed; receiver admission and results arrive separately."})
+    except (ValueError, TypeError, KeyError) as exc:
+        code = str(exc) if str(exc) in {"TOKEN_MISSING", "PLUGIN_DISABLED", "UNREGISTERED_WORKSPACE", "INVALID_BUDGET", "CYCLE_LIMIT_REACHED"} else "INVALID_REQUEST"
+        return json.dumps({"transport_status": "error", "error_code": code})
+
+
+def _render(report):
+    raw = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    if len(raw) > 16000:
+        keep = {key: report[key] for key in ("notification_id", "request_id", "operation_ref", "operation_id",
+                    "project_revision", "revision", "proof_id", "journal_hash", "event_hash") if key in report}
+        raw = json.dumps({**keep, "rendering_incomplete": True,
+            "message": "Detailed output omitted. Retrieve the complete operation/artifacts through the authorized SDK; this is not a complete goal/dependency list."}, ensure_ascii=False)
+    return "PERSISTENT_ATP_RESULT " + raw
+
+
+def take_completed():
+    """Called by the loop thread; reports stay durable until history append ACK."""
+    global _last_poll
+    if not _enabled:
+        return ""
+    adapter = _get_adapter()
+    now = time.monotonic()
+    if now - _last_poll >= 0.25:
+        _last_poll = now
+        for row in adapter.active_intents():
+            _submit(row["id"], lambda identity=row["id"]: _observe(adapter, identity))
+        selected = adapter.state.snapshot().get("selected_proof")
+        if selected:
+            def refresh():
+                status = adapter.status(selected)
+                adapter.stage_report(f"status:{selected}:{status['revision']}", status)
+            _submit(f"status:{selected}", refresh)
+    with _lock:
+        errors = _errors[:]
+        _errors.clear()
+    return "\n".join(_render(report) for report in adapter.pending_reports() + errors)
+
+
+def ack_completed(raw, write_receipt):
+    if not isinstance(write_receipt, str) or not write_receipt.startswith("APPEND-VERIFIED"):
+        return False
+    identities = []
+    for line in raw.splitlines():
+        if line.startswith("PERSISTENT_ATP_RESULT "):
+            record = json.loads(line[len("PERSISTENT_ATP_RESULT "):])
+            if record.get("notification_id"):
+                identities.append(record["notification_id"])
+    _get_adapter().acknowledge(identities)
+    return True
 
 
 def proof_create(spec, workspace): return _invoke("proof-create", workspace, spec=spec)
@@ -112,6 +176,3 @@ def formal_search(proof, claim, budget, workspace): return _invoke("formal-searc
 def formal_resume(proof, run, budget, workspace): return _invoke("formal-resume", workspace, proof=proof, run=run, budget=budget)
 def statement_align(proof, claim, lean_source, workspace): return _invoke("statement-align", workspace, proof=proof, claim=claim, lean_source=lean_source)
 def lemma_bridge(proof, obstruction, workspace): return _invoke("lemma-bridge", workspace, proof=proof, obstruction=obstruction)
-def coordination_page(proof, cursor, page_size, workspace): return _invoke("coordination-page", workspace, proof=proof, cursor=cursor, page_size=page_size)
-def proof_cycle_selected(proof, category, workspace): return _invoke("proof-cycle-selected", workspace, proof=proof, category=category)
-def queue_research_moves(proof, intent_key, moves, expected_revision, workspace): return _invoke("queue-research-moves", workspace, proof=proof, intent_key=intent_key, moves=moves, expected_revision=expected_revision)

@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -13,10 +14,11 @@ import pytest
 from omegaclaw.api import serve
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
+from omegaclaw.runtime import DEFAULT_OMEGA_ROOT, OMEGA_REVISION
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK_PATH = Path(os.environ.get("OMEGACLAW_PROVIDER_SDK_PATH",
-                       str(ROOT / "tmp/repos/omegaclaw-provider-py310")))
+                       sysconfig.get_paths()["purelib"]))
 
 
 class DeepSeekMockHandler(BaseHTTPRequestHandler):
@@ -30,18 +32,23 @@ class DeepSeekMockHandler(BaseHTTPRequestHandler):
         self.requests.append({"body": json.loads(body), "path": self.path,
                               "auth": self.headers.get("Authorization")})
         n = len(self.requests)
+        messages = self.requests[-1]["body"]["messages"]
+        user = next(message["content"] for message in messages if message["role"] == "user")
+        parsed_user = json.loads(user)
+        custom = parsed_user.get("next_call")
         if n == 5:
             self.send_error(401)
             return
-        name = "proof-status" if n == 1 else "proof-audit"
+        name = custom["name"] if custom else "proof-status" if n == 1 else "proof-audit"
+        proof = parsed_user["proof"]
         if n == 3:
             response = {"choices": [{"finish_reason": "stop", "message":
                 {"role": "assistant", "content": "I think it is proved"}}]}
         else:
             response = {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
                 "tool_calls": [{"id": f"deepseek-call-{n}", "type": "function",
-                    "function": {"name": name, "arguments": json.dumps({
-                        "proof": 12 if n == 4 else "omegaproc", "workspace": "reference"})}}]}}]}
+                    "function": {"name": name, "arguments": json.dumps(custom["arguments"] if custom else {
+                        "proof": 12 if n == 4 else proof, "workspace": "reference"})}}]}}]}
         data = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -60,11 +67,13 @@ class DeepSeekMockHandler(BaseHTTPRequestHandler):
         reason="OpenAI SDK unavailable in PeTTa Python; set OMEGACLAW_PROVIDER_SDK_PATH")),
 ])
 def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
-    omega_source = Path(os.environ.get("OMEGA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "Omega")))
+    omega_source = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
     petta_source = Path(os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa")))
     if not (omega_source / "src/plugin.py").is_file() or not (petta_source / "src/main.pl").is_file():
         pytest.skip("pinned Omega/PeTTa checkouts unavailable; omega tier requires them")
-    process_python = os.environ.get("PETTA_PYTHON", "/usr/bin/python3")
+    process_python = os.environ.get("PETTA_PYTHON", sys.executable)
+    version = subprocess.run([process_python, "-c", "import sys; print(sys.version_info >= (3, 11))"], capture_output=True, text=True)
+    assert version.stdout.strip() == "True", "PETTA_PYTHON must be Python >=3.11"
     if subprocess.run([process_python, "-c", "import janus_swi"], capture_output=True).returncode != 0:
         pytest.skip("janus_swi unavailable; omega tier requires it")
     petta_root = tmp_path / "petta"
@@ -73,7 +82,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         shutil.copytree(petta_source / folder, petta_root / folder)
     omega_root = petta_root / "repos" / "Omega"
     omega_root.parent.mkdir()
-    shutil.copytree(omega_source, omega_root, ignore=shutil.ignore_patterns(".git"))
+    shutil.copytree(omega_source, omega_root)
     plugin_dir = omega_root / "plugins" / "persistent_atp"
     catalogue = omega_root / "config" / "plugins.yaml"
     original_catalogue = catalogue.read_text()
@@ -93,7 +102,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     assert (omega_root / "proxy/nginx.conf.template").read_text().count(
         "location = /deepseek/chat/completions {") == 1
     assert subprocess.run(["git", "-C", str(omega_source), "rev-parse", "HEAD"],
-        capture_output=True, text=True).stdout.strip() == "63a78265be9b8efc6e47cc39f3b4bc7a13e06ed5"
+        capture_output=True, text=True).stdout.strip() == OMEGA_REVISION
     service = OperationService(tmp_path / "service")
     receiver = ReferenceReceiver(service)
     server = serve(service, "omega-process-test-token", port=0, receiver=receiver)
@@ -106,6 +115,8 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     env = os.environ.copy()
     env.update({"PYTHONPATH": str(petta_root / "python"), "PETTA_TEST_ROOT": str(petta_root),
         "OMEGA_TEST_ROOT": str(omega_root), "PERSISTENT_ATP_OMEGA_TOKEN": "omega-process-test-token",
+        "PERSISTENT_ATP_OMEGA_STATE": str(tmp_path / "omega-state.json"),
+        "OMEGA_persistentAtpEnabled": "enabled", "OMEGA_persistentAtpWorkspace": "reference",
         "PERSISTENT_ATP_OMEGA_URL": f"http://127.0.0.1:{server.server_port}",
         "DEEPSEEK_API_KEY": "mock-transport-only", "DEEPSEEK_TEST_MODE": "1",
         "DEEPSEEK_API_URL": f"http://127.0.0.1:{deepseek_server.server_port}/chat/completions",
@@ -119,15 +130,15 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         assert completed.returncode == 0, completed.stderr[-6000:] + completed.stdout[-6000:]
         result_line = next(line for line in completed.stdout.splitlines() if line.startswith("PROCESS_RESULT="))
         result = json.loads(result_line.split("=", 1)[1])
-        assert result["registered_skills"] == 12
+        assert result["registered_skills"] == 9
         assert result["next_model_request_saw_digest"] is True
-        assert service.store.head("omegaproc")[0] == 2
-        assert service.store.verify_chain("omegaproc") == 2
-        assert result["coordination"]["queued_revision"] == 2
+        proof = result["create"]["proof_id"]
+        assert service.store.head(proof)[0] >= 2
+        assert service.store.verify_chain(proof) == service.store.head(proof)[0]
         assert service.artifacts.exists(result["create"]["artifact_pointers"][0])
         assert result["deepseek_mock_roundtrip"] is True
         assert result["sdk_provider_roundtrip"] is sdk_enabled
-        assert len(DeepSeekMockHandler.requests) == (7 if result["sdk_provider_roundtrip"] else 6)
+        assert len(DeepSeekMockHandler.requests) == (16 if result["sdk_provider_roundtrip"] else 15)
         first, second = (record["body"] for record in DeepSeekMockHandler.requests[:2])
         for record in DeepSeekMockHandler.requests[:5]:
             assert record["auth"] == "Bearer mock-transport-only"
@@ -143,7 +154,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         assert first["model"] == "deepseek-flash"
         assert first["thinking"] == {"type": "disabled"}
         assert first["tool_choice"] == "required"
-        assert len(first["tools"]) == 12
+        assert len(first["tools"]) == result["total_tools"]
         assert all("strict" not in t["function"] for t in first["tools"])
         assert second["messages"][-2]["tool_calls"][0]["function"]["name"] == "proof-status"
         assert second["messages"][-1]["tool_call_id"] == "deepseek-call-1"

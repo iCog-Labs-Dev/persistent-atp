@@ -310,8 +310,8 @@ class ReferenceReceiver:
         target = self.service.artifacts.get(target_ref)
         return ProjectDigest(workspace_id, proof_id, raw["revision"], raw["event_hash"],
                              raw["revision"] - raw["projection_lag"],
-                             ArtifactRef(target_ref, len(target), "text/plain; charset=utf-8"),
-                             target.decode("utf-8"), raw["claim_status"], bool(raw["formal_verified"]), raw["summary"],
+                             ArtifactRef(target_ref, len(target), raw["target_media_type"]),
+                             raw.get("literal_target", target.decode("utf-8")), raw["claim_status"], bool(raw["formal_verified"]), raw["summary"],
                              "reference-scripted")
 
     async def read_coordination(self, *, workspace_id: str, proof_id: str,

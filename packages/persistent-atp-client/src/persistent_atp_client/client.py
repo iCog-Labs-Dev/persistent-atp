@@ -210,6 +210,35 @@ class AsyncClient:
             seen.add(result.ref)
         return results
 
+    async def events_page(self, ref: OperationRef, *, cursor: str | None = None):
+        """Read one bounded page for checkpointed framework observation."""
+        if not isinstance(ref, OperationRef):
+            raise TypeError("events require OperationRef")
+        response = await self._port.read_events(ref, cursor)
+        if not isinstance(response, tuple) or len(response) != 2:
+            raise ReceiverProtocolError("invalid event page")
+        page, next_cursor = response
+        if not isinstance(page, tuple) or (next_cursor is not None and (
+                not isinstance(next_cursor, str) or not 1 <= len(next_cursor) <= 128
+                or any(ord(c) < 32 for c in next_cursor))):
+            raise ReceiverProtocolError("invalid event page shape")
+        previous = -1
+        previous_version = -1
+        seen = {}
+        for event in page:
+            if not isinstance(event, Event) or event.operation_ref != ref:
+                raise ReceiverProtocolError("out-of-scope event")
+            if event.event_id in seen:
+                if seen[event.event_id] != event:
+                    raise ReceiverProtocolError("event identity changed within a page")
+                continue
+            seen[event.event_id] = event
+            if event.sequence <= previous or event.observation_version < previous_version:
+                raise ReceiverProtocolError("event page sequence or observation regressed")
+            previous = event.sequence
+            previous_version = event.observation_version
+        return page, next_cursor
+
     async def put_artifact(self, source: bytes, *, workspace_id: str, media_type: str,
                            expected_hash: str | None = None) -> ArtifactRef:
         if type(source) is not bytes or len(source) > 16 * 1024 * 1024:
@@ -376,6 +405,24 @@ class SyncClient:
 
     def coordination_page(self, proof_id: str, **kwargs):
         return self._run(self._client.coordination_page(proof_id, **kwargs))
+
+    def list_operations(self, **kwargs):
+        return self._run(self._client.list_operations(**kwargs))
+
+    def snapshot(self, handle):
+        return self._run(handle.snapshot())
+
+    def events_page(self, ref, **kwargs):
+        return self._run(self._client.events_page(ref, **kwargs))
+
+    def cancel(self, control):
+        return self._run(self.attach(control.operation_ref).cancel(control))
+
+    def amend_budget(self, control):
+        return self._run(self.attach(control.operation_ref).amend_budget(control))
+
+    def answer_decision(self, control):
+        return self._run(self.attach(control.operation_ref).answer_decision(control))
 
     def close(self):
         return self._run(self._client.aclose())

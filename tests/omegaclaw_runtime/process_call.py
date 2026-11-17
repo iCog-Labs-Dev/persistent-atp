@@ -2,6 +2,8 @@
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
 from petta import PeTTa
 import janus_swi
@@ -19,12 +21,48 @@ omega_root = os.environ["OMEGA_TEST_ROOT"]
 runtime = PeTTa(petta_path=petta_root)
 janus_swi.query_once("asserta(working_dir(Dir))", {"Dir": petta_root})
 execute("!(import! &self (library lib_import))")
-execute('!(git-import! "https://github.com/singnet/Omega.git")')
-for module in ("utils.py", "utils", "logger.py", "log", "skills", "plugin.py", "plugin"):
+for expression in (Path(omega_root) / "run.metta").read_text().splitlines()[1:3]:
+    execute(expression)
+try:
+    execute('!(git-import! "https://github.com/singnet/Omega.git" "" "./repos" wrongrevision)')
+except janus_swi.PrologError as exc:
+    assert "pinned_omega_revision" in str(exc), exc
+else:
+    raise AssertionError("launcher accepted an incorrect Omega revision")
+metadata = Path(omega_root) / ".git"
+hidden_metadata = Path(omega_root) / ".git-hidden"
+metadata.rename(hidden_metadata)
+try:
+    try:
+        execute(expression)
+    except janus_swi.PrologError as exc:
+        assert "pinned_omega_metadata" in str(exc), exc
+    else:
+        raise AssertionError("launcher accepted missing runtime metadata")
+finally:
+    hidden_metadata.rename(metadata)
+for module in ("utils.py", "helper.py", "utils", "logger.py", "log", "config.py", "config", "skills", "plugin.py", "plugin"):
     values = runtime.process_metta_string(f"!(import! &self (library Omega ./src/{module}))")
     if not module.endswith(".py"):
         assert values, module
+sys.path.insert(0, omega_root + "/src")
+sys.path.insert(0, omega_root)
+import config
+config.init_config([])
+history = Path(omega_root) / "memory/history.metta"
+history.parent.mkdir(exist_ok=True)
+history.write_text("")
 plugin_dir = omega_root + "/plugins/persistent_atp"
+# Default disabled: policy is installed without registering workflows.
+os.environ.pop("OMEGA_persistentAtpEnabled", None)
+config.init_config([])
+base_skills = janus_swi.query_once("'getSkills'(Skills)")["Skills"]
+base_names = {str(skill[0]) for skill in base_skills}
+execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
+assert execute("!(getSkills)")[0].count('(proof-create "') == 0
+assert "literal target" in execute('!(prompt-extension persistent-atp-policy)')[0].lower()
+os.environ["OMEGA_persistentAtpEnabled"] = "enabled"
+config.init_config([])
 execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
 catalogue = execute("!(py-call (plugin.listPlugins))")[0]
 assert "persistent_atp" in catalogue and plugin_dir in catalogue, catalogue
@@ -32,25 +70,59 @@ assert "deepseek_provider" in catalogue, catalogue
 skills_once = execute("!(getSkills)")[0]
 assert skills_once.count('(proof-create "') == 1, skills_once
 for name in ("proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export",
-             "formal-search", "formal-resume", "statement-align", "lemma-bridge",
-             "coordination-page", "proof-cycle-selected", "queue-research-moves"):
+             "formal-search", "formal-resume", "statement-align", "lemma-bridge"):
     assert skills_once.count(f'({name} "') == 1, (name, skills_once)
 execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
 skills_twice = execute("!(getSkills)")[0]
 assert skills_twice == skills_once, "reloading the plugin changed skill registration"
+listener_count = janus_swi.query_once("findall(1, clause('heartbeat-listener'(persistent_atp, _, _), _), Bodies), length(Bodies, Count)")["Count"]
+assert listener_count == 1, listener_count
+
+def await_reply(receipt, *, read=False, allow_error=False):
+    receipt = json.loads(receipt)
+    assert receipt["phase"] == "dispatching" and receipt["durable_admission"] is False, receipt
+    deadline = time.monotonic() + 15
+    iteration = 0
+    while time.monotonic() < deadline:
+        execute(f"!(heartbeat {iteration})")
+        iteration += 1
+        raw = history.read_text()
+        found = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("PERSISTENT_ATP_RESULT "):
+                continue
+            record, _ = json.JSONDecoder().raw_decode(line[len("PERSISTENT_ATP_RESULT "):])
+            if record.get("request_id") != receipt["request_id"]:
+                continue
+            if record.get("transport_status") == "error":
+                assert allow_error, record
+                return record
+            if read and "revision" in record:
+                found = record
+            elif record.get("lifecycle") in {"succeeded", "failed"}:
+                assert allow_error or record["lifecycle"] == "succeeded", record
+                found = record["result"] or record
+        if found:
+            assert "PERSISTENT_ATP_RESULT" in history.read_text()
+            return found
+        time.sleep(0.03)
+    raise AssertionError("no delivered result before test deadline")
+
 
 target = "∀ n : Nat, n = n"
-spec = json.dumps({"proof_id": "omegaproc", "title": "Omega process", "literal_target": target})
+spec = json.dumps({"theorem": target, "definitions": {}, "assumptions": [],
+                   "quantifier_domains": {"n": "Nat"}, "allowed_background": [],
+                   "targets": ["literal theorem"], "verification_policy": "independent Lean replay"})
 raw = execute(f'!(proof-create {json.dumps(spec)} "reference")')[0]
 # PeTTa returns the bridge's serialized JSON string in its result list.
-envelope = json.loads(raw)
+envelope = await_reply(raw)
 assert envelope["phase"] == "finished", envelope
 assert envelope["revision"] == 1, envelope
 assert envelope["claim_status"] == "provisional", envelope
 assert envelope["formal_verified"] is False, envelope
-assert envelope["contract_version"] == "2.0", envelope
-assert envelope["receiver_mode"] == "reference-scripted", envelope
 assert envelope["artifact_pointers"], envelope
+proof = envelope["proof_id"]
 
 # Omega's provider constructs the next request from a tool response. The
 # actual response bytes above, not a harness-authored success string, enter it.
@@ -69,15 +141,13 @@ tool_names = {
     "formal-resume": ("proof", "run", "budget", "workspace"),
     "statement-align": ("proof", "claim", "lean_source", "workspace"),
     "lemma-bridge": ("proof", "obstruction", "workspace"),
-    "coordination-page": ("proof", "cursor", "page_size", "workspace"),
-    "proof-cycle-selected": ("proof", "category", "workspace"),
-    "queue-research-moves": ("proof", "intent_key", "moves", "expected_revision", "workspace"),
 }
-tools = [providers.LLMTool().with_name(name).with_description(name).with_parameters(
-    [providers.LLMToolParameter().with_name(param) for param in params])
-    for name, params in tool_names.items()]
+native_skills = janus_swi.query_once("'getSkills'(Skills)")["Skills"]
+tools = providers.getTools(native_skills)
+actual_tools = {str(tool.name): tuple(str(parameter.name) for parameter in tool.parameters) for tool in tools}
+assert {name: args for name, args in actual_tools.items() if name not in base_names} == tool_names, repr(actual_tools)
 model_request = providers.llmRequest(providers.llmRequestMessage("system", "Use committed status"),
-    [providers.llmRequestMessage("user", "Check omegaproc")], 128, "low", tools)
+    [providers.llmRequestMessage("user", json.dumps({"proof": proof}))], 128, "low", tools)
 model_response = providers.llmProviderChat(model_request)
 assert not model_response.is_error(), model_response
 assert len(model_response.calls) == 1, model_response
@@ -85,10 +155,11 @@ assert model_response.calls[0].name == "proof-status", model_response
 model_call = model_response.calls[0]
 status_raw = execute(f'!(proof-status {json.dumps(model_call.arguments["proof"])} '
                      f'{json.dumps(model_call.arguments["workspace"])})')[0]
-status_envelope = json.loads(status_raw)
+status_envelope = await_reply(status_raw, read=True)
+status_raw = json.dumps(status_envelope)
 assert status_envelope["event_hash"] == envelope["event_hash"], status_envelope
 next_model_request = providers.llmRequest(providers.llmRequestMessage("system", "Use committed status"),
-    [providers.llmRequestMessage("user", "Check omegaproc"),
+    [providers.llmRequestMessage("user", json.dumps({"proof": proof})),
      providers.llmToolCallMessage("assistant", model_response.calls, "[TOOL CALL]"),
      providers.llmToolCallResponseMessage("tool", model_call.id, status_raw)],
     128, "low", tools)
@@ -135,21 +206,36 @@ next_request = providers.llmRequest(
     providers.llmRequestMessage("system", "Report only committed status"),
     [tool_message], 128, "low", [])
 assert next_request.messages[1].content == json.dumps(envelope)
-coordination = json.loads(execute('!(coordination-page "omegaproc" "" "100" "reference")')[0])
-assert coordination["revision"] == 1 and coordination["next_cursor"] is None, coordination
-guidance = json.dumps([{"move_kind": "bridge-lemma", "detail": "Investigate an intermediate equality",
-                        "target_id": "omegaproc/c-1"}])
-queued = json.loads(execute(f'!(queue-research-moves "omegaproc" "process-guidance" '
-                            f'{json.dumps(guidance)} "1" "reference")')[0])
-assert queued["revision"] == 2 and len(queued["research_move_ids"]) == 1, queued
-selected = json.loads(execute('!(proof-cycle-selected "omegaproc" "research-move" "reference")')[0])
-assert selected["error_code"] == "THREADKEEPER_UNAVAILABLE", selected
-assert selected["selected_move_id"] == queued["research_move_ids"][0], selected
+assert not any(name in skills_once for name in ('(coordination-page "', '(proof-cycle-selected "', '(queue-research-moves "'))
+assert envelope["event_hash"] in history.read_text()
+# Exercise every registered signature through the real provider registry and
+# native string-only tool calls. Unavailable formal work must remain blocked.
+all_calls = {
+    "proof-create": {"spec": spec}, "proof-cycle": {"proof": proof},
+    "proof-status": {"proof": proof}, "proof-audit": {"proof": proof},
+    "proof-export": {"proof": proof, "destination": "default"},
+    "formal-search": {"proof": proof, "claim": f"{proof}/c-1", "budget": '{"max_steps":5,"wall_clock_ms":1000}'},
+    "formal-resume": {"proof": proof, "run": f"{proof}/missing-run", "budget": '{"max_steps":5,"wall_clock_ms":1000}'},
+    "statement-align": {"proof": proof, "claim": f"{proof}/c-1", "lean_source": envelope["artifact_pointers"][0]},
+    "lemma-bridge": {"proof": proof, "obstruction": f"{proof}/missing-obstruction"},
+}
+for name, arguments in all_calls.items():
+    arguments["workspace"] = "reference"
+    request = providers.llmRequest(providers.llmRequestMessage("system", "Call the requested tool"),
+        [providers.llmRequestMessage("user", json.dumps({"proof": proof,
+            "next_call": {"name": name, "arguments": arguments}}))], 128, "low", tools)
+    response = providers.llmProviderChat(request)
+    assert not response.is_error() and len(response.calls) == 1, response
+    call = response.calls[0]
+    assert call.name == name and call.arguments == arguments, call
+    expression = f'!({name} ' + ' '.join(json.dumps(call.arguments[key]) for key in tool_names[name]) + ')'
+    result = await_reply(execute(expression)[0], read=name == "proof-status", allow_error=True)
+    assert not result.get("formal_verified"), result
+    if name in {"formal-search", "formal-resume", "lemma-bridge"}:
+        assert result.get("error_code"), result
 print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "next_model_request_saw_digest": envelope["event_hash"] in next_request.messages[1].content,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
     "sdk_provider_roundtrip": sdk_roundtrip,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
-    "registered_skills": 12,
-    "coordination": {"queued_revision": queued["revision"],
-                     "selected_move_id": selected["selected_move_id"]}}, sort_keys=True), flush=True)
+    "registered_skills": 9, "total_tools": len(tools)}, sort_keys=True), flush=True)

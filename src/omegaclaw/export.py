@@ -9,7 +9,7 @@ from commit_gate.apply import apply_ops
 from commit_gate.ops import ops_from_dicts
 from commit_gate.state import MemoryView
 
-ARTIFACT_FIELDS = frozenset({"target_artifact", "literal_target_hash",
+ARTIFACT_FIELDS = frozenset({"target_artifact", "literal_target_hash", "theorem_spec_artifact",
     "lean_source_artifact", "source_hash", "report_artifact", "packet_artifact",
     "result_artifact", "minimal_state_artifact", "certificate_artifact",
     "checkpoint_artifact"})

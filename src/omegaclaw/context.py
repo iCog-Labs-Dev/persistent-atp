@@ -5,6 +5,7 @@ import json
 
 from artifacts.hashing import hash_content
 from commit_gate.canon import canonical_json
+from .specification import parse_json, validate_spec
 
 COMPILER_VERSION = "reference-kernel-v2"
 
@@ -18,9 +19,14 @@ def compile_packet(proof_id: str, lease, view, artifacts) -> bytes:
     if proof is None or claim is None:
         raise ValueError("theorem kernel is incomplete")
     pointer = proof.fields["target_artifact"]
-    literal = artifacts.get(pointer).decode("utf-8")
-    if literal != claim.fields["claim_text"] or pointer != claim.fields["literal_target_hash"]:
+    literal = artifacts.get(claim.fields["literal_target_hash"]).decode("utf-8")
+    if literal != claim.fields["claim_text"]:
         raise ValueError("literal target artifact differs from committed claim")
+    complete_spec = None
+    if pointer != claim.fields["literal_target_hash"]:
+        complete_spec = validate_spec(parse_json(artifacts.get(pointer).decode("utf-8")))
+        if complete_spec["theorem"] != literal or claim.fields.get("theorem_spec_artifact") != pointer:
+            raise ValueError("complete theorem specification differs from committed claim")
     selected = snapshot.node(lease.selected_move_id)
     if selected is None:
         raise ValueError("selected move is absent from the committed snapshot")
@@ -38,7 +44,8 @@ def compile_packet(proof_id: str, lease, view, artifacts) -> bytes:
     packet = {"schema_version": 1, "compiler_version": COMPILER_VERSION,
         "proof_id": proof_id, "claim_id": claim.node_id,
         "literal_target": literal, "theorem_hash": pointer,
-        "assumptions": [], "permitted_results": [], "speculative_dependencies": [],
+        "assumptions": complete_spec["assumptions"] if complete_spec else [],
+        "permitted_results": [], "speculative_dependencies": [],
         "selected_move_id": lease.selected_move_id,
         "worker_class": lease.worker_class, "actor": lease.actor,
         "lease_id": lease.lease_id, "snapshot_revision": revision,
@@ -47,6 +54,8 @@ def compile_packet(proof_id: str, lease, view, artifacts) -> bytes:
         "selected_strategy": strategy,
         "viable_alternative_ids": alternatives,
         "retrieval_channels": [], "inclusion_reasons": ["registered-literal-target", "selected-committed-move"]}
+    if complete_spec:
+        packet["theorem_specification"] = complete_spec
     packet["packet_digest"] = hash_content(canonical_json(packet))
     return canonical_json(packet)
 

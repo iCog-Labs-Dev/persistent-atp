@@ -442,20 +442,25 @@ def test_o21_o22_packet_uses_committed_theorem_and_rejects_mutation(tmp_path):
         scheduler.release("p1", lease.lease_id, fencing_token=lease.fencing_token)
 
 
-def test_o20_timeout_is_error_with_one_bounded_attempt(monkeypatch):
+def test_o20_timeout_is_reported_asynchronously_with_request_identity(monkeypatch, tmp_path):
     bridge_path = Path(__file__).resolve().parents[1] / "omega_plugin/omega_persistent_atp_bridge.py"
     module_spec = importlib.util.spec_from_file_location("omega_bridge_timeout_test", bridge_path)
     bridge = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(bridge)
     monkeypatch.setenv("PERSISTENT_ATP_OMEGA_TOKEN", "long-test-token-for-reference")
+    monkeypatch.setenv("PERSISTENT_ATP_OMEGA_STATE", str(tmp_path / "state.json"))
     calls = []
     async def timeout(*args, **kwargs):
         calls.append(1)
         raise httpx.ConnectTimeout("offline")
     monkeypatch.setattr(httpx.AsyncClient, "send", timeout)
-    result = json.loads(bridge.proof_status("p1", "reference"))
-    assert result["transport_status"] == "error"
-    assert result["error_code"] == "API_UNAVAILABLE"
+    bridge.configure_adapter(bridge.OmegaAdapter.from_environment())
+    receipt = json.loads(bridge.proof_status("p1", "reference"))
+    bridge._pool.shutdown(wait=True)
+    assert receipt["phase"] == "dispatching"
+    reports = bridge._adapter.pending_reports()
+    assert reports[0]["error_code"] == "TRANSIENT_UNAVAILABLE"
+    assert reports[0]["request_id"] == receipt["request_id"]
     assert len(calls) == 1
 
 
