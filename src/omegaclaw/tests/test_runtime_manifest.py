@@ -19,6 +19,10 @@ def sealed(tmp_path):
     mock = tmp_path / "Autotests/mock/llm.py"
     mock.parent.mkdir(parents=True)
     mock.write_text("# pinned Test-provider runtime\n")
+    proxy = tmp_path / "proxy"
+    proxy.mkdir()
+    (proxy / "nginx.conf.template").write_text("# verified proxy configuration\n")
+    (proxy / "nginx.sh").write_text("#!/bin/sh\n")
     seal_runtime(tmp_path)
     return tmp_path
 
@@ -38,6 +42,9 @@ def test_container_overlay_is_sealed_and_requires_a_digest(sealed, tmp_path):
     dockerfile = (output / "Dockerfile").read_text()
     assert "FROM omega@sha256:" in dockerfile and "@@" not in dockerfile
     assert "ENV PERSISTENT_ATP_OMEGA_STATE=/PeTTa/repos/Omega/memory/" in dockerfile
+    assert "--chown=www-data:www-data --chmod=0600 omega/proxy/" in dockerfile
+    for name in ("nginx.conf.template", "nginx.sh"):
+        assert (output / "omega/proxy" / name).read_bytes() == (sealed / "proxy" / name).read_bytes()
     assert not (output / "omega/.git").exists()
     assert (output / "omega/version").read_text().strip() == OMEGA_REVISION
     assert (output / "omega/Autotests/mock/llm.py").read_bytes() == (sealed / "Autotests/mock/llm.py").read_bytes()

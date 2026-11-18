@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from .errors import (
     ArtifactNotFoundError,
+    ArtifactIntegrityError,
     ArtifactQueryError,
     ArtifactStoreUnavailable,
     SchemaNotAppliedError,
@@ -108,7 +109,10 @@ class ArtifactStore:
         if row is None:
             raise ArtifactNotFoundError(artifact_hash)
         (content,) = row
-        return bytes(content)
+        content = bytes(content)
+        if hash_content(content) != artifact_hash:
+            raise ArtifactIntegrityError("stored artifact bytes do not match their content address")
+        return content
 
     def exists(self, artifact_hash: str) -> bool:
         """Whether something is stored under `artifact_hash`."""

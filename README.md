@@ -66,6 +66,8 @@ paths, and verifies the sealed overlay and patched launcher. Use an approved
 Omega base image pinned by its full digest. The cache defaults to
 `/PeTTa/repos/Omega/memory/persistent_atp/workflow.json` inside Omega's persistent
 memory volume, which its sandbox permits the `nobody` agent account to write.
+The sealed proxy assets are installed into `/opt/nginx/`; provider keys stay
+with that proxy. Only the providers and channels you select need credentials.
 Configure a receiver URL reachable from the container. A custom cache path
 must also be writable under the configured filesystem policy.
 
@@ -100,7 +102,32 @@ bash scripts/omegaclaw-test.sh --tier reference
 bash scripts/omegaclaw-test.sh --tier omega
 ```
 
-The supplied receiver is a reference implementation with scripted research
-execution. Real formal execution, durable backend resume, independent Lean
-replay, and production MORK persistence remain separate integration work.
-Unsupported formal actions and controls are reported explicitly.
+The full container test builds from a locally pulled official image and uses a
+local model stub, an isolated proxy port, a reference receiver, and an Omega
+restart. It makes no paid provider calls:
+
+```bash
+export OMEGA_CONTAINER_BASE_IMAGE=singularitynet/omega@sha256:<digest>
+bash scripts/omegaclaw-test.sh --tier container
+```
+
+Receiver configuration accepts `profile: reference`, `persistence`, or
+`production`. Persistent profiles require the PostgreSQL artifact schema and
+the native MORK library loaded with `scripts/with-mork.sh`. The persistence
+profile retains explicitly labeled scripted research; production currently
+allows creation, status, audit, and export, and rejects unavailable worker
+actions. Both recover the MORK projection from the journal at startup.
+
+```bash
+scripts/with-mork.sh --install bash scripts/omegaclaw-test.sh --tier persistence
+```
+
+Set `ARTIFACT_TEST_DB_URL` to a dedicated test database for that check.
+`OMEGA_JANUS_MODE=swipl` checks the official container's SWI-to-Python bridge;
+`python` selects the host `janus_swi` arrangement. The default is `auto`.
+
+HTTP forwards the shared cancellation, budget, and decision DTOs only when
+the receiver advertises support. The supplied receiver does not yet implement
+executor controls. Production formal adapters require authoritative compiled
+context and a bounded backend; durable continuation, independent Lean replay,
+and the complete receiver-to-formal-executor path remain unavailable.

@@ -450,11 +450,11 @@ class TestMathsAIFormalATP(unittest.TestCase):
             RunDisposition.INVALID_REQUEST.value,
         )
 
-    def test_cancel_stops_the_run(self):
+    def test_cancel_cannot_claim_an_unconfirmed_stop(self):
         atp = MathsAIFormalATP(reasoner=StubReasoner(solved_graph()))
-        atp.formal_search_cancel("p1/fr-1")
+        self.assertEqual(atp.formal_search_cancel("p1/fr-1")["control_status"], "unsupported")
         self.assertEqual(
-            atp.formal_search_resume("p1/fr-1")["disposition"], "cancelled"
+            atp.formal_search_resume("p1/fr-1")["disposition"], "invalid-request"
         )
 
     def test_replay_delegates_to_the_injected_verdict(self):

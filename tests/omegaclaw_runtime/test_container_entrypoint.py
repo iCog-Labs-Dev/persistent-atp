@@ -133,6 +133,7 @@ exec /usr/bin/su "$@"
     executable(runtime / "run.sh", '''#!/bin/sh
 set -eu
 mkdir -p "$(dirname "$PERSISTENT_ATP_OMEGA_STATE")"
+chmod 0777 "$(dirname "$PERSISTENT_ATP_OMEGA_STATE")"
 printf '{}' > "$PERSISTENT_ATP_OMEGA_STATE"
 printf 'ATP_TEST_UID=%s\000' "$(id -u)"
 exec /usr/bin/env -0

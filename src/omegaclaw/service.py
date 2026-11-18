@@ -35,12 +35,28 @@ ACTOR = "omega-coordinator"
 
 class OperationService:
     def __init__(self, root: str | Path, *, workspace: str = "reference", artifacts=None,
-                 critic_command: tuple[str, ...] | None = None, critic_timeout_s: float = 2.0):
+                 critic_command: tuple[str, ...] | None = None, critic_timeout_s: float = 2.0,
+                 profile: str = "reference", artifact_db_url: str | None = None):
+        if profile not in {"reference", "persistence", "production"}:
+            raise ValueError("unknown receiver profile")
+        self.profile = profile
+        self.receiver_mode = {"reference": "reference-scripted", "persistence": "persistence-scripted",
+                              "production": "persistent-storage"}[profile]
+        self._owns_artifacts = artifacts is None
+        if profile != "reference":
+            from artifacts.store import ArtifactStore
+            from mork.backend.ffi import MorkSpace
+            from mork.backend.view import MorkView
+            self.view = MorkView(MorkSpace())
+            if artifacts is not None and not isinstance(artifacts, ArtifactStore):
+                raise ValueError("persistent profiles require the configured PostgreSQL artifact store")
+            artifacts = artifacts if artifacts is not None else ArtifactStore(artifact_db_url)
+        else:
+            self.view = MemoryView()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = workspace
         self.store = JournalStore(str(self.root / "journal.sqlite3"), allow_cross_thread=True)
-        self.view = MemoryView()
         self.gate = CommitGate(self.view, self.store)
         self.jobs = JobLedger(self.root / "operations.sqlite3")
         self.artifacts = artifacts or ReferenceArtifactStore(self.root / "artifacts")
@@ -52,11 +68,17 @@ class OperationService:
             self.catch_up(proof_id)
 
     def catch_up(self, proof_id: str) -> None:
+        if self.gate.projects:
+            self.gate.catch_up(proof_id)
+            return
         while self.view.snapshot(proof_id)[0] < self.store.head(proof_id)[0]:
             self.view.apply_journal_event(self.store, proof_id, self.view.snapshot(proof_id)[0] + 1)
 
     def submit(self, raw: object) -> dict:
         request = validate_request(raw)
+        if self.profile == "production" and request["operation"] not in {
+                "proof-create", "proof-status", "proof-audit", "proof-export"}:
+            raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
         if request["operation"] == "proof-cycle":
@@ -75,6 +97,12 @@ class OperationService:
             response = {"operation_id": operation_id, "phase": "failed", "transport_status": "error", "error_code": type(exc).__name__, "summary": str(exc)[:500]}
         self.jobs.update(operation_id, response)
         return response
+
+    def close(self):
+        self.jobs.conn.close()
+        self.store.close()
+        if self._owns_artifacts and hasattr(self.artifacts, "close"):
+            self.artifacts.close()
 
     def _execute(self, request: dict, operation_id: str) -> dict:
         operation = request["operation"]

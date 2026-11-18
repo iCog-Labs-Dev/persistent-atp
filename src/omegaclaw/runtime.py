@@ -9,7 +9,8 @@ PETTA_REVISION = "7037f4c2ad378c52fc328004fe216d5118b674f0"
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OMEGA_ROOT = ROOT / "tmp" / "repos" / "Omega-ba185cd"
 MANIFEST = "persistent_atp_runtime.json"
-CORE_PATHS = ("src", "providers", "profile", "Autotests/mock", "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
+CORE_PATHS = ("src", "providers", "profile", "Autotests/mock", "proxy/nginx.sh",
+              "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
 
 
 def verify_checkout(root):
@@ -38,7 +39,7 @@ def seal_runtime(root):
         paths.append(root / "version")
     # The Test provider and test channel import these at runtime. Leaving the
     # base image's older mocks would mix incompatible tool-call protocols.
-    for name in ("src", "providers", "plugins", "profile", "config", "channels", "Autotests/mock"):
+    for name in ("src", "providers", "plugins", "profile", "config", "channels", "Autotests/mock", "proxy"):
         paths.extend(path for path in (root / name).rglob("*") if path.is_file()
                      and "__pycache__" not in path.parts and path.suffix != ".pyc")
     files = {}

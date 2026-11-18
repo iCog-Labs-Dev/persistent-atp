@@ -114,11 +114,14 @@ def bundle_runtime(omega_root: Path, destination: Path, base_image: str) -> dict
     if not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", base_image):
         raise ValueError("base image must be pinned as image@sha256:<64 hex digits>")
     verify_manifest(omega_root)
+    manifest = json.loads((omega_root / MANIFEST).read_text())
+    for name in ("proxy/nginx.conf.template", "proxy/nginx.sh"):
+        if name not in manifest["files"]:
+            raise ValueError("container runtime lacks verified proxy assets")
     # Refuse to overwrite an existing context, or to copy one into its source.
     if destination.resolve().is_relative_to(omega_root.resolve()):
         raise ValueError("container context must be outside the Omega source")
     destination.mkdir(parents=True, exist_ok=False)
-    manifest = json.loads((omega_root / MANIFEST).read_text())
     for name in [*manifest["files"], MANIFEST]:
         target = destination / "omega" / name
         target.parent.mkdir(parents=True, exist_ok=True)

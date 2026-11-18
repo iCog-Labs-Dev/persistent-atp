@@ -9,6 +9,7 @@ ENV PERSISTENT_ATP_OMEGA_STATE=/PeTTa/repos/Omega/memory/persistent_atp/workflow
 RUN test "$(git -C /PeTTa rev-parse HEAD)" = "@@PETTA_REVISION@@"
 COPY omega/ /PeTTa/repos/Omega/
 COPY omega/run.metta /PeTTa/run.metta
+COPY --chown=www-data:www-data --chmod=0600 omega/proxy/nginx.conf.template omega/proxy/nginx.sh /opt/nginx/
 RUN python3 -c 'import sys, httpx; assert sys.version_info >= (3, 11)'
 RUN swipl -q -g 'use_module(library(janus)), py_call(sys:version_info, _), halt'
 RUN PYTHONPATH=/PeTTa/repos/Omega/plugins/persistent_atp python3 -c 'from omegaclaw.runtime import verify_manifest; verify_manifest("/PeTTa/repos/Omega")'

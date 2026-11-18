@@ -13,6 +13,7 @@ __all__ = [
     "SchemaNotAppliedError",
     "ArtifactNotFoundError",
     "ArtifactQueryError",
+    "ArtifactIntegrityError",
 ]
 
 
@@ -44,3 +45,7 @@ class ArtifactNotFoundError(ArtifactStoreError):
 class ArtifactQueryError(ArtifactStoreError):
     """The database rejected or failed a statement (bad parameter, or a
     server-side error that outlived the driver's own retries)."""
+
+
+class ArtifactIntegrityError(ArtifactStoreError):
+    """Stored bytes no longer match their content address."""

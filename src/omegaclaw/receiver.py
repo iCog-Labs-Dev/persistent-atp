@@ -17,7 +17,7 @@ from pathlib import Path
 
 from persistent_atp_client.codecs import canonical_json, fingerprint, request_from_json
 from persistent_atp_client.errors import (
-    ArtifactUnavailable, Forbidden, IdempotencyConflict, StalePrecondition,
+    ArtifactUnavailable, HashMismatch, Forbidden, IdempotencyConflict, StalePrecondition,
     UnsupportedCapability,
 )
 from persistent_atp_client.models import (
@@ -29,12 +29,13 @@ from persistent_atp_client.models import (
     CoordinationPage, CoordinationItem,
 )
 from mathproof.scheduler import GlobalScheduler
+from artifacts.errors import ArtifactIntegrityError
 
 from .service import OperationService
 
 
 class ReferenceReceiver:
-    """Service-owned queue and request ledger for the labeled reference tier."""
+    """Durable request queue with explicitly selected storage/execution tiers."""
 
     def __init__(self, service: OperationService, *, principal: str = "trusted-reference"):
         if not principal:
@@ -75,6 +76,12 @@ class ReferenceReceiver:
         for row in rows:
             self._schedule(row["operation_id"])
 
+    def _artifact(self, address):
+        try:
+            return self.service.artifacts.get(address)
+        except ArtifactIntegrityError as exc:
+            raise HashMismatch("stored artifact bytes do not match their content address") from exc
+
     def _scope(self, workspace_id: str):
         if workspace_id != self.workspace_id:
             raise Forbidden("workspace is not available to this receiver")
@@ -92,10 +99,13 @@ class ReferenceReceiver:
         if contract_version not in {"2.0", "2.1"}:
             raise UnsupportedCapability("unsupported contract version")
         actions = BASE_ACTION_TYPES if contract_version == "2.0" else ACTION_TYPES
+        if self.service.profile == "production":
+            actions = {kind: value for kind, value in actions.items() if kind in {
+                "proof-create", "proof-status", "proof-audit", "proof-export"}}
         return CapabilitySet(contract_version, frozenset(actions),
                              controls=frozenset({"coordination-read"}) if contract_version == "2.1" else frozenset(),
                              backend_mode="unavailable", independent_replay=False,
-                             receiver_mode="reference-scripted")
+                             receiver_mode=self.service.receiver_mode)
 
     async def submit(self, request: ActionRequest) -> Admission:
         if not isinstance(request, ActionRequest):
@@ -124,7 +134,7 @@ class ReferenceReceiver:
         proof_id = getattr(request.action, "proof_id", None)
         if isinstance(request.action, ProofCreate):
             try:
-                spec = json.loads(self.service.artifacts.get(request.action.spec_artifact.hash))
+                spec = json.loads(self._artifact(request.action.spec_artifact.hash))
                 proof_id = spec["proof_id"]
             except (ValueError, KeyError, TypeError):
                 proof_id = None
@@ -156,7 +166,7 @@ class ReferenceReceiver:
                                          (self.principal, self.workspace_id, ref.hash)).fetchone()
             if not grant or not self.service.artifacts.exists(ref.hash):
                 raise ArtifactUnavailable("referenced artifact is unavailable")
-            exact = self.service.artifacts.get(ref.hash)
+            exact = self._artifact(ref.hash)
             if ref.size_bytes is not None and ref.size_bytes != len(exact):
                 raise ArtifactUnavailable("referenced artifact size differs")
         created = False
@@ -187,7 +197,7 @@ class ReferenceReceiver:
     def _legacy_request(self, request: ActionRequest) -> dict:
         action = request.action
         if isinstance(action, ProofCreate):
-            raw = self.service.artifacts.get(action.spec_artifact.hash).decode("utf-8")
+            raw = self._artifact(action.spec_artifact.hash).decode("utf-8")
             args = {"spec": raw}
         elif isinstance(action, ProofCycle): args = {"proof": action.proof_id}
         elif isinstance(action, ProofStatus): args = {"proof": action.proof_id}
@@ -307,12 +317,12 @@ class ReferenceReceiver:
         if at_revision is not None and raw["revision"] != at_revision:
             raise UnsupportedCapability("historical revision read is unavailable")
         target_ref = raw["artifact_pointers"][0]
-        target = self.service.artifacts.get(target_ref)
+        target = self._artifact(target_ref)
         return ProjectDigest(workspace_id, proof_id, raw["revision"], raw["event_hash"],
                              raw["revision"] - raw["projection_lag"],
                              ArtifactRef(target_ref, len(target), raw["target_media_type"]),
                              raw.get("literal_target", target.decode("utf-8")), raw["claim_status"], bool(raw["formal_verified"]), raw["summary"],
-                             "reference-scripted")
+                             self.service.receiver_mode)
 
     async def read_coordination(self, *, workspace_id: str, proof_id: str,
                                 cursor: str | None = None, page_size: int = 100) -> CoordinationPage:
@@ -362,7 +372,7 @@ class ReferenceReceiver:
         next_offset = offset + len(selected)
         next_cursor = f"{proof_id}:{revision}:{next_offset}" if next_offset < len(items) else None
         return CoordinationPage(workspace_id, proof_id, revision, head_hash, revision,
-            selected, len(items), next_cursor, "reference-scripted")
+            selected, len(items), next_cursor, self.service.receiver_mode)
 
     async def read_events(self, ref: OperationRef, cursor: str | None = None):
         self._scope(ref.workspace_id)
@@ -399,7 +409,7 @@ class ReferenceReceiver:
                                      (self.principal, workspace_id, ref.hash)).fetchone()
         if not grant:
             raise ArtifactUnavailable("artifact is not available in this workspace")
-        return self.service.artifacts.get(ref.hash)
+        return self._artifact(ref.hash)
 
     async def cancel(self, control: CancelRequest):
         raise UnsupportedCapability("reference executor cancellation is unavailable")

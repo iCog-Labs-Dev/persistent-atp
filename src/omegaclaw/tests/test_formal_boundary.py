@@ -65,3 +65,50 @@ def test_o10_heuristic_score_cannot_turn_open_goal_into_verified_result():
     assert result["states"][0]["status"] == "open"
     assert result["states"][0]["annotations"]["pln_strength"] == 1.0
     assert "certificate" not in result
+
+
+def test_production_request_requires_authoritative_compilation_and_bounded_backend():
+    from copy import deepcopy
+    from mathproof.tests.test_maths_ai_adapter import open_graph
+    from mathproof.schemas import validate
+    request = {key: value for key, value in REQUEST.items() if key != 'hypotheses'}
+    request['budget'] = {'max_steps': 10, 'wall_clock_ms': 1000}
+    authoritative = deepcopy(request)
+    class Bounded:
+        calls = []
+        async def prove_bounded(self, goal, *, budget):
+            self.calls.append((goal, budget))
+            return open_graph()
+    backend = Bounded()
+    assert validate('formal-search-request', request) == []
+    atp = MathsAIFormalATP(reasoner=backend, production=True,
+                          request_compiler=lambda _: deepcopy(authoritative))
+    assert atp.formal_search_start(request)['disposition'] == 'budget-exhausted'
+    assert backend.calls == [(request['goal_text'], request['budget'])]
+    changed = {**request, 'goal_text': 'False'}
+    result = atp.formal_search_start(changed)
+    assert result['disposition'] == 'invalid-request'
+    assert result['artifacts'][0]['note'] == 'request-does-not-match-authoritative-context'
+    assert len(backend.calls) == 1
+    unbounded = MathsAIFormalATP(reasoner=StubReasoner(open_graph()), production=True,
+                               request_compiler=lambda _: authoritative)
+    assert unbounded.formal_search_start(request)['artifacts'][0]['note'] == 'backend-does-not-support-bounded-execution'
+
+
+def test_production_search_timeout_does_not_create_a_closure():
+    import asyncio
+    request = {key: value for key, value in REQUEST.items() if key != 'hypotheses'}
+    request['budget'] = {'max_steps': 1, 'wall_clock_ms': 10}
+    class Hanging:
+        stopped = False
+        async def prove_bounded(self, *args, **kwargs):
+            try:
+                await asyncio.sleep(10)
+            finally:
+                self.stopped = True
+    backend = Hanging()
+    result = MathsAIFormalATP(reasoner=backend, production=True,
+        request_compiler=lambda _: request).formal_search_start(request)
+    assert backend.stopped
+    assert result['disposition'] == 'internal-error' and result['states'] == []
+    assert 'certificate' not in result

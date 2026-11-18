@@ -4,7 +4,7 @@ import unittest
 import psycopg
 
 
-from artifacts.errors import ArtifactNotFoundError
+from artifacts.errors import ArtifactNotFoundError, ArtifactIntegrityError
 from artifacts.hashing import hash_content
 from artifacts.schema import apply_schema
 from artifacts.store import ArtifactStore
@@ -120,6 +120,13 @@ class TestArtifactStoreGet(unittest.TestCase):
     def test_get_malformed_hash_raises_value_error(self):
         with self.assertRaises(ValueError):
             self.store.get("not-a-hash")
+
+    def test_get_rejects_corrupted_database_bytes(self):
+        address = self.store.put(b'original proof bytes')
+        with psycopg.connect(_TEST_DB_URL) as conn:
+            conn.execute('UPDATE artifacts SET content=%s WHERE hash=%s', (b'corrupted proof bytes', address))
+        with self.assertRaises(ArtifactIntegrityError):
+            self.store.get(address)
 
 
 @unittest.skipUnless(os.environ.get("ARTIFACT_TEST_DB_URL"), "requires ARTIFACT_TEST_DB_URL")

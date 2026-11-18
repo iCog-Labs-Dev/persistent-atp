@@ -9,8 +9,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from persistent_atp_client.codecs import request_from_json, to_dict
-from persistent_atp_client.models import ArtifactRef, OperationRef
-from persistent_atp_client.errors import ClientError
+from persistent_atp_client.models import ArtifactRef, OperationRef, Budget, CancelRequest, BudgetAmendment, DecisionResponse
+from persistent_atp_client.errors import ClientError, UnsupportedCapability
 
 from .contracts import ContractError
 from .jobs import RequestConflict
@@ -148,6 +148,25 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                 body = self.rfile.read(size)
                 if self.path == "/v2/requests":
                     data = asyncio.run(receiver.submit(request_from_json(body)))
+                elif self.path in {"/v2/controls/cancel", "/v2/controls/amend-budget", "/v2/controls/answer-decision"}:
+                    raw = _strict_json(body)
+                    if not isinstance(raw, dict):
+                        raise ValueError("invalid control")
+                    raw["operation_ref"] = OperationRef(**raw["operation_ref"])
+                    name = self.path.rsplit("/", 1)[1]
+                    model, method = {"cancel": (CancelRequest, receiver.cancel),
+                        "amend-budget": (BudgetAmendment, receiver.amend_budget),
+                        "answer-decision": (DecisionResponse, receiver.answer_decision)}[name]
+                    if name == "amend-budget":
+                        raw["additional_budget"] = Budget(**raw["additional_budget"])
+                    control = model(**raw)
+                    caps = asyncio.run(receiver.capabilities())
+                    if name not in caps.controls:
+                        raise UnsupportedCapability("receiver does not advertise this control")
+                    # Authorize the referenced operation independently of body
+                    # identity; trusted actor/lease fields are not accepted.
+                    asyncio.run(receiver.get_operation(control.operation_ref))
+                    data = asyncio.run(method(control))
                 elif self.path == "/v2/artifacts":
                     raw = _strict_json(body)
                     if not isinstance(raw, dict) or set(raw) != {"workspace_id", "media_type", "expected_hash", "content_base64"}:

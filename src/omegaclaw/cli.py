@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from .api import serve
 from .service import OperationService
 from .receiver import ReferenceReceiver
-from .runtime import DEFAULT_OMEGA_ROOT, OMEGA_REVISION, PETTA_REVISION
+from .runtime import DEFAULT_OMEGA_ROOT, OMEGA_REVISION, PETTA_REVISION, verify_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -30,6 +30,8 @@ def load_config(path: str) -> tuple[dict, Path]:
     config_path = Path(path)
     if not config_path.is_absolute():
         config_path = ROOT / config_path
+    if not config_path.is_file() and path in {"reference", "persistence", "production"}:
+        config_path = PACKAGE_ROOT / "config" / (path + ".yaml")
     if not config_path.is_file() and path in {
             "reference", "omegclaw/config/reference.yaml",
             "omegaclaw/config/reference.yaml"}:
@@ -41,43 +43,69 @@ def load_config(path: str) -> tuple[dict, Path]:
     return config, root
 
 
+def _omega_runtime_blockers():
+    blockers = []
+    path = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
+    try:
+        verify_checkout(path)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        blockers.append("Omega runtime content or revision is invalid")
+    petta = os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp/repos/PeTTa"))
+    try:
+        revision = subprocess.run(["git", "-C", petta, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if not (Path(petta) / "src/main.pl").is_file() or revision.returncode or revision.stdout.strip() != PETTA_REVISION:
+            blockers.append("PeTTa runtime has the wrong revision or is unavailable")
+    except (OSError, subprocess.TimeoutExpired):
+        blockers.append("PeTTa runtime revision probe failed")
+    mode = os.environ.get("OMEGA_JANUS_MODE", "auto")
+    if mode not in {"auto", "python", "swipl"}:
+        return blockers + ["OMEGA_JANUS_MODE must be auto, python, or swipl"]
+    python = os.environ.get("PETTA_PYTHON", sys.executable)
+    python_ok = False
+    if mode != "swipl":
+        try:
+            probe = subprocess.run([python, "-c",
+                "import json,sys; print(json.dumps(list(sys.version_info[:3])))"],
+                capture_output=True, text=True, timeout=10)
+            version = json.loads(probe.stdout)
+            if (probe.returncode or not isinstance(version, list) or len(version) != 3
+                    or not all(type(part) is int and part >= 0 for part in version)):
+                raise ValueError("invalid version")
+            if tuple(version[:2]) < (3, 11):
+                blockers.append("PeTTa Python must be >=3.11 for persistent-atp-client; set PETTA_PYTHON to a supported interpreter")
+            elif mode != "swipl":
+                python_ok = subprocess.run([python, "-c", "import janus_swi"],
+                    capture_output=True, timeout=10).returncode == 0
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+            if mode == "python" or "PETTA_PYTHON" in os.environ:
+                blockers.append(f"cannot determine supported Python version for {python}")
+    # Probe the actual SWI -> Python bridge, including its selected interpreter.
+    # Explicit PETTA_PYTHON means the host Python mode was selected by the caller.
+    use_swipl = mode == "swipl" or (mode == "auto" and not python_ok and "PETTA_PYTHON" not in os.environ)
+    if use_swipl:
+        try:
+            probe = subprocess.run(["swipl", "-q", "-g",
+                "use_module(library(janus)), py_call(sys:version_info, V), arg(1,V,Major), arg(2,V,Minor), "
+                "(Major>3;Major=:=3,Minor>=11), halt"], capture_output=True, timeout=15)
+            if probe.returncode:
+                blockers.append("SWI-Prolog Janus cannot load Python >=3.11")
+        except (OSError, subprocess.TimeoutExpired):
+            blockers.append("SWI-Prolog Janus runtime probe failed")
+    elif not python_ok:
+        blockers.append(f"{python} cannot import janus_swi")
+    if shutil.which("swipl") is None:
+        blockers.append("SWI-Prolog is unavailable")
+    return blockers
+
+
 def doctor(profile: str) -> dict:
     blockers: list[str] = []
     if profile == "deepseek":
         load_dotenv()
     if profile in ("omega", "deepseek", "persistence", "lean", "real-atp"):
         if profile in ("omega", "deepseek"):
-            path = os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT))
-            if not (Path(path) / "src" / "plugin.metta").is_file():
-                blockers.append(f"OMEGA_PINNED_ROOT must name the pinned Omega checkout (default: {DEFAULT_OMEGA_ROOT})")
-            elif subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != OMEGA_REVISION:
-                blockers.append("Omega checkout has the wrong revision")
-            petta = os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa"))
-            if not (Path(petta) / "src" / "main.pl").is_file():
-                blockers.append(f"PETTA_PINNED_ROOT must name the pinned PeTTa v1.0.4 checkout (default: {ROOT / 'tmp' / 'repos' / 'PeTTa'})")
-            elif subprocess.run(["git", "-C", petta, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip() != PETTA_REVISION:
-                blockers.append("PeTTa checkout has the wrong revision")
-            if shutil.which("swipl") is None:
-                blockers.append("SWI-Prolog is unavailable")
-            petta_python = os.environ.get("PETTA_PYTHON", sys.executable)
-            try:
-                probe = subprocess.run([petta_python, "-c",
-                    "import json,sys; print(json.dumps(list(sys.version_info[:3])))"],
-                    capture_output=True, text=True)
-                version = json.loads(probe.stdout)
-                if (probe.returncode or not isinstance(version, list) or len(version) != 3
-                        or not all(type(part) is int and part >= 0 for part in version)):
-                    raise ValueError("invalid Python version probe")
-                if tuple(version[:2]) < (3, 11):
-                    blockers.append("PeTTa Python must be >=3.11 for persistent-atp-client; set PETTA_PYTHON to a supported interpreter")
-            except (OSError, ValueError, TypeError):
-                blockers.append(f"cannot determine supported Python version for {petta_python}")
-            try:
-                janus_ready = subprocess.run([petta_python, "-c", "import janus_swi"], capture_output=True).returncode == 0
-            except OSError:
-                janus_ready = False
-            if not janus_ready:
-                blockers.append(f"{petta_python} cannot import janus_swi")
+            blockers.extend(_omega_runtime_blockers())
             if profile == "deepseek":
                 if not os.environ.get("DEEPSEEK_API_KEY"):
                     blockers.append("DEEPSEEK_API_KEY is unset; live DeepSeek inference cannot be tested")
@@ -88,8 +116,20 @@ def doctor(profile: str) -> dict:
         if profile == "persistence":
             if not os.environ.get("ARTIFACT_TEST_DB_URL"):
                 blockers.append("ARTIFACT_TEST_DB_URL is unset")
-            if not os.environ.get("MORK_LIBRARY_PATH"):
-                blockers.append("MORK_LIBRARY_PATH is unset")
+            library = os.environ.get("MORK_LIBRARY")
+            if not library:
+                blockers.append("MORK_LIBRARY is unset; use scripts/with-mork.sh")
+            else:
+                env = os.environ.copy()
+                env["LD_PRELOAD"] = library + (":" + env["LD_PRELOAD"] if env.get("LD_PRELOAD") else "")
+                try:
+                    check = subprocess.run([sys.executable, "-c",
+                        "from mork.backend.ffi import MorkSpace; MorkSpace()"],
+                        env=env, capture_output=True, timeout=15)
+                    if check.returncode:
+                        blockers.append("MORK_LIBRARY cannot be loaded in a preloaded subprocess")
+                except (OSError, subprocess.TimeoutExpired):
+                    blockers.append("MORK native runtime probe failed")
             if not (ROOT / "mork" / "backend" / "view.py").is_file():
                 blockers.append("this checkout lacks mork/backend/view.py")
             if not (ROOT / "scripts" / "with-mork.sh").is_file():
@@ -137,29 +177,31 @@ def main(argv=None) -> int:
     if args.command == "serve":
         config, root = load_config(args.config)
         token = os.environ.get(config["token_env"], "")
-        service = OperationService(root, workspace=config["workspace"])
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"))
         receiver = ReferenceReceiver(service)
         server = serve(service, token, config["host"], int(config["port"]), receiver=receiver)
         print(json.dumps({"status": "ready", "host": config["host"], "port": server.server_port,
-                          "receiver_mode": "reference-scripted", "contract_version": "2.0"}), flush=True)
+                          "receiver_mode": service.receiver_mode, "contract_version": "2.0"}), flush=True)
         try:
             server.serve_forever()
         finally:
             server.server_close()
             receiver.close()
+            service.close()
         return 0
     if args.command == "artifact-put":
         config, root = load_config(args.config)
         source = Path(args.file)
         if not source.is_file() or source.stat().st_size > 16 * 1024 * 1024:
             raise SystemExit("artifact input must be a file of at most 16 MiB")
-        service = OperationService(root, workspace=config["workspace"])
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"))
         receiver = ReferenceReceiver(service)
         try:
             artifact = asyncio.run(receiver.put_artifact(source.read_bytes(), workspace_id=config["workspace"],
                 media_type="application/octet-stream"))
         finally:
             receiver.close()
+            service.close()
         pointer = artifact.hash
         print(json.dumps({"artifact_ref": pointer, "bytes": source.stat().st_size}, sort_keys=True))
         return 0
