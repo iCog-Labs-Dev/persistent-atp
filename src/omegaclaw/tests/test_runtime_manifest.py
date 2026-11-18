@@ -9,10 +9,16 @@ from omegaclaw.installer import bundle_runtime
 
 @pytest.fixture
 def sealed(tmp_path):
-    for name in ("src/loop.metta", "src/plugin.py", "run.metta", "persistent_atp_pinned_import.pl"):
+    for name in ("src/loop.metta", "src/plugin.py", "run.metta", "entrypoint.sh", "persistent_atp_pinned_import.pl"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("trusted-build-fixture\n")
+    catalogue = tmp_path / "config/plugins.yaml"
+    catalogue.parent.mkdir()
+    catalogue.write_text("- name: persistent_atp\n  location: " + str(tmp_path / "plugins/persistent_atp") + "\n")
+    mock = tmp_path / "Autotests/mock/llm.py"
+    mock.parent.mkdir(parents=True)
+    mock.write_text("# pinned Test-provider runtime\n")
     seal_runtime(tmp_path)
     return tmp_path
 
@@ -31,17 +37,25 @@ def test_container_overlay_is_sealed_and_requires_a_digest(sealed, tmp_path):
     verify_manifest(output / "omega")
     dockerfile = (output / "Dockerfile").read_text()
     assert "FROM omega@sha256:" in dockerfile and "@@" not in dockerfile
+    assert "ENV PERSISTENT_ATP_OMEGA_STATE=/PeTTa/repos/Omega/memory/" in dockerfile
     assert not (output / "omega/.git").exists()
+    assert (output / "omega/version").read_text().strip() == OMEGA_REVISION
+    assert (output / "omega/Autotests/mock/llm.py").read_bytes() == (sealed / "Autotests/mock/llm.py").read_bytes()
+    catalogue = (output / "omega/config/plugins.yaml").read_text()
+    assert str(sealed) not in catalogue
+    assert "/PeTTa/repos/Omega/plugins/persistent_atp" in catalogue
     with pytest.raises(FileExistsError):
         bundle_runtime(sealed, output, result["base_image"])
 
 
-@pytest.mark.parametrize("tamper", ["core", "revision", "escape", "empty"])
+@pytest.mark.parametrize("tamper", ["core", "entrypoint", "revision", "escape", "empty"])
 def test_sealed_runtime_rejects_altered_or_incomplete_manifest(sealed, tamper):
     path = sealed / MANIFEST
     data = json.loads(path.read_text())
     if tamper == "core":
         (sealed / "src/loop.metta").write_text("changed\n")
+    elif tamper == "entrypoint":
+        (sealed / "entrypoint.sh").write_text("changed\n")
     elif tamper == "revision":
         data["revision"] = "0" * 40
     elif tamper == "escape":

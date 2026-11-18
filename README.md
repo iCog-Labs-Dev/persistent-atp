@@ -59,10 +59,15 @@ not a signature.
 
 To export a container overlay, supply `--bundle-dir /path/to/context` and
 `--base-image registry/omega@sha256:<digest>` to the installer. The generated
-Dockerfile preserves the base image's entrypoint, checks its PeTTa revision and
-Python dependencies, copies the sealed overlay and patched launcher, and
-verifies the runtime manifest. Use an approved Omega base image pinned by its
-full digest; container execution also requires receiver connectivity.
+Dockerfile uses the verified upstream entrypoint with a narrow bridge-variable
+allowlist and quoted environment forwarding. It checks the base's PeTTa
+revision and Python dependencies, relocates plugin registrations to the image's
+paths, and verifies the sealed overlay and patched launcher. Use an approved
+Omega base image pinned by its full digest. The cache defaults to
+`/PeTTa/repos/Omega/memory/persistent_atp/workflow.json` inside Omega's persistent
+memory volume, which its sandbox permits the `nobody` agent account to write.
+Configure a receiver URL reachable from the container. A custom cache path
+must also be writable under the configured filesystem policy.
 
 The plugin is disabled by default. Set `OMEGA_persistentAtpEnabled=enabled`
 and configure the same workspace alias in `OMEGA_persistentAtpWorkspace` and

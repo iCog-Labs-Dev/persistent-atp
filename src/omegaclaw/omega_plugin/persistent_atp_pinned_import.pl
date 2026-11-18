@@ -40,7 +40,8 @@ persistent_atp_verify_manifest(LocalDir, Manifest, Revision) :-
     ; throw(error(permission_error(load, pinned_omega_revision, Recorded), _)) ),
     Files = Data.files,
     ( get_dict('src/loop.metta', Files, _), get_dict('src/plugin.py', Files, _),
-      get_dict('run.metta', Files, _), get_dict('persistent_atp_pinned_import.pl', Files, _) -> true
+      get_dict('run.metta', Files, _), get_dict('entrypoint.sh', Files, _),
+      get_dict('persistent_atp_pinned_import.pl', Files, _) -> true
     ; throw(error(permission_error(load, pinned_omega_content, Manifest), _)) ),
     dict_pairs(Files, _, Pairs),
     forall(member(Name-Expected, Pairs),

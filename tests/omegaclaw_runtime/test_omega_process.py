@@ -16,6 +16,8 @@ from omegaclaw.api import serve
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
 from omegaclaw.runtime import DEFAULT_OMEGA_ROOT, OMEGA_REVISION
+from omegaclaw.runtime import verify_manifest
+from omegaclaw.installer import bundle_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK_PATH = Path(os.environ.get("OMEGACLAW_PROVIDER_SDK_PATH",
@@ -130,6 +132,13 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
             capture_output=True, text=True)
         assert installed.returncode == 0, installed.stderr
     assert original_catalogue in catalogue.read_text()
+    bundle = tmp_path / "container-context"
+    bundle_runtime(omega_root, bundle, "omega@sha256:" + "a" * 64)
+    verify_manifest(bundle / "omega")
+    container_catalogue = (bundle / "omega/config/plugins.yaml").read_text()
+    assert str(plugin_dir) not in container_catalogue
+    assert container_catalogue.count("/PeTTa/repos/Omega/plugins/persistent_atp") == 3
+    assert (bundle / "omega/entrypoint.sh").read_bytes() == (omega_root / "entrypoint.sh").read_bytes()
     assert (plugin_dir / "coordinator-policy.txt").read_bytes() == (
         ROOT / "src/omegaclaw/omega_plugin/coordinator-policy.txt").read_bytes()
     assert catalogue.read_text().count("- name: deepseek_provider") == 1

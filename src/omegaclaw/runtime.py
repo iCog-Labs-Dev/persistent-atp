@@ -9,7 +9,7 @@ PETTA_REVISION = "7037f4c2ad378c52fc328004fe216d5118b674f0"
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OMEGA_ROOT = ROOT / "tmp" / "repos" / "Omega-ba185cd"
 MANIFEST = "persistent_atp_runtime.json"
-CORE_PATHS = ("src", "providers", "profile", "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
+CORE_PATHS = ("src", "providers", "profile", "Autotests/mock", "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
 
 
 def verify_checkout(root):
@@ -33,8 +33,12 @@ def seal_runtime(root):
     permission to accept arbitrary model-supplied runtime content.
     """
     root = Path(root)
-    paths = [root / "run.metta", root / "persistent_atp_pinned_import.pl", *root.glob("lib*.metta")]
-    for name in ("src", "providers", "plugins", "profile", "config", "channels"):
+    paths = [root / "run.metta", root / "entrypoint.sh", root / "persistent_atp_pinned_import.pl", *root.glob("lib*.metta")]
+    if (root / "version").is_file():
+        paths.append(root / "version")
+    # The Test provider and test channel import these at runtime. Leaving the
+    # base image's older mocks would mix incompatible tool-call protocols.
+    for name in ("src", "providers", "plugins", "profile", "config", "channels", "Autotests/mock"):
         paths.extend(path for path in (root / name).rglob("*") if path.is_file()
                      and "__pycache__" not in path.parts and path.suffix != ".pyc")
     files = {}
@@ -49,7 +53,7 @@ def verify_manifest(root):
     root = Path(root).resolve()
     manifest = json.loads((root / MANIFEST).read_text())
     files = manifest.get("files", {})
-    required = {"src/loop.metta", "src/plugin.py", "run.metta", "persistent_atp_pinned_import.pl"}
+    required = {"src/loop.metta", "src/plugin.py", "run.metta", "entrypoint.sh", "persistent_atp_pinned_import.pl"}
     if manifest.get("revision") != OMEGA_REVISION or not isinstance(files, dict) or not required <= files.keys():
         raise ValueError("invalid Omega runtime manifest")
     for name, expected in files.items():

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 from .runtime import OMEGA_REVISION, PETTA_REVISION, MANIFEST, seal_runtime, verify_checkout, verify_manifest
+from .container_entrypoint import patch_entrypoint
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -30,6 +31,9 @@ def install(omega_root: Path) -> dict:
     proxy = omega_root / "proxy" / "nginx.conf.template"
     if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
         raise ValueError("--omega-root must be a full derived Omega checkout")
+    entrypoint = omega_root / "entrypoint.sh"
+    original_entrypoint = entrypoint.read_text()
+    updated_entrypoint = patch_entrypoint(original_entrypoint)
     launcher = omega_root / "run.metta"
     unpinned = '!(git-import! "https://github.com/singnet/Omega.git")'
     pinned = f'!(git-import! "https://github.com/singnet/Omega.git" "" "./repos" {OMEGA_REVISION})'
@@ -98,6 +102,8 @@ def install(omega_root: Path) -> dict:
     shutil.copy2(source / "persistent_atp_pinned_import.pl", omega_root / "persistent_atp_pinned_import.pl")
     if updated_launcher != original_launcher:
         launcher.write_text(updated_launcher)
+    if updated_entrypoint != original_entrypoint:
+        entrypoint.write_text(updated_entrypoint)
     seal_runtime(omega_root)
     return {"omega_root": str(omega_root), "required_omega_revision": OMEGA_REVISION, "plugin_location": str(plugin_dir),
             "catalogue": str(catalogue), "proxy_template": str(proxy)}
@@ -117,6 +123,15 @@ def bundle_runtime(omega_root: Path, destination: Path, base_image: str) -> dict
         target = destination / "omega" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(omega_root / name, target)
+    # The installer records host paths. Container assets must use the image's
+    # canonical plugin location rather than the builder's absolute directory.
+    catalogue = destination / "omega/config/plugins.yaml"
+    if catalogue.is_file():
+        catalogue.write_text(catalogue.read_text().replace(
+            str(omega_root / "plugins/persistent_atp"), "/PeTTa/repos/Omega/plugins/persistent_atp"))
+    # The core overlay can be newer than the official base image release.
+    (destination / "omega/version").write_text(OMEGA_REVISION + "\n")
+    seal_runtime(destination / "omega")
     template = (PACKAGE_ROOT / "config" / "omega.Dockerfile").read_text()
     (destination / "Dockerfile").write_text(template.replace("@@BASE_IMAGE@@", base_image).replace("@@PETTA_REVISION@@", PETTA_REVISION))
     return {"container_context": str(destination), "base_image": base_image}

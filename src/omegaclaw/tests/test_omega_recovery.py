@@ -8,7 +8,10 @@ import time
 import pytest
 
 from omegaclaw.frameworks.omega import OmegaAdapter
-from persistent_atp_client.errors import Forbidden, HashMismatch, StalePrecondition, TransientUnavailable
+from persistent_atp_client.errors import (
+    CursorExpired, Forbidden, HashMismatch, ReceiverProtocolError, RequestIdExpired,
+    StalePrecondition, TransientUnavailable,
+)
 from persistent_atp_client.models import ArtifactRef, OperationRef, ProjectDigest
 from persistent_atp_client.testing import ScriptedReceiverPort
 
@@ -222,3 +225,114 @@ def test_background_status_backoff_and_permanent_error_stop():
     clock[0] += 100
     adapter.refresh_status("p1")
     assert port.calls == 2
+
+
+def test_completed_operation_reattaches_by_ref_after_request_lookup_expires(tmp_path):
+    class Port(ScriptedReceiverPort):
+        expired = False
+        lookups = []
+        async def lookup_request(self, workspace, identity):
+            self.lookups.append(identity)
+            if self.expired and identity == "old-request": raise RequestIdExpired()
+            return await super().lookup_request(workspace, identity)
+    port = Port()
+    original = OmegaAdapter(port, workspace="reference", cache_path=tmp_path / "cache.json")
+    old = original.reserve("proof-create", "reference", {"spec": SPEC}, intent_id="old-request")
+    ref = OperationRef(**original.execute(old)["operation_ref"])
+    port.finish(ref)  # Receiver completed while the coordinator was offline.
+    port.expired = True
+    restored = OmegaAdapter(port, workspace="reference", cache_path=tmp_path / "cache.json")
+    new = restored.reserve("proof-create", "reference", {"spec": SPEC}, new_intent=True)
+    result = restored.execute(new)
+    assert result.get("durable_admission"), result
+    assert "old-request" not in port.lookups
+    assert restored.state.intent(old)["ref"] == original.state.intent(old)["ref"]
+    restored.observe(old)
+    restored.observe(old)
+    assert not restored.state.intent(old)["observation_pending"]
+    assert len(port._operations) == 2
+
+
+@pytest.mark.parametrize("failure", [RequestIdExpired, Forbidden, ReceiverProtocolError, TransientUnavailable])
+def test_recovery_failure_is_scoped_to_the_affected_request(failure, tmp_path):
+    clock = [100.0]
+    class Port(ScriptedReceiverPort):
+        failure = None
+        async def lookup_request(self, workspace, identity):
+            if self.failure and identity == "old-request": raise self.failure()
+            return await super().lookup_request(workspace, identity)
+    port = Port()
+    original = OmegaAdapter(port, workspace="reference", cache_path=tmp_path / "cache.json")
+    old = original.reserve("proof-create", "reference", {"spec": SPEC}, intent_id="old-request")
+    original.execute(old)
+    original.state.patch(old, ref=None, state="uncertain")  # Lost admission checkpoint.
+    request = original.state.intent(old)["request"]
+    port.failure = failure
+    restored = OmegaAdapter(port, workspace="reference", cache_path=tmp_path / "cache.json", clock=lambda: clock[0])
+    new = restored.reserve("proof-create", "reference", {"spec": SPEC}, new_intent=True)
+    assert restored.execute(new).get("durable_admission")
+    row = restored.state.intent(old)
+    assert row["request"] == request and row["ref"] is None
+    assert row["last_error"]["request_id"] == old
+    assert len(port._operations) == 2
+    if failure is TransientUnavailable:
+        assert row["state"] == "uncertain" and row["next_attempt_at"] > clock[0]
+        clock[0] += 1
+        port.failure = None
+        assert restored.execute(old)["durable_admission"]
+        assert len(port._operations) == 2
+    else:
+        assert row["state"] == "needs-input"
+        assert old not in {item["id"] for item in restored.dispatchable_intents()}
+
+
+def test_stale_selected_proof_does_not_prevent_new_request(tmp_path):
+    class Port(ScriptedReceiverPort):
+        async def read_status(self, **kwargs): raise Forbidden()
+    adapter = OmegaAdapter(Port(), workspace="reference", cache_path=tmp_path / "cache.json")
+    adapter.state.update(lambda data: data.update(selected_proof="revoked-proof"))
+    identity = adapter.reserve("proof-create", "reference", {"spec": SPEC})
+    assert adapter.execute(identity).get("durable_admission")
+    assert any(row.get("proof_id") == "revoked-proof" and row.get("error_code") == "FORBIDDEN"
+               for row in adapter.pending_reports())
+
+
+def test_cursor_replay_beyond_dedup_window_spans_pages_and_restart(tmp_path):
+    class Port(ScriptedReceiverPort):
+        paged = False
+        expire = False
+        page_size = 2
+        async def read_events(self, ref, cursor=None):
+            if self.expire and cursor:
+                self.expire = False
+                raise CursorExpired()
+            page, last = await super().read_events(ref, cursor)
+            return (page[:self.page_size], page[self.page_size - 1].cursor) if self.paged and len(page) > self.page_size else (page, last)
+    port = Port()
+    path = tmp_path / "replay.json"
+    adapter = OmegaAdapter(port, workspace="reference", cache_path=path)
+    identity = adapter.reserve("proof-create", "reference", {"spec": SPEC})
+    ref = OperationRef(**adapter.execute(identity)["operation_ref"])
+    for _ in range(2005): port._event(ref, "progress", 0)
+    adapter.observe(identity)
+    assert len(adapter.state.intent(identity)["event_ids"]) == 2000
+    adapter.acknowledge([row["notification_id"] for row in adapter.pending_reports()])
+    port.paged, port.expire = True, True
+    adapter.observe(identity)
+    adapter = OmegaAdapter(port, workspace="reference", cache_path=path)
+    # The first several pages are older than every retained deduplication ID.
+    for _ in range(4):
+        reports = adapter.observe(identity)
+        assert not any(row.get("error_code") for row in reports), reports
+        assert not any("event" in row for row in reports)
+    # Drain the remaining old history with larger receiver pages, then cross
+    # the original watermark into events which arrived during reconciliation.
+    port.page_size = 500
+    port._event(ref, "new-obstruction", 0)
+    port.finish(ref)
+    for _ in range(8): adapter.observe(identity)
+    rows = adapter.pending_reports()
+    assert [row["event"]["event_type"] for row in rows if "event" in row] == ["new-obstruction", "succeeded"]
+    assert not adapter.active_intents()
+    assert adapter.state.intent(identity)["history_incomplete"]
+    assert any(row.get("event_stream_caught_up") and not row.get("event_history_complete") for row in rows)

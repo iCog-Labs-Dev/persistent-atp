@@ -122,6 +122,7 @@ class OmegaAdapter:
         with self._startup_lock:
             self.caps = self.client.capabilities(contract_version="2.0")
             active = self.client.list_operations(workspace_id=self.workspace, active_only=True)
+            active_by_id = {snapshot.request_id: snapshot for snapshot in active}
             for snapshot in active:
                 identity = snapshot.request_id
                 if identity not in self.state.snapshot()["intents"]:
@@ -130,22 +131,62 @@ class OmegaAdapter:
                         "arguments": None, "state": "accepted", "request": None,
                         "ref": to_dict(item.ref), "cursor": None, "event_ids": [],
                         "event_sequence": -1, "version": -1}))
-                else:
-                    self.state.patch(identity, ref=to_dict(snapshot.ref), state="accepted")
             for row in self.state.snapshot()["intents"].values():
-                if row["state"] in {"completed", "rejected"} or not row.get("request"):
+                if row["state"] in {"rejected", "needs-input"}:
                     continue
-                request = self._request(row)
-                receipt = self.client.lookup_request(workspace_id=self.workspace, request_id=request.request_id)
-                if receipt is not None:
-                    if not receipt.accepted or receipt.fingerprint != fingerprint(request):
-                        raise ReceiverProtocolError("recovered admission differs from prepared request")
-                    self.state.patch(row["id"], ref=to_dict(receipt.operation_ref), state="accepted")
+                if row["state"] == "completed" and not row.get("observation_pending", True):
+                    continue
+                try:
+                    self._recover_cached_intent(row, active_by_id.get(row["id"]))
+                except (ClientError, ValueError, TypeError, KeyError) as exc:
+                    self._recovery_failure(row, exc)
+            self._started = True
             selected = self.state.snapshot().get("selected_proof")
             if selected:
-                self.status(selected)
-            self._started = True
+                self.refresh_status(selected)
             return to_dict(self.caps)
+
+    def _recover_cached_intent(self, row, active_snapshot):
+        request = self._request(row) if row.get("request") else None
+        if row.get("ref"):
+            if row.get("observation_suspended") or row.get("observation_retry_at", 0) > self._clock():
+                return
+            # The operation reference remains useful after request-index expiry.
+            # Do not depend on lookup retention for an already admitted request.
+            ref = OperationRef(**row["ref"])
+            if ref.workspace_id != self.workspace:
+                raise ReceiverProtocolError("cached operation belongs to another workspace")
+            snapshot = active_snapshot or self.client.snapshot(self.client.attach(ref))
+            if (snapshot.ref != ref or snapshot.request_id != row["id"]
+                    or snapshot.observation_version < row["version"]):
+                raise ReceiverProtocolError("recovered operation identity or version differs")
+            self.state.patch(row["id"], state="completed" if snapshot.lifecycle in TERMINAL_LIFECYCLES else "accepted",
+                             recovery_failures=0)
+        elif request is not None:
+            receipt = self.client.lookup_request(workspace_id=self.workspace, request_id=request.request_id)
+            if receipt is not None:
+                if receipt.fingerprint != fingerprint(request):
+                    raise ReceiverProtocolError("recovered admission differs from prepared request")
+                if not receipt.accepted:
+                    raise AdmissionRejected(receipt)
+                self.state.patch(row["id"], ref=to_dict(receipt.operation_ref), state="accepted",
+                                 observation_pending=True, recovery_failures=0)
+
+    def _recovery_failure(self, row, exc):
+        failures = row.get("recovery_failures", 0) + 1
+        retryable = isinstance(exc, ClientError) and exc.retryable
+        exhausted = row.get("retry_exhausted", False) or (retryable and failures >= self.retry_limit)
+        next_attempt = self._clock() + min(30, self.retry_base_seconds * 2 ** min(failures - 1, 6))
+        report = {**self.error(exc, row["id"], row.get("ref")),
+                  "automatic_retry": retryable and not exhausted, "retry_exhausted": exhausted}
+        values = {"recovery_failures": failures, "last_error": report}
+        if row.get("ref"):
+            values.update(observation_suspended=not retryable or exhausted, observation_retry_at=next_attempt)
+        else:
+            values.update(state="uncertain" if retryable else "needs-input",
+                          next_attempt_at=next_attempt, retry_exhausted=exhausted)
+        self.state.patch(row["id"], **values)
+        self.stage_report(f"recovery:{row['id']}:{self._error_code(exc)}", report)
 
     def bootstrap_due(self):
         row = self.state.snapshot().get("bootstrap", {})
@@ -170,10 +211,10 @@ class OmegaAdapter:
                           "retry_exhausted": retryable and attempts >= self.retry_limit}
                 self.stage_report(f"startup:{self._error_code(exc)}:{attempts}", report)
 
-    @staticmethod
-    def _request(row):
+    def _request(self, row):
         request = request_from_dict(row["request"])
-        if fingerprint(request) != row["fingerprint"] or request.request_id != row["id"]:
+        if (fingerprint(request) != row["fingerprint"] or request.request_id != row["id"]
+                or request.workspace_id != self.workspace):
             raise ReceiverProtocolError("workflow checkpoint request identity mismatch")
         return request
 
@@ -241,6 +282,9 @@ class OmegaAdapter:
             row = self.state.intent(identity)
             if row.get("ref"):
                 return self._admission(row)
+            if (row["state"] in {"rejected", "needs-input"} or row.get("retry_exhausted")
+                    or row.get("next_attempt_at", 0) > self._clock()):
+                return row["last_error"]
             if row["kind"] == "proof-status":
                 result = self.status(row["arguments"]["proof"])
                 self.state.patch(identity, state="completed")
@@ -292,7 +336,7 @@ class OmegaAdapter:
 
     @staticmethod
     def _error_code(exc):
-        return exc.admission.error_code if isinstance(exc, AdmissionRejected) else getattr(exc, "code", "INVALID_REQUEST")
+        return (exc.admission.error_code or exc.code) if isinstance(exc, AdmissionRejected) else getattr(exc, "code", "INVALID_REQUEST")
 
     @staticmethod
     def error(exc, identity=None, ref=None):
@@ -306,6 +350,7 @@ class OmegaAdapter:
             "RATE_LIMITED": ("bounded-retry", "Receiver rate limit reached; wait before retrying the original request."),
             "FORBIDDEN": ("stop", "Receiver denied this action. Do not retry or change identity to bypass authorization."),
             "IDEMPOTENCY_CONFLICT": ("stop", "Request identity conflicts with the admitted body. Stop and reconcile."),
+            "REQUEST_ID_EXPIRED": ("stop-and-review", "Request lookup expired. Review the operation/history before authorizing further work."),
             "UNSUPPORTED_CAPABILITY": ("stop", "Receiver capability is unavailable; no fallback execution was started."),
         }.get(code, ("stop-and-review", "Reconcile this request; no mathematical outcome is inferred."))
         return {"transport_status": "error", "error_code": code, "recovery_action": action,
@@ -345,11 +390,19 @@ class OmegaAdapter:
             if snapshot.request_id != identity or snapshot.observation_version < row["version"]:
                 raise ReceiverProtocolError("operation identity or observation version regressed")
             refreshed = False
+            replay_until = row.get("replay_until_sequence")
+            replay_sequence = row.get("replay_sequence", -1)
+            cursor_epoch = row.get("cursor_epoch", 0)
+            history_incomplete = row.get("history_incomplete", False)
             try:
                 events, cursor = self.client.events_page(ref, cursor=row["cursor"])
             except CursorExpired:
                 events, cursor = self.client.events_page(ref, cursor=None)
                 refreshed = True
+                replay_until = row["event_sequence"]
+                replay_sequence = -1
+                cursor_epoch += 1
+                history_incomplete = True
             reports = []
             seen = set(row["event_ids"])
             ordered_ids = list(row["event_ids"])
@@ -357,12 +410,14 @@ class OmegaAdapter:
             sequence = row["event_sequence"]
             event_version = row.get("event_version", -1)
             for event in events:
+                if replay_until is not None:
+                    replay_sequence = max(replay_sequence, event.sequence)
                 if event.event_id in seen:
                     if fingerprints.get(event.event_id, fingerprint(event)) != fingerprint(event):
                         raise ReceiverProtocolError("event identity changed across pages")
                     continue
                 if event.sequence <= sequence:
-                    if refreshed:
+                    if replay_until is not None and event.sequence <= replay_until:
                         continue  # Expired history outside our bounded deduplication window.
                     raise ReceiverProtocolError("event sequence regressed across pages")
                 if event.observation_version < event_version:
@@ -374,10 +429,16 @@ class OmegaAdapter:
                 fingerprints[event.event_id] = fingerprint(event)
                 reports.append({"notification_id": event.event_id, "event": to_dict(event),
                                 "request_id": identity, "operation_ref": row["ref"]})
+            # The replay watermark survives subsequent pages and restarts.
+            # Retained duplicate IDs still undergo fingerprint validation above.
+            if replay_until is not None and (not events or replay_sequence >= replay_until):
+                replay_until = None
             terminal = snapshot.lifecycle in TERMINAL_LIFECYCLES
             # A terminal snapshot does not imply its event stream was drained.
             # One empty page after the terminal snapshot confirms catch-up.
-            drained = terminal and not events and not refreshed
+            caught_up = not events and not refreshed and replay_until is None
+            drained = terminal and caught_up
+            history_incomplete = history_incomplete or (drained and event_version < snapshot.observation_version)
             if snapshot.observation_version != row["version"] or refreshed or drained != (row.get("observation_pending") is False):
                 outcome = dict(snapshot.result or {})
                 disposition = snapshot.mathematical_disposition or outcome.get("cycle_disposition")
@@ -389,11 +450,12 @@ class OmegaAdapter:
                     message = "Claim passed a research review; formal verification is not implied."
                 if outcome.get("audit_recommended") or outcome.get("cycle_disposition") in {"idle", "blocked", "waiting-on-review"}:
                     message = "No free eligible work or waiting for review; this is not proof completion."
-                report = {**to_dict(snapshot), "notification_id": f"{ref.operation_id}:{snapshot.observation_version}:{int(refreshed)}:{int(drained)}",
+                report = {**to_dict(snapshot), "notification_id": f"{ref.operation_id}:{snapshot.observation_version}:{int(refreshed)}:{int(drained)}:{cursor_epoch}",
                           "operation_id": ref.operation_id, "operation_ref": row["ref"],
                           "request_id": identity, "message": message,
-                          "history_incomplete": refreshed or (drained and event_version < snapshot.observation_version),
-                          "event_history_complete": drained, "events_pending": not drained,
+                          "history_incomplete": history_incomplete,
+                          "event_history_complete": drained and not history_incomplete,
+                          "event_stream_caught_up": caught_up, "events_pending": not drained,
                           "requested_budget": (row.get("request") or {}).get("action", {}).get("budget"),
                           "effective_budget": outcome.get("budget"), "mathematical_disposition": disposition}
                 reports.append(report)
@@ -403,6 +465,8 @@ class OmegaAdapter:
                             event_fingerprints={key: fingerprints[key] for key in ordered_ids[-2000:] if key in fingerprints},
                             event_sequence=sequence, event_version=event_version, version=snapshot.observation_version,
                             observation_pending=not drained, observation_failures=0, observation_retry_at=0,
+                            replay_until_sequence=replay_until, replay_sequence=replay_sequence,
+                            cursor_epoch=cursor_epoch, history_incomplete=history_incomplete,
                             state="completed" if snapshot.lifecycle in TERMINAL_LIFECYCLES else "accepted")
                 outbox = data.setdefault("outbox", {})
                 for report in reports:
