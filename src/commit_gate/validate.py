@@ -16,6 +16,7 @@ from collections import defaultdict
 from typing import Any, Iterator, Mapping
 
 from .ops import UNSET, AddEdge, Op, RemoveEdge, SetField, UpsertNode
+from .formal_runs import check_formal_run_lifecycle
 from .proposal import Proposal
 from .reasons import Reason, Rejection
 from .state import EdgeRecord, NodeRecord, ReadView
@@ -53,6 +54,7 @@ __all__ = [
     "check_references",
     "check_prior_values",
     "check_status_transitions",
+    "check_formal_run_lifecycle",
     "check_immutability",
     "check_stagnation_obstruction",
     "check_critic_gating",
@@ -256,6 +258,7 @@ def validate_proposal(proposal: Proposal, view: ReadView | None = None) -> list[
         findings.extend(check_references(proposal, view))
         findings.extend(check_prior_values(proposal, view))
         findings.extend(check_status_transitions(proposal, view))
+        findings.extend(check_formal_run_lifecycle(proposal, view))
         findings.extend(check_immutability(proposal, view))
         findings.extend(check_stagnation_obstruction(proposal, view))
         findings.extend(check_critic_gating(proposal, view))

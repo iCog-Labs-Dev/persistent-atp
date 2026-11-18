@@ -138,6 +138,29 @@ terminal run, with its remaining allowance. A changed budget is refused.
 The result explicitly reports `frontier_resume: false`; no MCTS/PUCT frontier
 continuation is claimed and no synthetic checkpoint is produced.
 
+Persist v2 run updates with the provider's acknowledged accounting:
+
+```python
+from mathproof.formal_run import formal_run_ops
+
+ops = formal_run_ops(result, view.node(result["run_id"]), actor=worker_id)
+```
+
+Include these ops in the normal leased proposal alongside its search graph,
+certificates and any required obstruction. An unchanged poll returns no run
+ops. The helper stores `provider` metadata and an append-only `attempt_history`
+on the FormalRun; history records cumulative consumed and remaining steps at
+each finished attempt. It also handles a retry that finishes before its HTTP
+response arrives.
+
+The gate permits an eligible terminal attempt to return to `searching` only
+with the next attempt number, remaining tactic allowance, unchanged admitted
+input/environment/profile/budget, and preserved prior outcomes. It rejects
+refunds and history rewrites even when another op restores the old value in
+the same proposal. Proved runs, counterexamples, exhausted tactic allowances
+and rejected inputs remain closed. A legacy terminal run without v2 accounting
+cannot reopen merely by changing its status.
+
 The provider scopes exported states and tactics to the run and attempt, for
 example `proof/fr-1/attempt-2/fs-1`. The adapter checks that every id belongs
 to the result's run and attempt before mapping it to a positive decimal id
@@ -184,6 +207,14 @@ The provider independently rechecks its stored bytes in a fresh native session.
 Every attested identity is checked before accepting the verdict; the complete
 attestation is also saved as an artifact.
 
+Before a verified v2 replay can support claim promotion, the gate requires
+its stored attestation, validates the pinned schema, and matches its run,
+certificate, admitted input, source, source origin, backend and environment
+against the durable candidate binding. The candidate and admitted-input bytes
+must also agree with that binding. Omitting the binding field does not turn a
+v2 certificate into legacy evidence. These checks use the graph after all
+proposed changes, including evidence submitted alongside promotion.
+
 - `verified`: certificate becomes `replay-accepted` in the adapter result.
 - `rejected`: certificate becomes `replay-rejected`.
 - `inconclusive`: certificate stays `replay-pending`, with the reason retained.
@@ -204,6 +235,16 @@ all replay outcomes, corruption, binding failures, restart and retry accounting.
 `src/commit_gate/tests/test_artifact_refs.py` commits an adapter certificate,
 rebuilds its journal references and replays with a fresh client; it also checks
 missing/corrupt evidence and promotion/fencing rejection.
+
+`src/commit_gate/tests/test_v2_replay_promotion.py` submits adversarial proposals
+with missing, malformed, swapped and jointly rewritten evidence; it checks
+atomic rejection, cold projections, fencing and reconstruction. The retry
+tests in `src/commit_gate/tests/test_formal_run_retry.py` cover refunds, modified
+ceilings, hidden status cycles, history rewrites, duplicate/stale submissions,
+ineligible outcomes and a second attempt completing before the retry reply.
+`mork/tests/test_formal_v2_gate.py` repeats rejection/commit/reconstruction in
+separate processes with the native library when configured. These use scripted
+provider evidence and do not establish native Lean/model acceptance.
 
 The PostgreSQL integration test now calls `CommitGate.commit()` and rebuilds
 references before retrieving the original bytes. It requires a dedicated test
