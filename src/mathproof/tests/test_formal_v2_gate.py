@@ -12,7 +12,7 @@ from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from context_compiler.snapshot_provider import LeaseSnapshotProvider
-from mathproof.formal_v2 import FormalV2Error, FormalV2HTTPATP
+from mathproof.maths_ai_http import MathsAIAPIError as FormalV2Error, MathsAIHTTPFormalATP
 from mathproof.formal_v2_admission import search_proposal, replay_proposal, promotion_proposal
 
 
@@ -48,12 +48,13 @@ def release(store, value):
 @pytest.mark.parametrize("provider_kind", ["frozen", "mcts"])
 def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tmp_path_factory, monkeypatch, provider_kind):
     native = pytest.importorskip("maths_ai.formal.tests.test_frozen_native")
+    artifacts = Artifacts()
     if provider_kind == "mcts":
         trained = pytest.importorskip("maths_ai.formal.tests.test_trained_http")
         fixture = trained.trained_http.__wrapped__(tmp_path_factory)
         endpoint = next(fixture)
-        wire_client = FormalV2HTTPATP(endpoint, timeout=90)
-        cap = wire_client.capabilities()["deployments"]["mcts"]
+        wire_client = MathsAIHTTPFormalATP(endpoint, artifacts=artifacts, timeout=90)
+        cap = wire_client.formal_capabilities()["deployments"]["mcts"]
         env_hash, provider_env_id = cap["environment_hash"], cap["environment_id"]
         http = None
     else:
@@ -63,19 +64,21 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tm
         http, env_hash, _ = next(fixture)
         provider_env_id = "init-4.10-rc1"
     try:
-        def transport(method, path, payload=None, *, raw=False, data=None):
+        def transport(method, path, data=None, *, binary=False, expected_statuses=None):
             if http is None:
-                return wire_client._call(method, path, payload, raw=raw, data=data)
-            response = http.request(method, path, json=payload, content=data)
+                return wire_client._transport(method, path, data, binary=binary,
+                    expected_statuses=expected_statuses or frozenset({200}))
+            response = http.request(method, path, content=data if isinstance(data, bytes) else None,
+                                    json=None if isinstance(data, bytes) else data)
             if response.status_code >= 400:
                 raise FormalV2Error(response.text, status_code=response.status_code)
-            return response.content if raw else response.json()
-        search = FormalV2HTTPATP("http://fixture", timeout=60)
-        monkeypatch.setattr(search, "_call", transport)
+            return (response.content, response.headers.get("X-Content-Hash")) if binary else response.json()
+        search = MathsAIHTTPFormalATP("http://fixture", artifacts=artifacts, timeout=90)
+        monkeypatch.setattr(search, "_transport", transport)
         source = b"namespace Demo\ntheorem goal (P : Prop) (h : P) : P := by exact DOES_NOT_EXIST\nend Demo\n"
         source_hash = search.put_artifact(source)
-        artifacts, view, store = Artifacts(), MemoryView(), JournalStore()
-        gate = CommitGate(view, store)
+        view, store = MemoryView(), JournalStore()
+        gate = CommitGate(view, store, artifacts=artifacts)
         def committed():
             # Exercise journal-overlay recovery with a deliberately unprojected view.
             inspection = replace(worker, base_revision=store.head("native")[0])
@@ -124,12 +127,13 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tm
         release(store, worker)
 
         checker = lease(store, "checker", "replayer", cert)
-        independent = FormalV2HTTPATP("http://fixture", timeout=90)
+        independent = MathsAIHTTPFormalATP("http://fixture", artifacts=artifacts, timeout=90)
         replay_wall = 60000 if provider_kind == "mcts" else 15000
-        monkeypatch.setattr(independent, "_call", transport)
+        monkeypatch.setattr(independent, "_transport", transport)
         if provider_kind == "mcts":
             independent.restore(search.binding(body["run_id"]))
-            limited = independent.submit_replay(body["run_id"], max_steps=1, wall_clock_ms=replay_wall)
+            handle = independent.formal_search_status(body["run_id"])["certificate"]
+            limited = independent.replay_attestation(handle, env_hash, max_steps=1, wall_clock_ms=replay_wall)
             assert limited["status"] == "inconclusive", limited
             assert limited["verification_cost"]["tactic_steps"] == 1
         with pytest.raises(FormalV2Error, match="independent replayer"):
@@ -140,11 +144,11 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tm
             if args[1] == "/formal-replay":
                 value["verification_cost"].pop("sorry_detected", None)
             return value
-        monkeypatch.setattr(independent, "_call", missing_audit)
+        monkeypatch.setattr(independent, "_transport", missing_audit)
         with pytest.raises(FormalV2Error, match="no-sorry"):
             replay_proposal(independent, checker, committed(), artifacts, certificate_id=cert, max_steps=32, wall_clock_ms=replay_wall)
         assert committed().node(cert).fields["status"] == "replay-pending"
-        monkeypatch.setattr(independent, "_call", transport)
+        monkeypatch.setattr(independent, "_transport", transport)
         checked = replay_proposal(independent, checker, committed(), artifacts,
                                   certificate_id=cert, max_steps=32, wall_clock_ms=replay_wall)
         outcome = gate.commit(checked)

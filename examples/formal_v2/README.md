@@ -23,7 +23,7 @@ Scheduler-issued search lease
     ├── FormalRuntimeConfig(protocol_version=2) / lease compiler
     │       └── source hash, declaration, environment, revision and fencing
     │
-    ├── FormalV2HTTPATP → bounded GNN or MCTS search
+    ├── MathsAIHTTPFormalATP → bounded GNN or MCTS search
     │       └── proved-pending-replay + stored certificate
     │
     ├── admit_search → existing artifact store and CommitGate
@@ -45,14 +45,14 @@ Use real leases issued by the application's scheduler/journal. `gate` and
 the helpers do not introduce another journal or fabricate worker identities.
 
 ```python
-from mathproof.formal_v2 import FormalV2HTTPATP
+from mathproof.maths_ai_http import MathsAIHTTPFormalATP
 from mathproof.formal_v2_admission import (
     admit_search,
     admit_replay,
     admit_promotion,
 )
 
-client = FormalV2HTTPATP("http://127.0.0.1:39743", timeout=90)
+client = MathsAIHTTPFormalATP("http://127.0.0.1:39743", artifacts=artifacts, timeout=90)
 
 # dispatch comes from the lease compiler with protocol_version=2.
 request = dispatch.worker_input
@@ -67,7 +67,7 @@ assert searched.accepted, searched.rejections
 
 # Resolve the Certificate from the committed PRODUCED_CERTIFICATE relation.
 # Release the search lease; issue a distinct replayer lease for that certificate.
-independent_client = FormalV2HTTPATP("http://127.0.0.1:39743", timeout=90)
+independent_client = MathsAIHTTPFormalATP("http://127.0.0.1:39743", artifacts=artifacts, timeout=90)
 checked = admit_replay(
     independent_client, replay_lease, gate, artifacts,
     certificate_id=certificate_id, max_steps=128, wall_clock_ms=60_000,
@@ -124,7 +124,7 @@ startup and local native dependencies are not replaced by fixtures.
 
 ## Contract compatibility and recovery
 
-This branch pins the provider schemas vendored in `schemas/formal-v2.schema.json`.
+This branch pins the provider's nine-schema package under `src/mathproof/contracts/formal-v2/`.
 The client verifies every schema digest before submitting work. Coordinate
 provider/client deployment when the contract changes; do not infer compatibility
 from the numeric version alone.

@@ -18,7 +18,9 @@ from artifacts.store import ArtifactStore
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
-from commit_gate.validate import validate_proposal
+from commit_gate.gate import CommitGate
+from commit_gate.store import JournalStore
+from commit_gate.apply import apply_ops
 
 _TEST_DB_URL = os.environ.get(
     "ARTIFACT_TEST_DB_URL",
@@ -65,7 +67,10 @@ class TestArtifactReferencedFromAProposal(unittest.TestCase):
 
         # 3. A committed FormalState node already exists in the graph.
         view = MemoryView()
-        view.add_node("p17/fs1", "FormalState", {"goal_text": "1 + 1 = 2"})
+        journal = JournalStore()
+        self.addCleanup(journal.close)
+        token = journal.acquire_lease("p17", "lease-1", actor="atp-worker-3", worker_class="formal-atp")
+        gate = CommitGate(view, journal, artifacts=self.store)
 
         # 4. A proposal references the artifact by hash only, via the
         #    already-supported HAS_ARTIFACT / content-addressed pattern.
@@ -73,19 +78,24 @@ class TestArtifactReferencedFromAProposal(unittest.TestCase):
             proof_id="p17",
             actor="atp-worker-3",
             worker_class="formal-atp",
-            ops=(AddEdge("HAS_ARTIFACT", "p17/fs1", artifact_hash, "p17/e2"),),
+            ops=(UpsertNode("FormalState", "p17/fs1", {"goal_text": "1 + 1 = 2"}),
+                 AddEdge("HAS_ARTIFACT", "p17/fs1", artifact_hash, "p17/e2")),
             base_revision=0,
             lease_id="lease-1",
-            fencing_token=1,
+            fencing_token=token,
         )
 
         # 5. The gate accepts it: no rejections.
-        findings = validate_proposal(proposal, view)
-        self.assertEqual(findings, [])
+        outcome = gate.commit(proposal)
+        self.assertTrue(outcome.accepted, outcome.rejections)
+        rebuilt = MemoryView()
+        for event in journal.read_events_between("p17", 0, outcome.revision):
+            apply_ops(rebuilt, Proposal.from_dict(event).ops)
 
         # 6. Independent replay, later: given only the hash from the
         #    committed graph, the exact original bytes come back.
-        self.assertEqual(self.store.get(artifact_hash), trace)
+        committed_hash = rebuilt.edges_from("p17/fs1", "HAS_ARTIFACT")[0].dst_id
+        self.assertEqual(self.store.get(committed_hash), trace)
 
 
 if __name__ == "__main__":

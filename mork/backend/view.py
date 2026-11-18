@@ -211,19 +211,23 @@ class MorkView:
         return self._edge_record(proof_id, local_id, rel_type, src, dst)
 
     def edges_from(self, node_id: str, rel_type: str) -> tuple[EdgeRecord, ...]:
-        proof_id = extract_proof_id(node_id)
+        # Content addresses can be referenced by edges owned by several proofs.
+        proof = (
+            "$proof" if node_id.startswith("sha256:")
+            else encode(extract_proof_id(node_id))
+        )
         local_src = extract_local_id(node_id)
         rows = self._space.match(
-            f"(edge {encode(proof_id)} $eid {encode(rel_type)} "
+            f"(edge {proof} $eid {encode(rel_type)} "
             f"{encode(local_src)} $dst)",
-            "($eid $dst)",
+            f"({proof} $eid $dst)",
         )
         records = []
         for row in rows:
-            edge_token, dst_token = tokens(row)
+            proof_token, edge_token, dst_token = tokens(row)
             records.append(
                 self._edge_record(
-                    proof_id,
+                    decode(proof_token),
                     decode(edge_token),
                     rel_type,
                     local_src,
@@ -234,19 +238,22 @@ class MorkView:
 
     def edges_to(self, node_id: str, rel_type: str) -> tuple[EdgeRecord, ...]:
         """Read incoming edges through the materialized reverse-edge index."""
-        proof_id = extract_proof_id(node_id)
+        proof = (
+            "$proof" if node_id.startswith("sha256:")
+            else encode(extract_proof_id(node_id))
+        )
         local_dst = extract_local_id(node_id)
         rows = self._space.match(
-            f"(rev-edge {encode(proof_id)} {encode(local_dst)} "
+            f"(rev-edge {proof} {encode(local_dst)} "
             f"{encode(rel_type)} $src $eid)",
-            "($eid $src)",
+            f"({proof} $eid $src)",
         )
         records = []
         for row in rows:
-            edge_token, src_token = tokens(row)
+            proof_token, edge_token, src_token = tokens(row)
             records.append(
                 self._edge_record(
-                    proof_id,
+                    decode(proof_token),
                     decode(edge_token),
                     rel_type,
                     decode(src_token),
@@ -426,7 +433,7 @@ class MorkView:
         return EdgeRecord(
             f"{proof_id}/{local_edge_id}",
             rel_type,
-            f"{proof_id}/{local_src}",
-            f"{proof_id}/{local_dst}",
+            local_src if local_src.startswith("sha256:") else f"{proof_id}/{local_src}",
+            local_dst if local_dst.startswith("sha256:") else f"{proof_id}/{local_dst}",
             dict(self._read_fields("efield", proof_id, local_edge_id)),
         )

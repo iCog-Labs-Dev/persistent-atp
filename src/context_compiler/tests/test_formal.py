@@ -596,3 +596,22 @@ class FormalContextLimitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_v2_export_keeps_source_and_goal_explicit_and_consolidates_budget():
+    payload = compile_formal(*make()).payload
+    payload = replace(payload, lean_name='Demo.target', lean_source_artifact=h('actual Lean source'), root_state={**payload.root_state, 'hypotheses':['n : Nat']})
+    selection = dict(deployment_id='mcts-prod', backend='mcts-actor-critic', profile='puct')
+    source = payload.to_v2_schema_dict(**selection, input_kind='source')
+    assert source['input'] == {'kind':'source', 'artifact_hash':payload.lean_source_artifact,
+                               'declaration':'Demo.target', 'starting_state':'binders-introduced'}
+    assert 'goal_text' not in source
+    assert 'lean_source_artifact' not in source
+    assert 'max_tactic_steps' not in source['search_policy']
+    assert source['budget']['max_steps'] == 40
+    assert validate_schema('formal-search-request', source) == []
+    goal = payload.to_v2_schema_dict(**selection, input_kind='goal', universe_levels=('u',))
+    assert goal['input']['hypotheses'] == ['n : Nat']
+    assert goal['input']['universe_levels'] == ['u']
+    with unittest.TestCase().assertRaises(ContextValidationError):
+        replace(payload, lean_name=None).to_v2_schema_dict(**selection, input_kind='source')

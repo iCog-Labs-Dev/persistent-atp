@@ -21,6 +21,7 @@ from .formal import (
     CheckpointPolicy,
     CorpusManifest,
     FormalTask,
+    FormalV2Selection,
     ModelBundle,
     PremiseAccessibility,
     compile_formal,
@@ -57,6 +58,7 @@ class FormalRuntimeConfig:
     protocol_version: int = 1
     backend: Mapping[str, Any] | None = None
     deployment_id: str | None = None
+    v2_selection: FormalV2Selection | None = None
 
     def __post_init__(self) -> None:
         if type(self.protocol_version) is not int or self.protocol_version not in (1, 2):
@@ -67,6 +69,10 @@ class FormalRuntimeConfig:
             raise ContextValidationError("deployment_id must be a non-empty string")
         if self.protocol_version == 1 and (self.backend is not None or self.deployment_id is not None):
             raise ContextValidationError("backend and deployment selection require formal v2")
+        if self.v2_selection is not None and not isinstance(self.v2_selection, FormalV2Selection):
+            raise ContextValidationError("v2_selection must be FormalV2Selection")
+        if self.v2_selection is not None and (self.backend is not None or self.deployment_id is not None):
+            raise ContextValidationError("select the v2 deployment once")
         if not isinstance(self.execution_limits, FormalExecutionLimits):
             raise ContextValidationError(
                 "execution_limits must be FormalExecutionLimits"
@@ -250,6 +256,7 @@ def compile_formal_for_lease(
         protocol_version=config.protocol_version,
         backend=config.backend,
         deployment_id=config.deployment_id,
+        v2_selection=config.v2_selection,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,

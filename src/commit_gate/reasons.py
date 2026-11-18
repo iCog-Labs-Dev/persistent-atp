@@ -58,6 +58,7 @@ class Reason(StrEnum):
     PROMOTION_WITHOUT_DECLARATION_CHAIN = "promotion-without-declaration-chain"
     PROMOTION_WITHOUT_ENVIRONMENT_BINDING = "promotion-without-environment-binding"
     CERTIFICATE_BINDING_INCOMPLETE = "certificate-binding-incomplete"
+    ARTIFACT_UNAVAILABLE = "artifact-unavailable"
     ENVIRONMENT_DRIFT = "environment-drift"
     CRITIC_VERDICT_REQUIRED = "critic-verdict-required"
     WORKER_CLASS_OUT_OF_AUTHORITY = "worker-class-out-of-authority"

@@ -31,7 +31,6 @@ from .ids import (
     parse_local_id,
 )
 from .http_atp import ATPServiceError, HTTPFormalATP
-from .formal_v2 import FormalV2Error, FormalV2HTTPATP
 from .maths_ai_atp import MathsAIFormalATP
 from .maths_ai_http import MathsAIAPIError, MathsAIHTTPFormalATP, maths_ai_http_atp
 from .soundness import (
@@ -58,8 +57,6 @@ __all__ = [
     "FormalATPAdapter",
     "ATPServiceError",
     "HTTPFormalATP",
-    "FormalV2Error",
-    "FormalV2HTTPATP",
     "MathsAIFormalATP",
     "MathsAIAPIError",
     "MathsAIHTTPFormalATP",

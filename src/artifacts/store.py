@@ -21,6 +21,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from .errors import (
+    ArtifactCorruptError,
     ArtifactNotFoundError,
     ArtifactQueryError,
     ArtifactStoreUnavailable,
@@ -108,7 +109,10 @@ class ArtifactStore:
         if row is None:
             raise ArtifactNotFoundError(artifact_hash)
         (content,) = row
-        return bytes(content)
+        raw = bytes(content)
+        if hash_content(raw) != artifact_hash:
+            raise ArtifactCorruptError(f"stored bytes do not match {artifact_hash}")
+        return raw
 
     def exists(self, artifact_hash: str) -> bool:
         """Whether something is stored under `artifact_hash`."""

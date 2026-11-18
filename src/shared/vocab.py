@@ -266,6 +266,7 @@ class ReplayStatus(StrEnum):
 
     VERIFIED = "verified"
     REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
 
 
 class ObstructionKind(StrEnum):
