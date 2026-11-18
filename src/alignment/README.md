@@ -4,6 +4,38 @@ The **Statement Alignment Worker** audits and certifies semantic equivalence bet
 
 In this architecture, an informal `Claim` and a Lean `FormalDeclaration` are separate objects in the proof metagraph. A Lean proof verifies an informal claim **only when** an alignment record with verdict `aligned` and lifecycle `reviewed` links them.
 
+## Formalization worker
+
+`FormalizerWorker` consumes a `FormalizationCompilation` produced by
+`context_compiler.compile_formalization`. The packet contains the target claim,
+its verified dependencies, theorem context, and a revision-bound selection
+manifest. The worker asks the configured LLM for a Lean proposition type only;
+it does not generate or assert a proof. Its proposal may create one
+`FormalDeclaration` in `draft` status and connect it to the source claim with
+`DRAFTS_CLAIM`. The gate rejects any additional writes by this worker.
+
+Drafts still require a separate alignment review and Lean replay before they
+can enter proof search or support a verified claim.
+
+To inspect the compiled packet and proposed draft locally, run from the
+repository root:
+
+```bash
+uv run python scripts/formalizer_demo.py
+```
+
+The command uses a configured API key by default. Set `OPENAI_API_KEY` (or
+`LLM_API_KEY`) and `LLM_MODEL` for an OpenAI-compatible endpoint; set
+`LLM_ENDPOINT_URL` for a non-default endpoint. For Gemini, set
+`GEMINI_API_KEY`; `GEMINI_MODEL` optionally overrides the client's default.
+Environment variables may be placed in a
+local `.env` file. Use `--provider` to choose explicitly when more than one
+provider is configured. Supply `--claim-text` and `--theorem` to try another
+claim. `--mock` uses the fixed sample answer and accepts `--lean-name` and
+`--lean-type`. The script prints the selection manifest, packet digest,
+candidate, gate findings, and proposal; it does not commit the proposal or
+invoke Lean.
+
 ---
 
 ## 1. System Pipeline & Role

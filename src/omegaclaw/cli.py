@@ -30,7 +30,7 @@ def load_config(path: str) -> tuple[dict, Path]:
     config_path = Path(path)
     if not config_path.is_absolute():
         config_path = ROOT / config_path
-    if not config_path.is_file() and path in {"reference", "persistence", "production"}:
+    if not config_path.is_file() and path in {"reference", "persistence", "production", "formal"}:
         config_path = PACKAGE_ROOT / "config" / (path + ".yaml")
     if not config_path.is_file() and path in {
             "reference", "omegclaw/config/reference.yaml",
@@ -99,6 +99,13 @@ def _omega_runtime_blockers():
     return blockers
 
 
+def _formal_config(config):
+    if config.get('formal_provider'):
+        from .formal_runtime import FormalProviderConfig
+        return FormalProviderConfig.from_environment()
+    return None
+
+
 def doctor(profile: str) -> dict:
     blockers: list[str] = []
     if profile == "deepseek":
@@ -152,14 +159,22 @@ def doctor(profile: str) -> dict:
                     blockers.append(f"ATP API health is unavailable at {endpoint}/health")
             blockers.append("persistent-atp formal-search is not wired to the ATP /prove API")
             blockers.append("durable backend checkpoint continuation is not configured")
+    if profile == 'formal-v2':
+        from .formal_runtime import FormalProviderConfig, FormalWorkflow
+        try:
+            config = FormalProviderConfig.from_environment()
+            FormalWorkflow(None, config).deployment(FormalWorkflow(None, config).client())
+        except (ValueError, OSError, RuntimeError):
+            blockers.append('formal-v2 provider configuration, schema compatibility, or deployment readiness check failed')
     return {"profile": profile, "ready": not blockers, "blockers": blockers}
 
 
 def main(argv=None) -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(prog="persistent-atp-omega")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("doctor")
-    d.add_argument("--profile", default="reference", choices=("reference", "omega", "deepseek", "persistence", "lean", "real-atp"))
+    d.add_argument("--profile", default="reference", choices=("reference", "omega", "deepseek", "persistence", "lean", "real-atp", "formal-v2"))
     d.add_argument("--require", action="store_true")
     s = sub.add_parser("serve")
     s.add_argument("--config", required=True)
@@ -177,7 +192,7 @@ def main(argv=None) -> int:
     if args.command == "serve":
         config, root = load_config(args.config)
         token = os.environ.get(config["token_env"], "")
-        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"))
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config))
         receiver = ReferenceReceiver(service)
         server = serve(service, token, config["host"], int(config["port"]), receiver=receiver)
         print(json.dumps({"status": "ready", "host": config["host"], "port": server.server_port,
@@ -194,7 +209,7 @@ def main(argv=None) -> int:
         source = Path(args.file)
         if not source.is_file() or source.stat().st_size > 16 * 1024 * 1024:
             raise SystemExit("artifact input must be a file of at most 16 MiB")
-        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"))
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config))
         receiver = ReferenceReceiver(service)
         try:
             artifact = asyncio.run(receiver.put_artifact(source.read_bytes(), workspace_id=config["workspace"],

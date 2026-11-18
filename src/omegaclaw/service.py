@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import uuid
+import threading
 from pathlib import Path
 
 from commit_gate.gate import CommitGate
@@ -36,10 +37,17 @@ ACTOR = "omega-coordinator"
 class OperationService:
     def __init__(self, root: str | Path, *, workspace: str = "reference", artifacts=None,
                  critic_command: tuple[str, ...] | None = None, critic_timeout_s: float = 2.0,
-                 profile: str = "reference", artifact_db_url: str | None = None):
+                 profile: str = "reference", artifact_db_url: str | None = None, formal_config=None):
         if profile not in {"reference", "persistence", "production"}:
             raise ValueError("unknown receiver profile")
+        if formal_config is not None:
+            from .formal_runtime import FormalWorkflow, FormalProviderConfig
+            if not isinstance(formal_config, FormalProviderConfig):
+                raise ValueError('formal_config must be a trusted FormalProviderConfig')
+            if profile == 'production' and formal_config.mode != 'real':
+                raise ValueError('production cannot use a scripted formal provider')
         self.profile = profile
+        self.lock = threading.RLock()
         self.receiver_mode = {"reference": "reference-scripted", "persistence": "persistence-scripted",
                               "production": "persistent-storage"}[profile]
         self._owns_artifacts = artifacts is None
@@ -66,6 +74,9 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
+        self.formal = None
+        if formal_config is not None:
+            self.formal = FormalWorkflow(self, formal_config)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:

@@ -54,6 +54,11 @@
       "minLength": 1,
       "description": "The exact current Lean goal the ATP should search."
     },
+    "hypotheses": {
+      "type": "array",
+      "description": "The exact local Lean context entries supplied with the goal.",
+      "items": { "type": "string", "minLength": 1 }
+    },
     "corpus_manifest": {
       "type": "object",
       "additionalProperties": false,

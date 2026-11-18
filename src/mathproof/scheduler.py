@@ -84,8 +84,13 @@ CATEGORY_WORKER_CLASS = {
     "research-move": WorkerClass.LLM_RESEARCH.value,
     "formal-run": WorkerClass.FORMAL_ATP.value,
     "critic-task": WorkerClass.CRITIC.value,
+    "obstruction-task": WorkerClass.COORDINATOR.value,
 }
 ROUTABLE_WORKER_CLASSES = frozenset(CATEGORY_WORKER_CLASS.values())
+
+OBSTRUCTION_DISPOSITIONS = frozenset(
+    {RunDisposition.STAGNATED.value, RunDisposition.COUNTEREXAMPLE.value}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +98,7 @@ class Candidate:
     """One frontier entry: what could be worked on next, and why."""
 
     move_id: str
-    category: str  # research-move | formal-run | critic-task
+    category: str  # research-move | formal-run | critic-task | obstruction-task
     detail: str
     features: Mapping[str, float] = field(default_factory=dict)
     conflict_ids: tuple[str, ...] = ()
@@ -216,7 +221,7 @@ class SchedulerStatistics:
 
 
 class GlobalScheduler:
-    """Chooses among research moves, formal targets and critic tasks."""
+    """Choose among research, formal, critic, and obstruction tasks."""
 
     def __init__(
         self,
@@ -227,6 +232,7 @@ class GlobalScheduler:
         clock: Callable[[], float] = time.time,
         statistics: SchedulerStatistics | None = None,
         worker_actors: Mapping[str, str] | None = None,
+        obstruction_is_handled: Callable[[ReadView, str], bool] | None = None,
     ):
         self._view = view
         self._store = store
@@ -239,6 +245,13 @@ class GlobalScheduler:
                 raise ValueError(f"no route is defined for worker class {worker_class!r}")
             if not isinstance(actor, str) or not actor.strip():
                 raise ValueError(f"worker class {worker_class!r} needs a nonempty actor")
+        if obstruction_is_handled is not None and not callable(
+            obstruction_is_handled
+        ):
+            raise TypeError("obstruction_is_handled must be callable")
+        self._obstruction_is_handled = obstruction_is_handled or (
+            lambda _view, _obstruction_id: False
+        )
 
     # -- public entry point -------------------------------------------------
 
@@ -288,6 +301,21 @@ class GlobalScheduler:
                         if candidate.move_id == row.selected_move_id
                         and worker_class == row.worker_class)
         return Lease.from_row(row, snapshot, self._policy.name)
+
+    def lease_selected(self, proof_id: str, move_id: str, worker_class: str, *, actor: str,
+                       ttl_seconds: float = 600.0) -> Lease | None:
+        """Lease one authorized selected move only if it remains schedulable."""
+        revision, frontier = self._snapshot_frontier(proof_id)
+        candidate = next((item for item in frontier if item.move_id == move_id
+            and CATEGORY_WORKER_CLASS[item.category] == worker_class), None)
+        if candidate is None:
+            return None
+        features = self._feature_vector(candidate, worker_class)
+        _, snapshot = self._policy.score(features)
+        row = self._store.claim_next(proof_id,
+            [LeaseCandidate(candidate.move_id, snapshot, candidate.conflict_ids)],
+            actor=actor, worker_class=worker_class, base_revision=revision, ttl_seconds=ttl_seconds)
+        return Lease.from_row(row, snapshot, self._policy.name) if row else None
 
     def lease_next(
         self,
@@ -447,6 +475,73 @@ class GlobalScheduler:
                             },
                         )
                     )
+
+            # Formal failures surfaced to the research/coordinator loop.
+            elif record.label == "Obstruction":
+                if self._obstruction_is_handled(view, node_id):
+                    continue
+                raised_by = view.edges_to(node_id, "RAISED_OBSTRUCTION")
+                if len(raised_by) != 1:
+                    continue
+                run_id = raised_by[0].src_id
+                run = nodes.get(run_id)
+                if (
+                    run is None
+                    or run.label != "FormalRun"
+                    or run.fields.get("status") not in OBSTRUCTION_DISPOSITIONS
+                ):
+                    continue
+                recorded_run = record.fields.get("formal_run_id")
+                if recorded_run is not None and recorded_run != run_id:
+                    continue
+                state_ids = tuple(
+                    dict.fromkeys(
+                        edge.dst_id
+                        for edge in view.edges_from(node_id, "AT_STATE")
+                    )
+                )
+                if not state_ids or any(
+                    (state := nodes.get(state_id)) is None
+                    or state.label != "FormalState"
+                    for state_id in state_ids
+                ):
+                    continue
+                kernels = tuple(
+                    dict.fromkeys(
+                        edge.src_id
+                        for edge in view.edges_to(node_id, "RESOLVES")
+                    )
+                )
+                if len(kernels) != 1:
+                    continue
+                kernel = nodes.get(kernels[0])
+                if kernel is None or kernel.label != "Claim":
+                    continue
+                environments = view.edges_from(run_id, "RAN_UNDER")
+                if len(environments) != 1:
+                    continue
+                environment = nodes.get(environments[0].dst_id)
+                if environment is None or environment.label != "Environment":
+                    continue
+                sibling_ids = tuple(
+                    edge.dst_id
+                    for edge in view.edges_from(run_id, "RAISED_OBSTRUCTION")
+                    if edge.dst_id != node_id
+                )
+                candidates.append(
+                    Candidate(
+                        move_id=node_id,
+                        category="obstruction-task",
+                        detail=f"formal failure raised by {run_id}",
+                        conflict_ids=(run_id, *sibling_ids, *state_ids),
+                        features={
+                            "expected_information_gain": 0.9,
+                            "verification_value": 0.7,
+                            "formalization_readiness": 0.5,
+                            "estimated_cost": 1.5,
+                        },
+                    )
+                )
 
             # Critic tasks: provisional claims with no favorable verdict (3.3).
             elif record.label == "Claim":

@@ -46,6 +46,7 @@ __all__ = [
     "check_vocabulary",
     "check_namespace",
     "check_worker_authority",
+    "check_formalizer_authority",
     "check_subgoal_conservation",
     "check_executor_result",
     "check_annotation_separation",
@@ -125,6 +126,7 @@ WORKER_CLASS_AUTHORITY: dict[str, frozenset[str]] = {
             "Environment",
         }
     ),
+    WorkerClass.FORMALIZER.value: frozenset({"FormalDeclaration"}),
     WorkerClass.REPLAYER.value: frozenset({"LeanReplay", "Certificate"}),
     WorkerClass.LLM_RESEARCH.value: frozenset(
         {"Claim", "SpeculativeHypothesis", "ResearchState", "ResearchMove"}
@@ -177,6 +179,7 @@ WORKER_CLASS_EDGE_AUTHORITY: dict[str, frozenset[str]] = {
             "HAS_ARTIFACT",
         }
     ),
+    WorkerClass.FORMALIZER.value: frozenset({"DRAFTS_CLAIM"}),
     WorkerClass.REPLAYER.value: frozenset({"REPLAYED_BY", "REPLAY_ENVIRONMENT"}),
     WorkerClass.LLM_RESEARCH.value: frozenset(
         {"DEPENDS_ON", "PROMOTED_TO", "RESOLVES", "PROPOSES", "MOVE_TARGETS"}
@@ -205,6 +208,7 @@ EDGE_ENDPOINTS: dict[str, tuple[str, str]] = {
     "CHECKPOINT_FRONTIER": ("FormalCheckpoint", "FormalState"),
     "RAN_UNDER": ("FormalRun", "Environment"),
     "SEARCHES": ("FormalRun", "FormalDeclaration"),
+    "DRAFTS_CLAIM": ("FormalDeclaration", "Claim"),
     "PRODUCED_CERTIFICATE": ("FormalRun", "Certificate"),
     "CERTIFIES": ("Certificate", "FormalDeclaration"),
     "CERTIFICATE_ENVIRONMENT": ("Certificate", "Environment"),
@@ -243,6 +247,7 @@ def validate_proposal(proposal: Proposal, view: ReadView | None = None) -> list[
     findings.extend(check_vocabulary(proposal))
     findings.extend(check_namespace(proposal))
     findings.extend(check_worker_authority(proposal))
+    findings.extend(check_formalizer_authority(proposal))
     findings.extend(check_subgoal_conservation(proposal))
     findings.extend(check_executor_result(proposal))
     findings.extend(check_annotation_separation(proposal))
@@ -402,6 +407,32 @@ def check_worker_authority(proposal: Proposal) -> Iterator[Rejection]:
                 f"(authority: {sorted(edge_authority)})",
                 index,
             )
+
+
+def check_formalizer_authority(proposal: Proposal) -> Iterator[Rejection]:
+    """Formalizer may add only one draft declaration tied to one claim."""
+    if proposal.worker_class != WorkerClass.FORMALIZER.value:
+        return
+    declarations = [
+        op for op in proposal.ops
+        if isinstance(op, UpsertNode) and op.label == "FormalDeclaration"
+    ]
+    links = [
+        op for op in proposal.ops
+        if isinstance(op, AddEdge) and op.rel_type == "DRAFTS_CLAIM"
+    ]
+    if (
+        len(proposal.ops) != 2
+        or len(declarations) != 1
+        or len(links) != 1
+        or declarations[0].fields.get("status") != DeclarationStatus.DRAFT.value
+        or links[0].src_id != declarations[0].node_id
+        or not links[0].dst_id
+    ):
+        yield Rejection(
+            Reason.WORKER_CLASS_OUT_OF_AUTHORITY,
+            "formalizer may only create one draft FormalDeclaration and link it to its Claim",
+        )
 
 
 def _is_content_addressed(identity: Any) -> bool:
@@ -1140,6 +1171,15 @@ def _certificate_binding_issue(
         return Reason.CERTIFICATE_BINDING_INCOMPLETE, "producing run is not linked to certificate"
     if _edge_targets_after(proposal, view, run_id, "SEARCHES") != {declaration_id}:
         return Reason.CERTIFICATE_BINDING_INCOMPLETE, "run did not search certified declaration"
+    if cert.get("protocol_version") == 2:
+        declaration = _fields_after(declaration_id, created, proposal, view) or {}
+        for field in ("request_digest", "input_artifact_hash", "source_artifact_hash"):
+            if not _is_sha256(cert.get(field)) or run.get(field) != cert.get(field):
+                return Reason.CERTIFICATE_BINDING_INCOMPLETE, f"v2 {field} is not bound to the producing run"
+        if declaration.get("lean_source_artifact") != cert["source_artifact_hash"]:
+            return Reason.CERTIFICATE_BINDING_INCOMPLETE, "v2 certificate source differs from current declaration"
+        if cert.get("input_kind") == "source" and declaration.get("lean_name") != cert.get("source_declaration"):
+            return Reason.CERTIFICATE_BINDING_INCOMPLETE, "v2 certificate changed the source declaration locator"
 
     pinned = _edge_targets_after(proposal, view, declaration_id, "PINNED_ENVIRONMENT")
     if len(pinned) != 1:
@@ -1188,6 +1228,14 @@ def _promotion_environment_issue(
     return None
 
 
+def _v2_replay_matches(cert, replay):
+    if cert is None or cert.get("protocol_version") != 2:
+        return True
+    return replay is not None and replay.get("protocol_version") == 2 and all(
+        replay.get(field) == cert.get(field) for field in ("request_digest", "input_artifact_hash", "source_artifact_hash")
+    ) and replay.get("run_id") == cert.get("producer_run_id")
+
+
 def check_replay_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejection]:
     """A REPLAYED_BY assertion must name the replay's one checked certificate."""
     created = _created_fields(proposal, view)
@@ -1203,6 +1251,7 @@ def check_replay_binding(proposal: Proposal, view: ReadView) -> Iterator[Rejecti
             or not _is_sha256(replay.get("artifact_hash"))
             or replay.get("artifact_hash") != cert.get("artifact_hash")
             or sources != {op.src_id}
+            or not _v2_replay_matches(cert, replay)
         ):
             yield Rejection(
                 Reason.REPLAY_BINDING_MISMATCH,
@@ -1267,6 +1316,7 @@ def check_claim_replay_evidence(proposal: Proposal, view: ReadView) -> Iterator[
                         and fields.get("artifact_hash") != cert_fields.get("artifact_hash")
                     )
                     or not _is_sha256(fields.get("artifact_hash"))
+                    or not _v2_replay_matches(cert_fields, fields)
                 ):
                     continue
                 actor = fields.get("actor")

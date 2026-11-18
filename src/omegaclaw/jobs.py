@@ -23,6 +23,8 @@ class JobLedger:
             body_hash TEXT NOT NULL, workspace TEXT NOT NULL,
             operation TEXT NOT NULL, phase TEXT NOT NULL, response TEXT NOT NULL
         )""")
+        if 'formal_json' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}:
+            self.conn.execute('ALTER TABLE operations ADD COLUMN formal_json TEXT')
 
     def submit(self, request: dict) -> tuple[dict, bool]:
         body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
@@ -40,7 +42,7 @@ class JobLedger:
                 result = {"operation_id": operation_id, "phase": "submitted", "transport_status": "accepted"}
                 if request["operation"] == "proof-cycle":
                     result["proof_id"] = request["arguments"]["proof"]
-                self.conn.execute("INSERT INTO operations VALUES (?,?,?,?,?,?,?)", (
+                self.conn.execute("INSERT INTO operations (operation_id, request_id, body_hash, workspace, operation, phase, response) VALUES (?,?,?,?,?,?,?)", (
                     operation_id, request["request_id"], digest, request["workspace"],
                     request["operation"], "submitted", json.dumps(result, sort_keys=True),
                 ))
@@ -63,6 +65,14 @@ class JobLedger:
     def get(self, operation_id: str, workspace: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM operations WHERE operation_id=? AND workspace=?", (operation_id, workspace)).fetchone()
         return self._decode(row) if row else None
+
+    def formal_state(self, operation_id: str) -> dict:
+        row = self.conn.execute('SELECT formal_json FROM operations WHERE operation_id=?', (operation_id,)).fetchone()
+        return json.loads(row['formal_json']) if row and row['formal_json'] else {}
+
+    def save_formal(self, operation_id: str, state: dict) -> None:
+        self.conn.execute('UPDATE operations SET formal_json=? WHERE operation_id=?',
+                          (json.dumps(state, sort_keys=True, allow_nan=False), operation_id))
 
     def active_cycle(self, proof_id: str, workspace: str, *, excluding_request_id: str | None = None) -> dict | None:
         # Operational deduplication only while a cycle is in flight.

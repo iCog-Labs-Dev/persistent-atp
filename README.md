@@ -114,9 +114,10 @@ bash scripts/omegaclaw-test.sh --tier container
 Receiver configuration accepts `profile: reference`, `persistence`, or
 `production`. Persistent profiles require the PostgreSQL artifact schema and
 the native MORK library loaded with `scripts/with-mork.sh`. The persistence
-profile retains explicitly labeled scripted research; production currently
-allows creation, status, audit, and export, and rejects unavailable worker
-actions. Both recover the MORK projection from the journal at startup.
+profile retains explicitly labeled scripted research. Production allows
+creation, status, audit, and export, and enables formal search when its
+configured formal provider passes capability checks. Unavailable worker
+actions are rejected. Both recover the MORK projection from the journal at startup.
 
 ```bash
 scripts/with-mork.sh --install bash scripts/omegaclaw-test.sh --tier persistence
@@ -127,7 +128,45 @@ Set `ARTIFACT_TEST_DB_URL` to a dedicated test database for that check.
 `python` selects the host `janus_swi` arrangement. The default is `auto`.
 
 HTTP forwards the shared cancellation, budget, and decision DTOs only when
-the receiver advertises support. The supplied receiver does not yet implement
-executor controls. Production formal adapters require authoritative compiled
-context and a bounded backend; durable continuation, independent Lean replay,
-and the complete receiver-to-formal-executor path remain unavailable.
+the receiver advertises support. The formal provider integration supports
+cancellation; budget amendment, decision responses, and frontier continuation
+remain unsupported.
+
+## Formal prover integration
+
+The [formal v2 worked example](examples/formal_v2/README.md) connects trained
+GNN/MCTS search to independently authorized replay and claim admission through
+the existing journal and commit gate. It includes the lease-bound integration
+pattern, native acceptance commands and links to independently checkable
+mathematical proofs in the paired provider repository.
+
+The Omega receiver uses that client with the paired provider revision pinned
+in `pyproject.toml`. Configure `PERSISTENT_ATP_FORMAL_*` from `.env.example`,
+`ARTIFACT_DB_URL`, and the native MORK library, then run:
+
+```bash
+uv run persistent-atp-omega doctor --profile formal-v2 --require
+scripts/with-mork.sh uv run persistent-atp-omega serve --config formal
+```
+
+Formal search requires a committed Lean declaration with its original name,
+type, source artifact, accepted alignment, and matching provider environment.
+Trusted formalization and review must supply these; Omega cannot grant itself
+alignment authority. The receiver compiles the leased context, uploads exact
+source bytes, and persists the original request before search admission. It
+imports settled evidence through the commit gate, requests independent replay
+under a separate actor, and promotes the claim only after the gate accepts
+replay and alignment evidence. Cancellation stays pending until backend work
+stops. Restart reuses saved requests and receipts; an uncertain replay response
+stops for reconciliation rather than issuing another replay automatically.
+
+With the paired provider installed or checked out at
+`PERSISTENT_ATP_FORMAL_SOURCE`, run the contract and recovery checks:
+
+```bash
+bash scripts/omegaclaw-test.sh --tier formal-contract
+```
+
+These checks use scripted search and, when installed, a fresh Lean process for
+the controlled replay fixture. They do not establish trained GNN/MCTS readiness;
+that requires the provider's pinned native environment and model assets.

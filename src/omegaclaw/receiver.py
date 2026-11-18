@@ -1,8 +1,8 @@
-"""Contract-v2 reference receiver over the existing trusted Omega service.
+"""Contract-v2 receiver over the existing trusted Omega service.
 
 The durable ledger is operational metadata, never a source of mathematical
-truth. This receiver is explicitly single-workspace/reference-mode and does
-not advertise formal replay or production authorization.
+truth. Storage and formal execution capabilities follow the explicitly
+configured profile. Authorization remains scoped to one trusted workspace.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class ReferenceReceiver:
         self._lock = threading.RLock()
         # JournalStore has one SQLite connection. Serialize receiver reads with
         # worker commits so an HTTP poll cannot inspect a transaction in flight.
-        self._service_lock = threading.RLock()
+        self._service_lock = service.lock
         self._db = sqlite3.connect(Path(service.root) / "receiver-v2.sqlite3", isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -68,11 +68,16 @@ class ReferenceReceiver:
                 event_id TEXT NOT NULL UNIQUE, operation_id TEXT NOT NULL,
                 event_type TEXT NOT NULL, observation_version INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS controls (
+                principal TEXT NOT NULL, workspace_id TEXT NOT NULL,
+                request_id TEXT NOT NULL, body BLOB NOT NULL,
+                PRIMARY KEY(principal, workspace_id, request_id)
+            );
         """)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atp-reference-receiver")
         self._pending = set()
         with self._lock:
-            rows = self._db.execute("SELECT operation_id FROM requests WHERE lifecycle IN ('queued','running')").fetchall()
+            rows = self._db.execute("SELECT operation_id FROM requests WHERE lifecycle IN ('queued','running','cancelling')").fetchall()
         for row in rows:
             self._schedule(row["operation_id"])
 
@@ -99,23 +104,26 @@ class ReferenceReceiver:
         if contract_version not in {"2.0", "2.1"}:
             raise UnsupportedCapability("unsupported contract version")
         actions = BASE_ACTION_TYPES if contract_version == "2.0" else ACTION_TYPES
+        available = self.service.formal is not None and self.service.formal.ready()
         if self.service.profile == "production":
             actions = {kind: value for kind, value in actions.items() if kind in {
-                "proof-create", "proof-status", "proof-audit", "proof-export"}}
+                "proof-create", "proof-status", "proof-audit", "proof-export", *({'formal-search'} if available else set())}}
+        elif self.service.formal is not None:
+            actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
+                       and (kind != 'formal-search' or available)}
+        controls = {'coordination-read'} if contract_version == '2.1' else set()
+        if available:
+            controls.add('cancel')
         return CapabilitySet(contract_version, frozenset(actions),
-                             controls=frozenset({"coordination-read"}) if contract_version == "2.1" else frozenset(),
-                             backend_mode="unavailable", independent_replay=False,
+                             controls=frozenset(controls),
+                             backend_mode=self.service.formal.config.mode if available else 'unavailable',
+                             independent_replay=bool(available and self.service.formal.config.mode == 'real'),
                              receiver_mode=self.service.receiver_mode)
 
     async def submit(self, request: ActionRequest) -> Admission:
         if not isinstance(request, ActionRequest):
             raise TypeError("receiver requires ActionRequest")
         self._scope(request.workspace_id)
-        capabilities = await self.capabilities(request.contract_version)
-        if request.action.kind not in capabilities.actions:
-            raise UnsupportedCapability("action is unavailable under this contract version")
-        if isinstance(request.action, QueueResearchMoves) and request.preconditions.expected_revision is None:
-            raise ValueError("guidance requires an expected proof revision")
         digest = fingerprint(request)
         body = canonical_json(request)
         with self._lock:
@@ -126,6 +134,11 @@ class ReferenceReceiver:
                 raise IdempotencyConflict("request ID reused with a different body", request_id=request.request_id)
             return Admission(request.request_id, digest, True,
                              OperationRef(self.workspace_id, existing["operation_id"]))
+        capabilities = await self.capabilities(request.contract_version)
+        if request.action.kind not in capabilities.actions:
+            raise UnsupportedCapability("action is unavailable under this contract version")
+        if isinstance(request.action, QueueResearchMoves) and request.preconditions.expected_revision is None:
+            raise ValueError("guidance requires an expected proof revision")
         if request.deadline is not None and request.deadline <= datetime.now(timezone.utc):
             raise StalePrecondition("request deadline has elapsed", request_id=request.request_id)
         pre = request.preconditions
@@ -225,7 +238,8 @@ class ReferenceReceiver:
             version = row["observation_version"] + 1
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                self._db.execute("UPDATE requests SET lifecycle='running', observation_version=? WHERE operation_id=?", (version, operation_id))
+                lifecycle = 'cancelling' if row['lifecycle'] == 'cancelling' else 'running'
+                self._db.execute("UPDATE requests SET lifecycle=?, observation_version=? WHERE operation_id=?", (lifecycle, version, operation_id))
                 self._event(operation_id, "running", version)
                 self._db.execute("COMMIT")
             except BaseException:
@@ -233,21 +247,70 @@ class ReferenceReceiver:
                 raise
         try:
             request = request_from_json(row["body"])
-            with self._service_lock:
-                if isinstance(request.action, SelectedProofCycle):
-                    action = request.action
-                    outcome = self.service._cycle(action.proof_id, operation_id,
-                        category=action.category, record_progress=False)
-                elif isinstance(request.action, QueueResearchMoves):
-                    outcome = self.service.queue_research_moves(request.action,
-                        expected_revision=request.preconditions.expected_revision)
+            if isinstance(request.action, FormalSearch) and self.service.formal is not None:
+                raw = self._legacy_request(request)
+                with self._service_lock:
+                    job, _ = self.service.jobs.submit(raw)
+                if job['phase'] in {'finished', 'failed'}:
+                    outcome = job
                 else:
-                    outcome = self.service.submit(self._legacy_request(request))
-            lifecycle = "failed" if outcome.get("phase") == "failed" or outcome.get("transport_status") == "error" else "succeeded"
+                    def cancelled():
+                        with self._lock:
+                            return self._db.execute('SELECT lifecycle FROM requests WHERE operation_id=?',
+                                (operation_id,)).fetchone()['lifecycle'] == 'cancelling'
+                    outcome = self.service.formal.run(job['operation_id'], request.action.proof_id,
+                        request.action.claim_id, {'max_steps': request.action.budget.max_steps,
+                            'wall_clock_ms': request.action.budget.wall_clock_ms}, cancelled=cancelled,
+                        expected_revision=request.preconditions.expected_revision,
+                        on_progress=lambda report: self._progress(operation_id, report))
+                    with self._service_lock:
+                        self.service.jobs.update(job['operation_id'], {**outcome, 'phase': 'finished',
+                            'transport_status': 'ok', 'operation_id': job['operation_id']})
+            else:
+                with self._service_lock:
+                    outcome = self._execute_reference(request, operation_id)
+            lifecycle = outcome.get('lifecycle') or ('failed' if outcome.get('phase') == 'failed'
+                or outcome.get('transport_status') == 'error' else 'succeeded')
         except Exception as exc:
-            lifecycle = "failed"
-            outcome = {"error_code": type(exc).__name__, "summary": str(exc)[:400]}
+            lifecycle = 'failed'
+            outcome = {'error_code': getattr(exc, 'code', type(exc).__name__),
+                'summary': getattr(exc, 'public_summary',
+                    'Operation requires reconciliation; no mathematical outcome is inferred.')}
+        self._finish(operation_id, lifecycle, version, outcome)
+
+    def _execute_reference(self, request, operation_id):
+        if isinstance(request.action, SelectedProofCycle):
+            action = request.action
+            outcome = self.service._cycle(action.proof_id, operation_id,
+                category=action.category, record_progress=False)
+        elif isinstance(request.action, QueueResearchMoves):
+            outcome = self.service.queue_research_moves(request.action,
+                expected_revision=request.preconditions.expected_revision)
+        else:
+            outcome = self.service.submit(self._legacy_request(request))
+        return outcome
+
+    def _progress(self, operation_id, report):
+        encoded = json.dumps(report, sort_keys=True)
         with self._lock:
+            row = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (operation_id,)).fetchone()
+            if row['lifecycle'] in TERMINAL_LIFECYCLES or row['result'] == encoded:
+                return
+            version = row['observation_version'] + 1
+            self._db.execute('BEGIN IMMEDIATE')
+            try:
+                self._db.execute('UPDATE requests SET result=?, observation_version=? WHERE operation_id=?',
+                    (encoded, version, operation_id))
+                self._event(operation_id, report['phase'], version)
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
+
+    def _finish(self, operation_id, lifecycle, version, outcome):
+        with self._lock:
+            version = max(version, self._db.execute('SELECT observation_version FROM requests WHERE operation_id=?',
+                (operation_id,)).fetchone()['observation_version'])
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 if outcome is not None:
@@ -412,7 +475,38 @@ class ReferenceReceiver:
         return self._artifact(ref.hash)
 
     async def cancel(self, control: CancelRequest):
-        raise UnsupportedCapability("reference executor cancellation is unavailable")
+        if self.service.formal is None:
+            raise UnsupportedCapability('executor cancellation is unavailable')
+        self._scope(control.operation_ref.workspace_id)
+        ref = control.operation_ref
+        await self.get_operation(ref)  # Authorized receiver-owned operation.
+        body = canonical_json(control)
+        with self._lock:
+            row = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (ref.operation_id,)).fetchone()
+            if not isinstance(request_from_json(row['body']).action, FormalSearch):
+                raise UnsupportedCapability('only formal-search operations support cancellation')
+            previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
+                (self.principal, self.workspace_id, control.request_id)).fetchone()
+            if previous:
+                if previous['body'] != body:
+                    raise IdempotencyConflict('control identity was reused with another body')
+            else:
+                if control.expected_observation_version is not None and row['observation_version'] != control.expected_observation_version:
+                    raise StalePrecondition('operation changed before cancellation')
+                self._db.execute('BEGIN IMMEDIATE')
+                try:
+                    self._db.execute('INSERT INTO controls VALUES (?,?,?,?)',
+                        (self.principal, self.workspace_id, control.request_id, body))
+                    if row['lifecycle'] not in TERMINAL_LIFECYCLES and row['lifecycle'] != 'cancelling':
+                        version = row['observation_version'] + 1
+                        self._db.execute("UPDATE requests SET lifecycle='cancelling', observation_version=? WHERE operation_id=?",
+                            (version, ref.operation_id))
+                        self._event(ref.operation_id, 'cancelling', version)
+                    self._db.execute('COMMIT')
+                except BaseException:
+                    self._db.execute('ROLLBACK')
+                    raise
+        return await self.get_operation(ref)
 
     async def amend_budget(self, control: BudgetAmendment):
         raise UnsupportedCapability("reference budget amendment is unavailable")

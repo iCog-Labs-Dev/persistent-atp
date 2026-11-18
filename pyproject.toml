@@ -20,6 +20,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+formal-tests = [
+    "pytest>=8.0",
+    "fastapi>=0.115,<1",
+]
 provider-sdk = [
     "openai>=2.0,<3",
     "PyYAML>=6.0",
@@ -38,6 +42,9 @@ persistent-atp-provider-probe = "omegaclaw.deepseek_probe:main"
 
 [tool.setuptools]
 package-dir = {"" = "src", "mork" = "mork"}
+
+[tool.setuptools.data-files]
+"share/persistent-atp/schemas" = ["schemas/*.schema.json"]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
@@ -84,4 +91,4 @@ testpaths = [
 
 [tool.uv.sources]
 persistent-atp-client = { path = "packages/persistent-atp-client", editable = true }
-mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git" }
+mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git", rev = "e179d7c7b274eb1173bdfee1b92f1ffa94662a16" }

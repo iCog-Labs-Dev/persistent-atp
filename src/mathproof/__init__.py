@@ -30,7 +30,10 @@ from .ids import (
     local_id,
     parse_local_id,
 )
+from .http_atp import ATPServiceError, HTTPFormalATP
+from .formal_v2 import FormalV2Error, FormalV2HTTPATP
 from .maths_ai_atp import MathsAIFormalATP
+from .maths_ai_http import MathsAIAPIError, MathsAIHTTPFormalATP, maths_ai_http_atp
 from .soundness import (
     SoundnessReason,
     SoundnessViolation,
@@ -53,7 +56,14 @@ __all__ = [
     "EMITTABLE_DISPOSITIONS",
     "FakeFormalATP",
     "FormalATPAdapter",
+    "ATPServiceError",
+    "HTTPFormalATP",
+    "FormalV2Error",
+    "FormalV2HTTPATP",
     "MathsAIFormalATP",
+    "MathsAIAPIError",
+    "MathsAIHTTPFormalATP",
+    "maths_ai_http_atp",
     "build_result",
     "build_state",
     "build_tactic_edge",

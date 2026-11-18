@@ -32,6 +32,29 @@ def test_doctor_checks_selected_petta_python_version(monkeypatch, version, suppo
         assert result["ready"] is False
 
 
+def test_formal_production_rejects_scripted_configuration_before_opening_storage(tmp_path):
+    from omegaclaw.formal_runtime import FormalProviderConfig
+    from omegaclaw.service import OperationService
+    root = tmp_path / 'unopened'
+    with pytest.raises(ValueError, match='production cannot use a scripted'):
+        OperationService(root, profile='production',
+            formal_config=FormalProviderConfig('http://localhost:39743', mode='scripted-test'))
+    assert not root.exists()
+
+
+def test_formal_doctor_reports_unavailable_provider_without_secrets(monkeypatch):
+    from mathproof.formal_v2 import FormalV2Error
+    from omegaclaw.formal_runtime import FormalWorkflow
+    monkeypatch.setenv('PERSISTENT_ATP_FORMAL_URL', 'http://localhost:39743')
+    monkeypatch.setenv('PERSISTENT_ATP_FORMAL_TOKEN', 'private-test-token')
+    def unavailable(*args):
+        raise FormalV2Error('unavailable private-test-token')
+    monkeypatch.setattr(FormalWorkflow, 'deployment', unavailable)
+    result = cli.doctor('formal-v2')
+    assert not result['ready']
+    assert 'private-test-token' not in json.dumps(result)
+
+
 def test_doctor_rejects_unreadable_python_version(monkeypatch):
     original = subprocess.run
     monkeypatch.setenv("PETTA_PYTHON", "controlled-petta-python")

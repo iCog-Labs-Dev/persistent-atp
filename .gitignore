@@ -3,6 +3,7 @@
 .env
 .mork-ffi-src/
 *.egg-info/
+build/
 *.png
 *.dot
 .runs/

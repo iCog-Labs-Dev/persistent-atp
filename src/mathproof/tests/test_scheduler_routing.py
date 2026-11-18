@@ -105,7 +105,7 @@ def test_no_available_route_is_idle_without_a_lease_or_proof_event():
 @pytest.mark.parametrize(
     "actors",
     [
-        {"coordinator": "trusted-service"},
+        {"unknown-worker": "trusted-service"},
         {"critic": " "},
         {"critic": None},
     ],
