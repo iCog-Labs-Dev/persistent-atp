@@ -128,8 +128,10 @@ A missing or rejected source never becomes a text request.
 
 Goal mode explicitly sends `goal_text`, ordered `hypotheses` and `universe_levels`.
 The compiler preserves hypotheses from the root state. MCTS supports both input
-kinds and universe-polymorphic goals. `accepted-gnn` supports goal inputs without
-universe levels. Runtime capabilities may restrict these choices further.
+kinds and universe-polymorphic goals. The frozen `accepted-gnn` deployment also
+supports source inputs; its text-goal profile requires empty universe levels.
+The main-derived accepted deployment remains goal-only. Runtime capabilities
+specify which input kinds a deployment actually admits.
 
 Only `budget.max_steps` is sent as a tactic allowance. An older compiler policy
 limit is consolidated into this budget with `min`, and never sent as the removed

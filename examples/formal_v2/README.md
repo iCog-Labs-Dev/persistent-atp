@@ -58,7 +58,7 @@ client = MathsAIHTTPFormalATP("http://127.0.0.1:39743", artifacts=artifacts, tim
 request = dispatch.worker_input
 source_bytes = artifacts.get(request["input"]["artifact_hash"])
 assert client.put_artifact(source_bytes) == request["input"]["artifact_hash"]
-client.formal_search_start(request)
+started = client.formal_search_start(request)
 
 # Poll with the coordinator's own observation/deadline policy until settled.
 # Persist client.binding(request["run_id"]) through the existing run record.
@@ -90,6 +90,15 @@ association must be present. An Environment may use `provider_environment_id`
 for the provider's environment identifier while retaining its proof-scoped graph
 ID. See the [full contract guide](../../schemas/FORMAL_V2.md).
 
+`admit_search` includes provider accounting and the finished attempt's history
+via `formal_run_ops`. For long-running observation or same-run retries, include
+`formal_run_ops(started_or_polled_result, current_run, actor=worker_id)` in normal
+leased proposals from admission onward. Commit each finished outcome before
+requesting another attempt. This preserves the original allowance and all
+attempt outcomes; importing only a later retry result cannot reconstruct them.
+The settled evidence helper requires the original request's lease/revision;
+retry orchestration uses current scheduler leases and the general run-ops helper.
+
 These stages are intentionally not a single automatic promotion call. A verified
 HTTP response is evidence for an independently authorized replayer; it is not
 authority to modify the claim. Stale revisions/fences, changed source or
@@ -99,8 +108,8 @@ remain rejectable by the existing gate.
 ## Run native acceptance yourself
 
 Install the matching provider and this client in the same test environment.
-Stop any separately running model service first; the test launches its own
-Uvicorn server. Set paths to provisioned, verified assets:
+The test launches an isolated Uvicorn server and state directory. Set paths to
+provisioned, verified assets:
 
 ```bash
 export MATHS_AI_MCTS_RL_CONFIG=/absolute/path/to/relocated/mcts-rl.json
@@ -116,6 +125,10 @@ Both backend cases use actual trained models and Lean. The test creates real
 journal leases and checks successful admission/promotion and negative cases for
 revision, fencing, source binding, proof obligations, independent actors,
 no-sorry evidence and alignment. The MCTS case uses real Uvicorn HTTP.
+At the merged PR84 `be2fe49` checkpoint, both native backend cases pass; the full
+consumer suite reports **1129 passed, 99 skipped, 137 subtests passed**. The gate
+also checks stored replay bytes, append-only attempt histories and guarded
+same-run retries without refunds or claimed frontier continuation.
 
 The native test uses an in-memory implementation of the existing artifact
 `put/get` interface to remain self-contained. It does not claim PostgreSQL or
