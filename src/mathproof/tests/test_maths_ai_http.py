@@ -110,7 +110,7 @@ def attestation(request, run, status='verified'):
             'run_id': request['run_id'], 'certificate_hash': run['result']['certificate']['artifact_hash'],
             'input_artifact_hash': run['input_artifact_hash'], 'source_artifact_hash': run['source_artifact_hash'],
             'source_origin': run['source_origin'], 'environment_hash': request['environment_hash'],
-            'backend': request['backend']['name'], 'verification_cost': {'tactic_steps': 1}}
+            'backend': request['backend']['name'], 'verification_cost': {'tactic_steps': 1, 'sorry_detected': False}}
 
 
 @pytest.mark.parametrize('kind,backend', [('source','mcts-actor-critic'), ('goal','mcts-actor-critic'), ('goal','accepted-gnn')])

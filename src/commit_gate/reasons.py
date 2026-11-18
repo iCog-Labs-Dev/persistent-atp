@@ -47,6 +47,7 @@ class Reason(StrEnum):
 
     PRIOR_VALUE_MISMATCH = "prior-value-mismatch"
     ILLEGAL_STATUS_TRANSITION = "illegal-status-transition"
+    FORMAL_RUN_LIFECYCLE_INVALID = "formal-run-lifecycle-invalid"
     IMMUTABLE_FIELD_OVERWRITE = "immutable-field-overwrite"
 
     STAGNATION_WITHOUT_OBSTRUCTION = "stagnation-without-obstruction"

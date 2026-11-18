@@ -121,6 +121,10 @@ def test_native_source_search_independent_replay_and_gate_promotion(tmp_path, tm
         assert not gate.commit(replace(candidate, ops=bad_ops)).accepted
         outcome = gate.commit(candidate)
         assert outcome.accepted, outcome.to_dict()
+        run_fields = committed().node(body["run_id"]).fields
+        assert run_fields["provider"]["frontier_resume"] is False
+        assert run_fields["attempt_history"][0]["attempt"] == 1
+        assert run_fields["attempt_history"][0]["consumed_steps"] == run_fields["provider"]["budget"]["consumed_steps"]
         assert committed().node("native/c-1").fields["status"] == "provisional"
         cert = next(op.node_id for op in candidate.ops if isinstance(op, UpsertNode) and op.label == "Certificate")
         assert committed().node(cert).fields["status"] == "replay-pending"

@@ -26,13 +26,7 @@ class TestTransitions(unittest.TestCase):
         table = STATUS_TRANSITIONS[("FormalRun", "status")]
         terminals = [
             "proved-pending-replay",
-            "budget-exhausted",
-            "stagnated",
             "counterexample",
-            "invalid-request",
-            "environment-error",
-            "internal-error",
-            "cancelled",
         ]
         for t in terminals:
             self.assertEqual(table[t], frozenset())

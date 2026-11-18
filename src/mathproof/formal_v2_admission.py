@@ -11,6 +11,7 @@ from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
 from .formal_v2 import _json
+from .formal_run import formal_run_ops
 from .maths_ai_http import MathsAIAPIError as FormalV2Error
 
 
@@ -102,8 +103,8 @@ def search_proposal(client, run_id, lease, view, artifacts):
         raise FormalV2Error("run already has a different producing actor or evidence binding")
     ops = [SetField("FormalRun", run_id, key, value, prior=run.fields.get(key))
            for key, value in pinned.items() if key not in {"actor", "environment_hash"} and run.fields.get(key) != value]
-    ops += [SetField("FormalRun", run_id, "status", result["disposition"], prior=run.fields.get("status")),
-           _edge(lease.proof_id, "RAN_UNDER", run_id, env_id)]
+    ops += list(formal_run_ops(canonical, run, actor=lease.actor))
+    ops.append(_edge(lease.proof_id, "RAN_UNDER", run_id, env_id))
     # The adapter has already mapped run/attempt-scoped provider occurrences.
     scope = (snapshot["request_digest"], snapshot["attempts"])
     states = {row["state_id"]: row["state_id"] for row in canonical["states"]}

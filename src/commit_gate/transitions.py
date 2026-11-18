@@ -7,7 +7,15 @@ from __future__ import annotations
 
 from typing import Final
 
-__all__ = ["STATUS_TRANSITIONS", "IMMUTABLE_FIELDS"]
+__all__ = ["STATUS_TRANSITIONS", "IMMUTABLE_FIELDS", "RETRYABLE_RUN_DISPOSITIONS"]
+
+# These are attempt outcomes, not necessarily the end of a v2 run. The
+# lifecycle validator additionally requires admitted input, remaining budget,
+# the next attempt number, unchanged bindings and preserved outcome history.
+RETRYABLE_RUN_DISPOSITIONS = frozenset({
+    "budget-exhausted", "stagnated", "invalid-request", "environment-error",
+    "internal-error", "cancelled",
+})
 
 # (Label, field) -> {from_value -> {allowed_to_values}}
 STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
@@ -81,15 +89,15 @@ STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
                 "cancelled",
             }
         ),
-        # All of the above are terminal (no further transitions possible)
+        # Reopening requires check_formal_run_lifecycle's v2 retry evidence.
         "proved-pending-replay": frozenset(),
-        "budget-exhausted": frozenset(),
-        "stagnated": frozenset(),
+        "budget-exhausted": frozenset({"searching"}),
+        "stagnated": frozenset({"searching"}),
         "counterexample": frozenset(),
-        "invalid-request": frozenset(),
-        "environment-error": frozenset(),
-        "internal-error": frozenset(),
-        "cancelled": frozenset(),
+        "invalid-request": frozenset({"searching"}),
+        "environment-error": frozenset({"searching"}),
+        "internal-error": frozenset({"searching"}),
+        "cancelled": frozenset({"searching"}),
     },
     # A graph Move is a TacticApplication: queued/leased are the leasing
     # lifecycle (4.7), refuted/dominated/exhausted the pruning outcomes.
