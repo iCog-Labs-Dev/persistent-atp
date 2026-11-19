@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from omegaclaw.playground import Case, Session, evaluate, returned_values, save, unavailable_rows, command_records, cases
+from omegaclaw.playground import Case, Session, evaluate, returned_values, save, unavailable_rows, command_records, cases, provider_model, proxy_template
 
 
 def test_model_claim_does_not_substitute_for_tool_or_file_evidence():
@@ -58,6 +58,38 @@ def test_pair_export_keeps_actual_response_and_null_for_unavailable(tmp_path, mo
     pairs = json.loads((tmp_path / 'pairs.json').read_text())
     assert pairs['What is fish?'] == 'A fish is an aquatic animal.'
     assert pairs[missing[0]['query']] is None
+    assert not any(row['id'].startswith('channel_') for row in report['results'] if 'id' in row)
+
+
+def test_asi_model_setting_and_explicit_override(monkeypatch):
+    monkeypatch.setenv('ASIONE_MODEL', 'asi-test-model')
+    assert provider_model('ASIOne') == 'asi-test-model'
+    assert provider_model('ASIOne', 'explicit-model') == 'explicit-model'
+
+
+def test_asi_endpoint_is_forwarded_by_trusted_proxy_only():
+    template = '''listen 8080;
+location /asione/ {
+ proxy_pass https://api.asi1.ai/v1/;
+ proxy_set_header Host api.asi1.ai;
+ proxy_set_header Authorization "Bearer ${ASIONE_API_KEY}";
+}
+location /deepseek/ { proxy_pass https://api.deepseek.com/; }
+'''
+    actual = proxy_template(template, 9001, 'ASIOne', 'https://llm.a.singularitycompute.com/v1')
+    assert 'proxy_pass https://llm.a.singularitycompute.com/v1/;' in actual
+    assert 'Host llm.a.singularitycompute.com;' in actual
+    assert '${ASIONE_API_KEY}' in actual
+    assert 'https://api.deepseek.com/' in actual
+    assert proxy_template(template, 9001, 'DeepSeek', 'https://unused.example') == template.replace('listen 8080;', 'listen 127.0.0.1:9001;')
+
+
+@pytest.mark.parametrize('endpoint', ['https://user:secret@example.com/v1',
+    'https://example.com/v1;include /tmp/file;', 'https://example.com/v1?key=secret',
+    'http://external.example/v1'])
+def test_asi_endpoint_rejects_embedded_secrets_and_invalid_proxy_values(endpoint):
+    with pytest.raises(ValueError):
+        proxy_template('', 9001, 'ASIOne', endpoint)
 
 
 def test_session_correlates_replies_and_acknowledges_duplicate_delivery():

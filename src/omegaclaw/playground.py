@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -37,6 +38,32 @@ def free_port():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
+
+
+def provider_model(provider, override=None):
+    setting = 'ASIONE_MODEL' if provider == 'ASIOne' else 'DEEPSEEK_MODEL'
+    return override or os.environ.get(setting) or PROVIDERS[provider][1]
+
+
+def proxy_template(template, port, provider, asi_base_url=None):
+    template = template.replace('listen 8080;', f'listen 127.0.0.1:{port};')
+    if provider != 'ASIOne' or not asi_base_url:
+        return template
+    parsed = urlsplit(asi_base_url)
+    try:
+        invalid_port = parsed.port == 0
+    except ValueError as error:
+        raise ValueError('ASIONE_BASE_URL has an invalid port') from error
+    if (not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or invalid_port or any(char.isspace() or char in ';{}$\"\'\\' for char in asi_base_url)
+            or not (parsed.scheme == 'https' or
+                    parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', 'localhost', '::1'})):
+        raise ValueError('ASIONE_BASE_URL requires HTTPS (or loopback HTTP) without credentials, query, or fragment')
+    upstream, host = 'proxy_pass https://api.asi1.ai/v1/;', 'proxy_set_header Host api.asi1.ai;'
+    if template.count(upstream) != 1 or template.count(host) != 1:
+        raise ValueError('image has an unexpected ASI proxy configuration')
+    return template.replace(upstream, f'proxy_pass {asi_base_url.rstrip("/")}/;').replace(
+        host, f'proxy_set_header Host {parsed.netloc};')
 
 
 @dataclass(frozen=True)
@@ -236,7 +263,8 @@ class Docker:
                                  '/opt/nginx/nginx.conf.template').stdout
             if 'location = /deepseek/chat/completions {' not in template and self.provider == 'DeepSeek':
                 raise ValueError('image does not include the DeepSeek provider overlay')
-            template = template.replace('listen 8080;', f'listen 127.0.0.1:{self.proxy_port};')
+            template = proxy_template(template, self.proxy_port, self.provider,
+                os.environ.get('ASIONE_BASE_URL'))
             path = self.output / 'nginx.conf.template'
             path.write_text(template)
             path.chmod(0o644)
@@ -376,10 +404,6 @@ def unavailable_rows(provider):
                 'query': f'Generate a reply and invoke a tool using provider {name}.', 'response': None,
                 'status': 'not_tested' if os.environ.get(PROVIDERS[name][0]) else 'unavailable',
                 'reason': 'Run separately with --provider ' + name if os.environ.get(PROVIDERS[name][0]) else 'Provider key is not configured.'})
-    for channel in ('Telegram', 'Slack', 'IRC', 'Mattermost'):
-        rows.append({'id': 'channel_' + channel, 'feature': 'Optional communication channel',
-            'query': f'Exchange a message through the {channel} channel.', 'response': None,
-            'status': 'not_tested', 'reason': 'This isolated run selects the WebSocket channel.'})
     for name in ('proof-create', 'proof-cycle', 'proof-status', 'proof-audit', 'proof-export',
                  'formal-search', 'formal-resume', 'statement-align', 'lemma-bridge'):
         rows.append({'id': 'atp_' + name, 'feature': 'ATP plugin',
@@ -430,7 +454,7 @@ def main(argv=None):
         selected = expanded
     output = (Path(args.output) / run_id).resolve()
     output.mkdir(parents=True)
-    model = args.model or PROVIDERS[args.provider][1]
+    model = provider_model(args.provider, args.model)
     report = {'run_id': run_id, 'started_at': utcnow(), 'provider': args.provider,
         'model': model, 'backend': 'live-provider', 'results': [], 'output': str(output)}
     runner = session = None

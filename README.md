@@ -113,7 +113,9 @@ uv run --extra omega-playground persistent-atp-omega-playground --build-image
 ```
 
 `--cases shell,file_append,query` selects cases and their prerequisites;
-`--provider ASIOne --model <model>` selects another configured provider.
+`--provider ASIOne` uses `ASIONE_API_KEY`, `ASIONE_MODEL`, and
+`ASIONE_BASE_URL` from `.env`; `--model` overrides the configured model.
+The playground exercises WebSocket only and excludes other communication-channel cases.
 Each run writes `.runs/omega-capabilities/<run>/pairs.json` as
 `{"query": "actual response"}` and a `report.json` with tool, filesystem,
 memory, and recovery checks. Unavailable or unexecuted cases have null responses
