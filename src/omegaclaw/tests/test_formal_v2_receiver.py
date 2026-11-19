@@ -17,7 +17,7 @@ except ImportError:
         raise RuntimeError('install the formal-tests extra for required formal contract checks')
     pytest.skip('formal provider integration dependencies are required', allow_module_level=True)
 PROVIDER = Path(os.environ.get('PERSISTENT_ATP_FORMAL_SOURCE',
-    str(Path(__file__).resolve().parents[3] / 'tmp/repos/Mathematics-ai-atp-pr95')))
+    str(Path(__file__).resolve().parents[3] / 'tmp/repos/Mathematics-ai-atp-pr95-consolidated')))
 if PROVIDER.is_dir():
     sys.path.insert(0, str(PROVIDER))
 try:
@@ -36,7 +36,7 @@ from maths_ai.formal.service import FormalService
 
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
-from mathproof.formal_v2 import FormalV2HTTPATP, FormalV2Error
+from mathproof.maths_ai_http import MathsAIHTTPFormalATP, MathsAIAPIError as FormalV2Error
 from omegaclaw.formal_runtime import FormalProviderConfig
 from omegaclaw.formal_runtime import FormalWorkflow
 from omegaclaw.service import OperationService
@@ -55,6 +55,10 @@ def provider(tmp_path, monkeypatch):
         def ready(self): return True
         def imports(self): return []
         def environment_manifest(self): return {'fixture': 'scripted-search-native-replay'}
+        async def quiesce(self):
+            assert not self.active
+        async def retire(self):
+            await self.quiesce()
         async def elaborate_source(self, payload, **kwargs):
             return {'target_sexp': '(:c True)', 'target_pp': 'True', 'locals': [],
                     'target_unit_start': 0, 'check': {'ok': True}}
@@ -94,19 +98,19 @@ def provider(tmp_path, monkeypatch):
         calls = []
         lost_start = [False]
         crash_start = [False]
-        def transport(self, method, path, payload=None, *, raw=False, data=None):
+        def transport(self, method, path, data=None, *, binary=False, expected_statuses=frozenset({200})):
             calls.append((method, path))
             if crash_start[0] and path == '/formal-search/start':
                 crash_start[0] = False
                 raise SystemExit('injected worker crash before delivery')
-            result = http.request(method, path, json=payload, content=data)
-            if result.status_code >= 400:
+            result = http.request(method, path, content=data) if isinstance(data, bytes) else http.request(method, path, json=data)
+            if result.status_code not in expected_statuses:
                 raise FormalV2Error('fixture HTTP failure', status_code=result.status_code)
             if lost_start[0] and path == '/formal-search/start':
                 lost_start[0] = False
                 raise FormalV2Error('injected lost admission response')
-            return result.content if raw else result.json()
-        monkeypatch.setattr(FormalV2HTTPATP, '_call', transport)
+            return (result.content, result.headers.get('X-Content-Hash')) if binary else result.json()
+        monkeypatch.setattr(MathsAIHTTPFormalATP, '_transport', transport)
         yield http.get('/formal-capabilities').json()['deployments']['fixture'], backend, calls, lost_start, crash_start
 
 
@@ -146,6 +150,7 @@ def test_search_admission_lost_reply_is_reconciled_without_duplicate_run(provide
         result = await handle.wait(timeout=15, poll_interval=.05)
         assert result.lifecycle == 'succeeded', result.result
         assert result.result['mathematical_disposition'] == 'proved-pending-replay'
+        assert result.mathematical_disposition == 'proved-pending-replay'
         assert not (await client.status(workspace_id='reference', proof_id='p1')).formal_verified
         events, _ = await receiver.read_events(handle.ref)
         assert 'prepared' in [event.event_type for event in events]
@@ -228,7 +233,7 @@ def test_receiver_restart_preserves_run_and_committed_evidence(provider, tmp_pat
     if boundary == 'cached-replay-receipt':
         def offline(*args, **kwargs):
             raise FormalV2Error('provider is offline', status_code=503)
-        monkeypatch.setattr(FormalV2HTTPATP, '_call', offline)
+        monkeypatch.setattr(MathsAIHTTPFormalATP, '_transport', offline)
     service, receiver = configured(root, deployment, mode=mode)
     async def recover():
         client = AsyncClient(LocalReceiverAdapter(receiver))
@@ -271,13 +276,13 @@ def test_receiver_restart_preserves_run_and_committed_evidence(provider, tmp_pat
 def test_lost_replay_receipt_requires_reconciliation_without_second_replay(provider, tmp_path, monkeypatch):
     deployment, backend, calls, *_ = provider
     service, receiver = configured(tmp_path / 'receiver', deployment, mode='real')
-    transport = FormalV2HTTPATP._call
+    transport = MathsAIHTTPFormalATP._transport
     def lose_receipt(*args, **kwargs):
         value = transport(*args, **kwargs)
         if args[2] == '/formal-replay':
             raise FormalV2Error('injected lost replay receipt')
         return value
-    monkeypatch.setattr(FormalV2HTTPATP, '_call', lose_receipt)
+    monkeypatch.setattr(MathsAIHTTPFormalATP, '_transport', lose_receipt)
     async def scenario():
         client = AsyncClient(LocalReceiverAdapter(receiver))
         handle = await client.submit(client.prepare(FormalSearch('p1', 'p1/c-1', Budget(5, 3000)),
@@ -308,6 +313,7 @@ def test_separate_native_replay_and_gate_promotion(provider, tmp_path):
         result = await handle.wait(timeout=30, poll_interval=.05)
         assert result.lifecycle == 'succeeded', result.result
         assert result.result['replay_status'] == 'verified'
+        assert result.mathematical_disposition == 'lean-verified'
         assert (await client.status(workspace_id='reference', proof_id='p1')).formal_verified
         assert backend.replays == 1
     try: asyncio.run(scenario())
@@ -322,13 +328,13 @@ def test_cancel_remains_pending_until_provider_stops(provider, tmp_path, monkeyp
     backend.delay = 2
     service, receiver = configured(tmp_path / 'receiver', deployment)
     if lose_reply:
-        transport = FormalV2HTTPATP._call
+        transport = MathsAIHTTPFormalATP._transport
         def lose_cancel(*args, **kwargs):
             value = transport(*args, **kwargs)
             if args[2].endswith('/cancel'):
                 raise FormalV2Error('injected lost cancellation response')
             return value
-        monkeypatch.setattr(FormalV2HTTPATP, '_call', lose_cancel)
+        monkeypatch.setattr(MathsAIHTTPFormalATP, '_transport', lose_cancel)
     async def scenario():
         client = AsyncClient(LocalReceiverAdapter(receiver))
         handle = await client.submit(client.prepare(FormalSearch('p1', 'p1/c-1', Budget(5, 3000)), workspace_id='reference'))
@@ -391,6 +397,45 @@ def test_production_formal_result_survives_postgres_mork_receiver_restart(provid
         assert backend.replays == 1
     try:
         asyncio.run(recover())
+    finally:
+        receiver.close()
+        service.close()
+
+
+def test_old_contract_operation_requires_reconciliation_before_any_delivery(provider, tmp_path):
+    from omegaclaw.formal_runtime import ContractMigrationRequired
+    deployment, _, calls, *_ = provider
+    service, receiver = configured(tmp_path / 'receiver', deployment)
+    saved = {'phase': 'prepared', 'provider_url': 'http://fixture', 'request': {'run_id': 'p1/fr-old'}}
+    service.formal._load = lambda operation: saved
+    count = len(calls)
+    try:
+        with pytest.raises(ContractMigrationRequired) as failure:
+            service.formal.run('old-operation', 'p1', 'p1/c-1', {'max_steps': 5, 'wall_clock_ms': 3000})
+        assert failure.value.code == 'FORMAL_CONTRACT_MIGRATION_REQUIRED'
+        assert len(calls) == count
+        assert saved['request'] == {'run_id': 'p1/fr-old'}
+        assert 'contract_manifest' not in saved
+    finally:
+        receiver.close()
+        service.close()
+
+
+def test_provider_io_does_not_hold_service_lock(provider, tmp_path, monkeypatch):
+    deployment, _, *_ = provider
+    service, receiver = configured(tmp_path / 'receiver', deployment)
+    transport = MathsAIHTTPFormalATP._transport
+    def checked_transport(*args, **kwargs):
+        assert not service.lock._is_owned(), 'provider I/O cannot hold the journal service lock'
+        return transport(*args, **kwargs)
+    monkeypatch.setattr(MathsAIHTTPFormalATP, '_transport', checked_transport)
+    async def scenario():
+        client = AsyncClient(LocalReceiverAdapter(receiver))
+        handle = await client.submit(client.prepare(FormalSearch('p1', 'p1/c-1', Budget(5, 3000)), workspace_id='reference'))
+        result = await handle.wait(timeout=15, poll_interval=.05)
+        assert result.lifecycle == 'succeeded', result.result
+    try:
+        asyncio.run(scenario())
     finally:
         receiver.close()
         service.close()

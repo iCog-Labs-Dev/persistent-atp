@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://persistent-atp.local/schemas/public-models-2.1.1.json",
-  "title": "Persistent ATP public receiver models, contracts 2.0 and 2.1 schema 1",
+  "$id": "https://persistent-atp.local/schemas/public-models-2.2.json",
+  "title": "Persistent ATP public receiver models, contracts 2.0, 2.1 and 2.2 schema 1",
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 128},
     "alias": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
@@ -118,13 +118,32 @@
       "type": "object", "additionalProperties": false,
       "required": ["contract_version", "actions", "controls", "backend_mode", "independent_replay", "receiver_mode"],
       "properties": {
-        "contract_version": {"enum": ["2.0", "2.1"]},
-        "actions": {"type": "array", "uniqueItems": true, "items": {"enum": ["proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export", "formal-search", "formal-resume", "statement-align", "lemma-bridge", "proof-cycle-selected", "queue-research-moves"]}},
-        "controls": {"type": "array", "uniqueItems": true, "items": {"enum": ["cancel", "amend-budget", "answer-decision", "coordination-read"]}},
+        "contract_version": {"enum": ["2.0", "2.1", "2.2"]},
+        "actions": {"type": "array", "uniqueItems": true, "items": {"enum": ["proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export", "formal-search", "formal-resume", "statement-align", "lemma-bridge", "proof-cycle-selected", "queue-research-moves", "queue-coordinator-escalations"]}},
+        "controls": {"type": "array", "uniqueItems": true, "items": {"enum": ["cancel", "amend-budget", "answer-decision", "coordination-read", "cycle-execution-revision", "atomic-coordinator-escalations"]}},
         "backend_mode": {"enum": ["real", "scripted-test", "unavailable"]},
         "independent_replay": {"type": "boolean"},
         "receiver_mode": {"type": "string"}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"contract_version": {"const": "2.0"}}},
+          "then": {
+            "properties": {
+              "actions": {"items": {"not": {"enum": ["proof-cycle-selected", "queue-research-moves"]}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"contract_version": {"enum": ["2.0", "2.1"]}}},
+          "then": {
+            "properties": {
+              "actions": {"items": {"not": {"const": "queue-coordinator-escalations"}}},
+              "controls": {"items": {"not": {"enum": ["cycle-execution-revision", "atomic-coordinator-escalations"]}}}
+            }
+          }
+        }
+      ]
     },
     "Budget": {
       "type": "object", "additionalProperties": false,

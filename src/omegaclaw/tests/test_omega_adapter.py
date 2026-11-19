@@ -43,8 +43,9 @@ def settle(adapter, identity):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         adapter.observe(identity)
-        if adapter.state.intent(identity)["state"] == "completed":
-            return adapter.state.intent(identity)
+        row = adapter.state.intent(identity)
+        if row["state"] == "completed" and not row.get("observation_pending"):
+            return row
         time.sleep(0.01)
     pytest.fail("reference operation did not settle")
 

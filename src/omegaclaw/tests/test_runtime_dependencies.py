@@ -43,7 +43,7 @@ def test_formal_production_rejects_scripted_configuration_before_opening_storage
 
 
 def test_formal_doctor_reports_unavailable_provider_without_secrets(monkeypatch):
-    from mathproof.formal_v2 import FormalV2Error
+    from mathproof.maths_ai_http import MathsAIAPIError as FormalV2Error
     from omegaclaw.formal_runtime import FormalWorkflow
     monkeypatch.setenv('PERSISTENT_ATP_FORMAL_URL', 'http://localhost:39743')
     monkeypatch.setenv('PERSISTENT_ATP_FORMAL_TOKEN', 'private-test-token')

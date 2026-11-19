@@ -7,7 +7,15 @@ from __future__ import annotations
 
 from typing import Final
 
-__all__ = ["STATUS_TRANSITIONS", "IMMUTABLE_FIELDS"]
+__all__ = ["STATUS_TRANSITIONS", "IMMUTABLE_FIELDS", "RETRYABLE_RUN_DISPOSITIONS"]
+
+# These are attempt outcomes, not necessarily the end of a v2 run. The
+# lifecycle validator additionally requires admitted input, remaining budget,
+# the next attempt number, unchanged bindings and preserved outcome history.
+RETRYABLE_RUN_DISPOSITIONS = frozenset({
+    "budget-exhausted", "stagnated", "invalid-request", "environment-error",
+    "internal-error", "cancelled",
+})
 
 # (Label, field) -> {from_value -> {allowed_to_values}}
 STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
@@ -81,15 +89,15 @@ STATUS_TRANSITIONS: Final[dict[tuple[str, str], dict[str, frozenset[str]]]] = {
                 "cancelled",
             }
         ),
-        # All of the above are terminal (no further transitions possible)
+        # Reopening requires check_formal_run_lifecycle's v2 retry evidence.
         "proved-pending-replay": frozenset(),
-        "budget-exhausted": frozenset(),
-        "stagnated": frozenset(),
+        "budget-exhausted": frozenset({"searching"}),
+        "stagnated": frozenset({"searching"}),
         "counterexample": frozenset(),
-        "invalid-request": frozenset(),
-        "environment-error": frozenset(),
-        "internal-error": frozenset(),
-        "cancelled": frozenset(),
+        "invalid-request": frozenset({"searching"}),
+        "environment-error": frozenset({"searching"}),
+        "internal-error": frozenset({"searching"}),
+        "cancelled": frozenset({"searching"}),
     },
     # A graph Move is a TacticApplication: queued/leased are the leasing
     # lifecycle (4.7), refuted/dominated/exhausted the pruning outcomes.
@@ -154,10 +162,10 @@ IMMUTABLE_FIELDS: Final[dict[str, frozenset[str]]] = {
     "FormalRun": frozenset({"actor", "start_time", "environment_hash"}),
     "Certificate": frozenset({"actor", "producer_run_id", "artifact_hash", "environment_hash",
                               "protocol_version", "input_kind", "source_declaration", "request_digest",
-                              "input_artifact_hash", "source_artifact_hash"}),
+                              "input_artifact_hash", "source_artifact_hash", "binding_artifact_hash"}),
     "LeanReplay": frozenset(
         {"actor", "replayed_at", "status", "sorry_detected", "rejection_reason", "environment_hash", "certificate_id", "artifact_hash",
-         "protocol_version", "request_digest", "run_id", "input_artifact_hash", "source_artifact_hash", "receipt_artifact"}
+         "protocol_version", "request_digest", "run_id", "input_artifact_hash", "source_artifact_hash", "receipt_artifact", "attestation_artifact_hash"}
     ),
     "Obstruction": frozenset({"kind", "description", "actor"}),
     "Proof": frozenset({"actor"}),

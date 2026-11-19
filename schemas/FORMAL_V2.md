@@ -1,130 +1,111 @@
-# Formal protocol v2
+# Formal protocol v2: one adapter and one contract package
 
-Provider authority: `maths_ai/formal/contract.py`, Mathematics-ai-atp branch
-`formal-v2-release-integration`, commit `1f5a339` (PR94 base `516b8a1`).
-`formal-v2.schema.json` vendors its seven published schemas with deduplicated
-definitions. Each original schema is reconstructed and its canonical SHA-256
-checked when the client loads. `/formal-capabilities.schema_hashes` must match
-before work is submitted. This replaces the earlier provisional issue-93
-`caba333d…` contract; that incompatible protocol is not negotiated as v2.
+The public Mathematics-ai-atp adapter is **`MathsAIHTTPFormalATP`**, also exposed
+through `maths_ai_http_atp`. The parallel `FormalV2HTTPATP` implementation has
+been removed. `mathproof.formal_v2` now contains only contract/serialization and
+artifact-interface helpers.
 
-## Coordinator dispatch
+The authoritative provider package is `contracts/formal-v2`, based on PR94's
+durable-attempt work at `947a98a` with the frozen GNN/default-selection extensions
+in provider PR95. Its nine runtime schemas and manifest are vendored under
+`src/mathproof/contracts/formal-v2/`. `MANIFEST_HASH` pins exact package bytes;
+capability schema hashes must match before work is submitted.
 
-Set `FormalRuntimeConfig(protocol_version=2, ...)` to compile a real scheduler
-lease into a v2 packet. Backend/profile and deployment are optional; provider
-resolves its default once at admission. An explicit `backend` mapping and
-`deployment_id` override that choice. Environment identity remains pinned.
-
-The compiler defaults to a source input identifying `lean_source_artifact` and
-`lean_name`, with `starting_state: binders-introduced`. The source artifact must
-contain raw UTF-8 Lean, not the old JSON declaration package. Upload exact bytes
-through `client.put_artifact(source_bytes)` before starting. Do not use the
-declaration metadata artifact as a substitute for the Lean file.
-
-`FormalRequestPayload.to_schema_dict(protocol_version=2, formal_input=...)`
-also supports explicit goal inputs. Ordered hypotheses and universe levels are
-required; the pretty-printed root alone is not a faithful request. The compile
-entry point accepts the same options and hashes the selected wire request into
-its packet. The old local policy step cap is folded into `budget.max_steps`;
-`search_policy.max_tactic_steps` is never sent on v2.
-
-## Lifecycle and evidence
+## Existing adapter boundary
 
 ```python
-client = FormalV2HTTPATP(endpoint, timeout=60)
-ack = client.formal_search_start(dispatch.worker_input)
-# Journal this alongside the existing coordinator lease/run record.
-binding = client.binding(ack["run_id"])
+from mathproof import MathsAIHTTPFormalATP
 
-# After coordinator restart:
-client.restore(binding)
-snapshot = client.formal_search_status(ack["run_id"])
-result = client.result(ack["run_id"])  # None while active
+client = MathsAIHTTPFormalATP(endpoint, artifacts=artifact_store, timeout=90)
+result = client.formal_search_start(request)
+result = client.formal_search_status(request["run_id"])
 ```
 
-Lifecycle calls return admissions/snapshots, not legacy result-shaped polling
-responses. `result()` returns the settled canonical evidence envelope. It checks
-coordinator revision/lease/fencing, cumulative allowance, pinned deployment,
-source/input artifacts, certificate bindings, the existing canonical graph
-schema, and complete AND/OR obligations. Search success stays
-`proved-pending-replay`, certificate `replay-pending`.
+These methods retain canonical `FormalATPAdapter` result shapes. Active runs
+return `disposition: searching`; provider admission/accounting is retained under
+`result["provider"]`. `client.result(run_id)` returns `None` while active, or
+settled canonical evidence. `run_evidence(run_id)` supplies the validated raw
+snapshot and its canonical projection together when leased admission needs both.
 
-Replay is a synchronous operation with a separate explicit allowance:
+The caller supplies the existing durable artifact repository. Source uploads
+resolve local bytes; certificates, admitted inputs, source and advertised
+evidence are downloaded, re-hashed and persisted before a certificate is returned.
+`CommitGate(view, journal, artifacts=artifact_store)` rechecks stored references
+at commit time. The same store must be provided to the adapter and gate.
 
-```python
-receipt = client.formal_replay(
-    result["certificate"], result["environment_hash"],
-    max_steps=100, wall_clock_ms=30_000,
-)
-```
+## Request compilation
 
-Retain the full receipt. It binds run, certificate, input, source, actual
-environment and backend. Transport failure is not logical rejection and does
-not prove remote work stopped. The client does not automatically repeat replay
-or retry POSTs: current provider has no operation/replay idempotency key.
-Reconcile run status and recorded replay summaries before authorizing more work.
-Use a transport timeout longer than the replay wall-clock allowance.
+Use `FormalRuntimeConfig(protocol_version=2)` for provider-default selection, or
+the explicit `FormalV2Selection` configuration introduced by PR84. Both paths
+delegate to the same v2 request builder; conflicting selections are rejected.
+Backend/profile/deployment selection is optional and bound once at admission.
 
-`formal_search_cancel` is asynchronous; poll until terminal. `formal_search_retry`
-restarts bound initial input with remaining admitted steps. Frontier resume is
-unsupported. Durable snapshots and receipts belong in the existing coordinator
-journal, not a new client store.
+Source mode requires actual raw UTF-8 Lean bytes, the original `lean_name`, and
+`starting_state: binders-introduced`. A declaration-record hash is not a source
+artifact. Goal input requires its ordered hypotheses and universe declarations;
+source failure is never silently converted into goal input.
 
-## Commit-gate admission
+The wire request is included in the context packet digest. The old local policy
+step cap is folded into the single `budget.max_steps` field. Environment graph
+nodes may supply `provider_environment_id` separately from their proof-scoped ID.
 
-`mathproof.formal_v2_admission` implements the existing journal/gate path:
+## Evidence, independent replay and promotion
 
 ```python
 from mathproof.formal_v2_admission import admit_search, admit_replay, admit_promotion
 
-searched = admit_search(client, run_id, search_lease, gate, artifacts)
-# The coordinator releases the search lease and issues a separate replayer lease.
-checked = admit_replay(independent_client, replay_lease, gate, artifacts,
-    certificate_id=certificate_id, max_steps=100, wall_clock_ms=30_000)
-# A later coordinator lease may request promotion after reviewed alignment.
+searched = admit_search(client, run_id, search_lease, gate, artifact_store)
+# The coordinator releases the search lease and issues an independent replayer lease.
+checked = admit_replay(independent_client, replay_lease, gate, artifact_store,
+    certificate_id=certificate_id, max_steps=128, wall_clock_ms=60_000)
+# A later coordinator lease may promote only independently replayed, aligned evidence.
 promoted = admit_promotion(coordinator_lease, gate,
     claim_id=claim_id, certificate_id=certificate_id)
 ```
 
-These return the gate's normal `CommitResult`; callers must inspect `accepted`
-and handle stale/rejected proposals through their scheduler. They reuse
-`LeaseSnapshotProvider` and the existing artifact store's `put/get` interface.
-No second journal or alternate promotion authority is introduced.
+The committed run must bind its producing actor and pinned environment before
+dispatch, uniquely search the selected declaration, and retain original source
+association. Source/input/request digests and replay bindings are immutable on
+their evidence records. Reviewed alignment, live revision/fencing and independent
+actors remain commit-gate requirements; search/replay alone do not promote a claim.
 
-Before dispatch, the committed `FormalRun` must carry its producing worker's
-`actor` and pinned `environment_hash`, and uniquely `SEARCHES` the selected
-declaration. The declaration must bind the original `lean_name` and raw
-`lean_source_artifact`, with one `PINNED_ENVIRONMENT`. These identities cannot
-be filled by overwriting immutable fields after search.
+`formal_replay(certificate, environment_hash)` retains the canonical verdict shape
+and stores its full attestation by hash. `replay_attestation(..., max_steps=...,
+wall_clock_ms=...)` exposes the same checked full receipt to a separately leased
+replayer. Explicit native `verification_cost.sorry_detected: false` is required
+for successful v2 replay admission. Inconclusive verification is neither proof
+rejection nor promotion.
 
-An Environment graph node may carry `provider_environment_id` (for example,
-`mathlib-4.10-rc1`) separately from its proof-scoped node ID (`p1/env-1`). The v2
-request compiler uses that provider ID on the wire while retaining the graph ID
-for evidence associations.
+Provider IDs include run and physical attempt. The adapter maps them once to
+collision-safe persistent graph IDs. Their occurrence hashes are not native
+state serializations and do not authorize transpositions.
 
-Search ingestion validates full obligations, stores evidence/bindings through
-the coordinator artifact store, allocates collision-safe run/attempt graph IDs,
-and creates a replay-pending certificate. The replayer restores that binding and
-calls fresh verification itself under its own lease. Explicit no-sorry evidence
-comes from `receipt.verification_cost.sorry_detected`; a verified HTTP status
-without that evidence cannot be admitted as successful replay. Inconclusive
-verification is neither promotion nor logical rejection.
+## Restart and bounded retry
 
-V2 gate checks bind certificate/replay request, input and source digests to the
-producing run and current declaration. Claim promotion still requires reviewed
-alignment, independent producer/replayer/coordinator identities, current revision
-and lease fencing. Search and replay alone do not promote the claim.
+The adapter stores a canonical binding artifact with every candidate certificate.
+A new client can replay that certificate using the existing artifact repository;
+`restore_run(original_request)` also reattaches observation after restart. No
+additional journal is created.
 
-Goal-mode gate ingestion additionally requires a formalizer-bound generated
-source artifact and matching complete `goal_input` on the declaration. It cannot
-substitute a text goal for a previously committed source declaration.
+`formal_search_retry` explicitly restarts bound initial input with remaining
+allowance. The legacy `formal_search_resume` call retains bounded retry semantics
+and always advertises `frontier_resume: false`; it does not resume a saved frontier.
+Retry/replay POSTs are not automatically reissued after a lost transport response.
+The provider accounts for physical attempts and cumulative time across retries.
+Use a fresh formal-service state directory when moving from the older store
+contract, preserving its previous records for inspection.
 
-Search occurrence hashes are marked `run-occurrence` and not transposition
-eligible; they are not native exact-state serializations. Existing graph state
-IDs are never merged on pretty-printed goal text or semantic signatures.
+## Updating the package
 
-The provider-router contract test uses a scripted backend. Separate native
-acceptance tests use both published trained backends, real Lean, independent
-replay and real journal/gate leases. The MCTS case uses actual Uvicorn HTTP;
-the frozen case also tests installed-wheel execution. CPU/GPU shared-provider
-acceptance is recorded in the provider's `formal_release_integration.md`.
+After regenerating the provider contract, run:
+
+```bash
+python scripts/sync-formal-v2-contract.py --provider /path/to/provider
+```
+
+The script verifies the provider manifest, copies runtime schemas and recorded
+fixtures, and prints the new manifest digest to pin in `mathproof.formal_v2`.
+Run contract/adapter/gate tests and both trained native acceptance cases before
+deploying the pair. The native gate test uses real models, Lean, journal leases
+and the commit gate, with a self-contained implementation of the artifact-store
+interface; database/MORK integration remains separately testable.

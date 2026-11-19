@@ -1,596 +1,577 @@
-"""HTTP adapter for Mathematics-ai-atp's persistent API.
+"""Mathematics-ai-atp protocol v2 with pinned contract validation.
 
-The remote service owns asynchronous execution and durable run snapshots.  This
-module owns the translation between that provider-specific API and
-``FormalATPAdapter``'s canonical request/result contract.
-
-The provider exposes ``retry`` rather than checkpoint ``resume``. A retry
-restarts only an interrupted, failed, or cancelled run with its original
-request. This adapter therefore refuses budget changes and never describes a
-retry as continuation from a saved search frontier.
+The caller owns the durable artifact repository. Provider evidence is fetched,
+re-hashed and stored before any candidate certificate leaves this adapter.
+Retry repeats the bound initial input with the remaining allowance; it does
+not resume an MCTS frontier. No provider Python dependency is required.
 """
-
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import math
-from types import SimpleNamespace
+import re
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-from commit_gate.vocab import NON_KERNEL_TACTICS, RunDisposition
-from mathproof.formal_atp import (
-    FormalATPAdapter,
-    _digest,
-    build_result,
-    missing_request_fields,
-)
-from mathproof.maths_ai_atp import _convert_graph
-from mathproof.schemas import validate as validate_schema
+from commit_gate.canon import canonical_json, content_hash
+from mathproof.formal_atp import FormalATPAdapter
+from mathproof.formal_v2 import ArtifactRepository, CONTRACT_DIR, _json, address, validate, without_nulls
+from mathproof.schemas import validate as validate_canonical
 from mathproof.soundness import validate_formal_search_result
 
 __all__ = ["MathsAIAPIError", "MathsAIHTTPFormalATP", "maths_ai_http_atp"]
 
 
 class MathsAIAPIError(RuntimeError):
-    """A transport failure or invalid Mathematics-ai-atp response."""
+    """Transport, contract, binding or artifact failure; never proof rejection."""
 
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(self, message: str, *, status_code: int | None = None, code=None):
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
 
 
-def _finite_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _empty_result(
-    disposition: str,
-    request: Mapping[str, Any],
-    *,
-    note: str | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "run_id": request.get("run_id", "unscoped/fr-0"),
-        "proof_id": request.get("proof_id", "unscoped"),
-        "environment_hash": request.get("environment_hash") or _digest("env-missing"),
-        "disposition": disposition,
-        "states": [],
-        "tactic_edges": [],
-        "artifacts": [],
-    }
-    if request.get("formal_declaration_id"):
-        result["declaration_id"] = request["formal_declaration_id"]
-    if note:
-        result["artifacts"] = [
-            {
-                "sha256": _digest("maths-ai-provider", disposition, note),
-                "role": "provider-diagnostic",
-                "note": note,
-            }
-        ]
-    return result
-
-
-def _remote_graph(summary: Mapping[str, Any], request: Mapping[str, Any]) -> Any:
-    """Validate a provider hypergraph summary and expose the local graph API."""
-    raw_nodes = summary.get("nodes")
-    raw_edges = summary.get("edges")
-    if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
-        raise MathsAIAPIError("formal-search result lacks a hypergraph summary")
-
-    nodes: dict[int, Any] = {}
-    for raw in raw_nodes:
-        if not isinstance(raw, Mapping):
-            raise MathsAIAPIError("formal-search summary contains a non-object node")
-        node_id = raw.get("id")
-        expression = raw.get("expression")
-        status = raw.get("status")
-        prior = raw.get("gnn_probability")
-        if type(node_id) is not int or node_id < 0 or node_id in nodes:
-            raise MathsAIAPIError("formal-search summary has an invalid node identity")
-        if not isinstance(expression, str) or not expression.strip():
-            raise MathsAIAPIError("formal-search summary has an empty node expression")
-        if status not in {"open", "expanded", "solved", "dead"}:
-            raise MathsAIAPIError("formal-search summary has an invalid node status")
-        if not _finite_number(prior):
-            raise MathsAIAPIError("formal-search summary has an invalid GNN prior")
-        raw_stv = raw.get("stv")
-        stv = None
-        if raw_stv is not None:
-            if (
-                not isinstance(raw_stv, Mapping)
-                or not _finite_number(raw_stv.get("strength"))
-                or not _finite_number(raw_stv.get("confidence"))
-            ):
-                raise MathsAIAPIError("formal-search summary has an invalid PLN score")
-            stv = SimpleNamespace(
-                strength=float(raw_stv["strength"]),
-                confidence=float(raw_stv["confidence"]),
-            )
-        nodes[node_id] = SimpleNamespace(
-            id=node_id,
-            goal=SimpleNamespace(expression=expression, hypotheses=[]),
-            status=status,
-            gnn_probability=float(prior),
-            stv=stv,
-            note=raw.get("note") if isinstance(raw.get("note"), str) else None,
-        )
-
-    root_id = summary.get("root_id")
-    if type(root_id) is not int or root_id not in nodes:
-        raise MathsAIAPIError("formal-search summary has no valid root")
-    if nodes[root_id].goal.expression != request["goal_text"]:
-        raise MathsAIAPIError("formal-search root does not match the requested goal")
-    nodes[root_id].goal.hypotheses = list(request.get("hypotheses") or [])
-
-    edges: dict[int, Any] = {}
-    for raw in raw_edges:
-        if not isinstance(raw, Mapping):
-            raise MathsAIAPIError("formal-search summary contains a non-object edge")
-        edge_id = raw.get("id")
-        source_id = raw.get("source_id")
-        child_ids = raw.get("child_ids")
-        tactic = raw.get("tactic")
-        arguments = raw.get("arguments")
-        probability = raw.get("probability")
-        status = raw.get("status")
-        if type(edge_id) is not int or edge_id < 0 or edge_id in edges:
-            raise MathsAIAPIError("formal-search summary has an invalid edge identity")
-        if type(source_id) is not int or source_id not in nodes:
-            raise MathsAIAPIError("formal-search edge has an unknown source")
-        if (
-            not isinstance(child_ids, list)
-            or any(type(child) is not int or child not in nodes for child in child_ids)
-            or len(set(child_ids)) != len(child_ids)
-        ):
-            raise MathsAIAPIError("formal-search edge has invalid children")
-        if not isinstance(tactic, str) or not tactic.strip():
-            raise MathsAIAPIError("formal-search edge has an empty tactic")
-        if not isinstance(arguments, list) or not all(isinstance(arg, str) for arg in arguments):
-            raise MathsAIAPIError("formal-search edge has invalid tactic arguments")
-        if not _finite_number(probability) or status not in {"pending", "solved", "dead"}:
-            raise MathsAIAPIError("formal-search edge has invalid probability or status")
-
-        # A dead edge with children represents an accepted transition whose
-        # descendants failed.  A zero-child dead edge represents rejection.
-        conversion_status = "pending" if status == "dead" and child_ids else status
-        edges[edge_id] = SimpleNamespace(
-            id=edge_id,
-            source_id=source_id,
-            child_ids=list(child_ids),
-            status=conversion_status,
-            tactic=SimpleNamespace(
-                tactic_name=tactic,
-                arguments=list(arguments),
-                probability=float(probability),
-            ),
-        )
-
-    solved = summary.get("solved")
-    exhausted = summary.get("exhausted")
-    if type(solved) is not bool or type(exhausted) is not bool or (solved and exhausted):
-        raise MathsAIAPIError("formal-search summary has contradictory termination flags")
-    if solved != (nodes[root_id].status == "solved"):
-        raise MathsAIAPIError("formal-search solved flag contradicts the root status")
-    if exhausted != (nodes[root_id].status == "dead"):
-        raise MathsAIAPIError("formal-search exhausted flag contradicts the root status")
-
-    return SimpleNamespace(
-        nodes=nodes,
-        edges=edges,
-        root_id=root_id,
-        root=nodes[root_id],
-        is_solved=lambda: solved,
-        is_exhausted=lambda: exhausted,
-        frontier=lambda: [node for node in nodes.values() if node.status == "open"],
-    )
-
-
-def _trace_matches_graph(graph: Any, node_id: int, trace: Any, visiting: frozenset[int]) -> bool:
-    """Return whether a provider trace is witnessed by solved kernel edges."""
-    if node_id in visiting or node_id not in graph.nodes or not isinstance(trace, Mapping):
-        return False
-    if trace.get("goal") != graph.nodes[node_id].goal.expression:
-        return False
-    tactic = trace.get("tactic")
-    arguments = trace.get("arguments", [])
-    children = trace.get("subgoals", [])
-    if (
-        not isinstance(tactic, str)
-        or tactic in NON_KERNEL_TACTICS
-        or not isinstance(arguments, list)
-        or not all(isinstance(arg, str) for arg in arguments)
-        or not isinstance(children, list)
-    ):
-        return False
-    path = visiting | {node_id}
-    for edge in graph.edges.values():
-        if (
-            edge.source_id == node_id
-            and edge.status == "solved"
-            and edge.tactic.tactic_name == tactic
-            and edge.tactic.arguments == arguments
-            and len(edge.child_ids) == len(children)
-            and all(
-                _trace_matches_graph(graph, child_id, child_trace, path)
-                for child_id, child_trace in zip(edge.child_ids, children)
-            )
-        ):
-            return True
-    return False
+def _check(schema, body):
+    errors = validate(schema, body)
+    if errors:
+        raise MathsAIAPIError(f"invalid {schema}.v2: " + "; ".join(errors))
+    if schema != "formal-capabilities" and body.get("protocol_version") != 2:
+        raise MathsAIAPIError("provider did not return protocol_version 2")
+    return body
 
 
 class MathsAIHTTPFormalATP(FormalATPAdapter):
-    """Translate persistent-atp calls to Mathematics-ai-atp's HTTP API."""
+    """A v2 service client with verified local copies of provider artifacts."""
 
-    _ACTIVE = frozenset({"queued", "running", "cancelling"})
-    _RETRYABLE = frozenset({"interrupted", "failed", "cancelled"})
-    _TERMINAL = frozenset({"found", "verified", "unsolved", "exhausted"})
+    _ACTIVE = {"admitting", "queued", "running", "cancelling"}
 
-    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str, *, artifacts: ArtifactRepository,
+                 token: str | None = None, timeout: float = 30.0,
+                 replay_budget: Mapping[str, int] | None = None):
         parsed = urlsplit(base_url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.query
-            or parsed.fragment
-        ):
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc
+                or parsed.query or parsed.fragment):
             raise ValueError("base_url must be an HTTP(S) URL without query or fragment")
-        if timeout <= 0:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be positive")
         self.base_url = base_url.rstrip("/")
-        self.token = token
-        self.timeout = timeout
-        self._requests: dict[str, dict[str, Any]] = {}
-        self._envelopes: dict[str, dict[str, Any]] = {}
-        self._latest: dict[str, dict[str, Any]] = {}
-        self._proof_traces: dict[str, dict[str, Any]] = {}
-        self._replays: dict[tuple[str, str, str], dict[str, Any]] = {}
-        self._admitted: set[str] = set()
+        self.token, self.timeout, self.artifacts = token, timeout, artifacts
+        self.replay_budget = dict(replay_budget or {"max_steps": 100, "wall_clock_ms": 30000})
+        self._requests: dict[str, dict] = {}
+        self._snapshots: dict[str, dict] = {}
+        self._latest: dict[str, dict] = {}
+        self._replays: dict[tuple[str, str], dict] = {}
 
-    def _call(
-        self,
-        method: str,
-        path: str,
-        payload: Mapping[str, Any] | None = None,
-        *,
-        expected_statuses: frozenset[int] = frozenset({200}),
-    ) -> dict[str, Any]:
-        data = None if payload is None else json.dumps(payload).encode("utf-8")
-        headers = {"Accept": "application/json"}
+    def _transport(self, method, path, data=None, *, binary=False,
+                   expected_statuses=frozenset({200})):
+        headers = {"Accept": "application/octet-stream" if binary else "application/json"}
         if data is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = "application/octet-stream" if isinstance(data, bytes) else "application/json"
+            if not isinstance(data, bytes):
+                data = canonical_json(data)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                status = getattr(response, "status", 200)
-                body = json.load(response)
+                raw = response.read(32 * 1024 * 1024 + 1)
+                if len(raw) > 32 * 1024 * 1024:
+                    raise MathsAIAPIError("provider response exceeds the 32 MiB transport bound")
+                status = response.status
+                if status not in expected_statuses:
+                    raise MathsAIAPIError(f"unexpected HTTP {status}", status_code=status)
+                if binary:
+                    return raw, response.headers.get("X-Content-Hash")
+                body = _json(raw)
         except HTTPError as exc:
-            detail = str(exc)
+            detail, code = str(exc), None
             try:
-                error_body = json.loads(exc.read().decode("utf-8"))
-                detail = str(error_body.get("detail", error_body))
-            except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+                error = _check("formal-error", json.loads(exc.read()))
+                detail, code = error["detail"], error["category"]
+            except (ValueError, MathsAIAPIError):
                 pass
-            raise MathsAIAPIError(
-                f"Mathematics-ai-atp {method} {path} failed: {detail}",
-                status_code=exc.code,
-            ) from exc
+            raise MathsAIAPIError(f"{method} {path}: {detail}", status_code=exc.code, code=code) from exc
         except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise MathsAIAPIError(
-                f"Mathematics-ai-atp {method} {path} failed: {exc}"
-            ) from exc
-        if status not in expected_statuses:
-            raise MathsAIAPIError(
-                f"Mathematics-ai-atp {method} {path} returned HTTP {status}",
-                status_code=status,
-            )
+            raise MathsAIAPIError(f"{method} {path}: {exc}") from exc
         if not isinstance(body, dict):
-            raise MathsAIAPIError("Mathematics-ai-atp response must be a JSON object")
+            raise MathsAIAPIError("provider response must be a JSON object")
         return body
 
-    @staticmethod
-    def _provider_envelope(request: Mapping[str, Any]) -> dict[str, Any]:
-        budget = request.get("budget") or {}
-        provider_budget: dict[str, Any] = {}
-        if budget.get("wall_clock_ms") is not None:
-            provider_budget["timeout"] = budget["wall_clock_ms"] / 1000
-        return {
-            "run_id": request["run_id"],
-            "problem": {
-                "goal": request["goal_text"],
-                "hypotheses": list(request.get("hypotheses") or []),
-            },
-            "environment": {
-                "project": request["environment_id"],
-                "variables": {
-                    "persistent_atp_environment_hash": request["environment_hash"],
-                    "persistent_atp_lean_source_artifact": request["lean_source_artifact"],
-                },
-            },
-            "budget": provider_budget,
-        }
+    def _call(self, method, path, payload=None, *, expected_statuses=frozenset({200})):
+        return self._transport(method, path, payload, expected_statuses=expected_statuses)
 
-    def _check_snapshot(self, snapshot: Mapping[str, Any], run_id: str) -> str:
-        if snapshot.get("run_id") != run_id:
-            raise MathsAIAPIError("formal-search snapshot returned a mismatched run_id")
-        envelope = self._envelopes[run_id]
-        if snapshot.get("request") != envelope:
-            raise MathsAIAPIError("formal-search snapshot did not echo the bound request")
-        if snapshot.get("environment") != envelope["environment"]:
-            raise MathsAIAPIError("formal-search snapshot changed the pinned environment")
-        if snapshot.get("budget") != envelope["budget"]:
-            raise MathsAIAPIError("formal-search snapshot changed the requested budget")
-        status = snapshot.get("status")
-        if status not in self._ACTIVE | self._RETRYABLE | self._TERMINAL:
-            raise MathsAIAPIError(f"formal-search snapshot has unknown status {status!r}")
-        return str(status)
+    def formal_capabilities(self):
+        body = _check("formal-capabilities", self._call("GET", "/formal-capabilities"))
+        manifest = _json((CONTRACT_DIR / "manifest.json").read_bytes())
+        expected = {path.rsplit("/", 1)[-1]: digest for path, digest in manifest["schema_canonical_sha256"].items()}
+        if body.get("schema_hashes") != expected:
+            raise MathsAIAPIError("provider does not support the pinned v2 schemas")
+        return body
 
-    @staticmethod
-    def _validate_result(result: Mapping[str, Any], request: Mapping[str, Any]) -> None:
-        schema_errors = validate_schema("formal-search-result", result)
-        soundness = (
-            validate_formal_search_result(
-                result,
-                pinned_environment_hash=request["environment_hash"],
-            )
-            if not schema_errors
-            else ()
-        )
-        identity_errors = [
-            key
-            for key, expected in (
-                ("run_id", request["run_id"]),
-                ("proof_id", request["proof_id"]),
-                ("declaration_id", request["formal_declaration_id"]),
-                ("environment_hash", request["environment_hash"]),
-            )
-            if result.get(key) != expected
-        ]
-        if schema_errors or soundness or identity_errors:
-            diagnostic = {
-                "schema": schema_errors,
-                "soundness": [finding.to_dict() for finding in soundness],
-                "identity": identity_errors,
-            }
-            raise MathsAIAPIError(
-                "translated formal-search result failed validation: "
-                + json.dumps(diagnostic, sort_keys=True)
-            )
-
-    def _translate(self, snapshot: Mapping[str, Any], run_id: str) -> dict[str, Any]:
-        request = self._requests[run_id]
+    def _local_bytes(self, digest):
         try:
-            status = self._check_snapshot(snapshot, run_id)
-            if status in self._ACTIVE:
-                result = _empty_result(RunDisposition.SEARCHING.value, request)
-            elif status == "cancelled":
-                result = _empty_result(RunDisposition.CANCELLED.value, request)
-            elif status == "interrupted":
-                result = build_result(RunDisposition.ENVIRONMENT_ERROR.value, request)
-                result["artifacts"][0]["note"] = "remote run was interrupted"
-            elif status == "failed":
-                result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
-                result["artifacts"][0]["note"] = str(snapshot.get("error") or "remote run failed")
-            else:
-                provider_result = snapshot.get("result")
-                if not isinstance(provider_result, Mapping):
-                    raise MathsAIAPIError(f"terminal run {status!r} has no result")
-                summary = provider_result.get("summary")
-                if not isinstance(summary, Mapping):
-                    raise MathsAIAPIError("terminal run has no hypergraph summary")
-                if (
-                    provider_result.get("solved") != summary.get("solved")
-                    or provider_result.get("exhausted") != summary.get("exhausted")
-                ):
-                    raise MathsAIAPIError("formal-search result contradicts its summary")
-                graph = _remote_graph(summary, request)
-                proof_trace = provider_result.get("proof_trace")
-                if status in {"found", "verified"}:
-                    if not graph.is_solved() or not _trace_matches_graph(
-                        graph, graph.root_id, proof_trace, frozenset()
-                    ):
-                        raise MathsAIAPIError("found proof trace is not witnessed by the hypergraph")
-                    self._proof_traces[run_id] = dict(proof_trace)
-                elif graph.is_solved():
-                    raise MathsAIAPIError(f"run status {status!r} hides a solved graph")
-                if status == "exhausted" and not graph.is_exhausted():
-                    raise MathsAIAPIError("exhausted run has a non-exhausted graph")
-                if status == "unsolved" and graph.is_exhausted():
-                    raise MathsAIAPIError("unsolved run has an exhausted graph")
+            raw = self.artifacts.get(digest)
+        except Exception as exc:
+            raise MathsAIAPIError(f"cannot read local artifact {digest}: {exc}") from exc
+        if address(raw) != digest:
+            raise MathsAIAPIError(f"local artifact hash mismatch: {digest}")
+        return raw
 
-                result = _convert_graph(graph, request, 0)
-                if graph.is_solved():
-                    certificate_hash = _digest("certificate", run_id, proof_trace)
-                    result["certificate"]["artifact_hash"] = certificate_hash
-                    result["artifacts"] = [
-                        {"sha256": certificate_hash, "role": "certificate"}
-                    ]
-                    replay = self._replays.get((run_id, certificate_hash, request["environment_hash"]))
-                    if replay is not None:
-                        result["certificate"]["status"] = (
-                            "replay-accepted"
-                            if replay["status"] == "verified"
-                            else "replay-rejected"
-                        )
-                        result["certificate"]["replay_result"] = dict(replay)
-
-            self._validate_result(result, request)
-        except MathsAIAPIError as exc:
-            result = build_result(RunDisposition.INTERNAL_ERROR.value, request)
-            result["artifacts"][0]["note"] = str(exc)
-        self._latest[run_id] = result
-        return result
-
-    @staticmethod
-    def _invalid_request(request: Mapping[str, Any], note: str) -> dict[str, Any]:
-        result = build_result(RunDisposition.INVALID_REQUEST.value, request)
-        result["artifacts"][0]["note"] = note
-        return result
-
-    def formal_search_start(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        missing = missing_request_fields(request)
-        schema_errors = validate_schema("formal-search-request", request) if not missing else []
-        if missing or schema_errors:
-            return self._invalid_request(
-                request,
-                f"missing fields: {missing}; schema errors: {schema_errors}",
-            )
-        run_id = str(request["run_id"])
-        if run_id in self._requests:
-            if self._requests[run_id] != dict(request):
-                return self._invalid_request(request, f"run {run_id!r} has a different request")
-            if run_id in self._admitted:
-                return self._invalid_request(request, f"run {run_id!r} already started")
-            # The previous POST may have reached the server before its reply
-            # was lost. Never send another POST while admission is uncertain.
-            return self._reconcile_start(run_id)
-        self._requests[run_id] = dict(request)
-        self._envelopes[run_id] = self._provider_envelope(request)
+    def _put(self, raw):
         try:
-            snapshot = self._call(
-                "POST", "/formal-search/start", self._envelopes[run_id],
-                expected_statuses=frozenset({202}),
-            )
-        except MathsAIAPIError as exc:
-            # A 409 may mean a previous attempt was admitted. A transport
-            # failure is ambiguous as well; reconcile both by identity.
-            try:
-                return self._reconcile_start(run_id)
-            except MathsAIAPIError as lookup_error:
-                if lookup_error.status_code == 404:
-                    self._requests.pop(run_id, None)
-                    self._envelopes.pop(run_id, None)
-                    raise exc
-                raise
-        self._check_snapshot(snapshot, run_id)
-        self._admitted.add(run_id)
-        return self._translate(snapshot, run_id)
-
-    def _reconcile_start(self, run_id: str) -> Mapping[str, Any]:
-        snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
-        self._check_snapshot(snapshot, run_id)
-        self._admitted.add(run_id)
-        return self._translate(snapshot, run_id)
-
-    def formal_search_status(self, run_id: str) -> Mapping[str, Any]:
-        if run_id not in self._requests:
-            return self._invalid_request({"run_id": run_id}, f"unknown run {run_id!r}")
-        path = "/formal-search/" + quote(run_id, safe="/")
-        return self._translate(self._call("GET", path), run_id)
-
-    def formal_search_resume(
-        self, run_id: str, budget: Mapping[str, Any] | None = None
-    ) -> Mapping[str, Any]:
-        request = self._requests.get(run_id)
-        if request is None:
-            return self._invalid_request({"run_id": run_id}, f"unknown run {run_id!r}")
-        original_budget = request.get("budget") or {}
-        if budget is not None and dict(budget) != original_budget:
-            return self._invalid_request(
-                request,
-                "Mathematics-ai-atp retry restarts the original request and cannot change budget",
-            )
-        path = "/formal-search/" + quote(run_id, safe="/")
-        snapshot = self._call("GET", path)
-        try:
-            status = self._check_snapshot(snapshot, run_id)
+            digest = self.artifacts.put(raw)
+            if digest != address(raw) or self._local_bytes(digest) != raw:
+                raise MathsAIAPIError("artifact repository did not persist the expected bytes")
+            return digest
         except MathsAIAPIError:
-            return self._translate(snapshot, run_id)
-        if status in self._RETRYABLE:
-            snapshot = self._call(
-                "POST",
-                path + "/retry",
-                {},
-                expected_statuses=frozenset({202}),
-            )
-        return self._translate(snapshot, run_id)
+            raise
+        except Exception as exc:
+            raise MathsAIAPIError(f"cannot persist provider artifact: {exc}") from exc
 
-    def formal_search_cancel(self, run_id: str) -> Mapping[str, Any]:
-        if run_id not in self._requests:
-            return self._invalid_request({"run_id": run_id}, f"unknown run {run_id!r}")
-        path = "/formal-search/" + quote(run_id, safe="/") + "/cancel"
-        return self._translate(self._call("POST", path, {}), run_id)
+    def _fetch_artifact(self, digest):
+        raw, header = self._transport("GET", "/formal-artifacts/" + quote(digest, safe=":"), binary=True)
+        if header != digest or address(raw) != digest:
+            raise MathsAIAPIError(f"provider artifact hash mismatch: {digest}")
+        self._put(raw)
+        return raw
 
-    def formal_replay(
-        self, certificate: Mapping[str, Any], environment_hash: str
-    ) -> Mapping[str, Any]:
-        run_id = certificate.get("producer_run_id")
-        if not isinstance(run_id, str) or run_id not in self._requests:
-            raise MathsAIAPIError("certificate does not identify a known producer run")
-        request = self._requests[run_id]
-        if environment_hash != request["environment_hash"]:
-            raise MathsAIAPIError("replay environment does not match the search environment")
-        latest_certificate = (self._latest.get(run_id) or {}).get("certificate") or {}
-        if certificate.get("artifact_hash") != latest_certificate.get("artifact_hash"):
-            raise MathsAIAPIError("certificate artifact does not match the stored proof trace")
-        proof_trace = self._proof_traces.get(run_id)
-        if proof_trace is None:
-            raise MathsAIAPIError("producer run has no replayable proof trace")
-        payload = {
-            "run_id": run_id,
-            "problem": {
-                "goal": request["goal_text"],
-                "hypotheses": list(request.get("hypotheses") or []),
-            },
-            "proof_trace": proof_trace,
-        }
+    def upload_artifact(self, digest):
+        """Upload existing local source bytes and verify the provider's address."""
+        raw = self._local_bytes(digest)
+        if len(raw) > 8388608:
+            raise ValueError("source artifact exceeds the v2 8 MiB limit")
+        reply = _check("formal-artifact-upload", self._call(
+            "POST", "/formal-artifacts", raw, expected_statuses=frozenset({201})))
+        if reply["artifact_hash"] != digest:
+            raise MathsAIAPIError("uploaded source artifact hash mismatch")
+        return reply
+
+    def put_artifact(self, raw):
+        digest = self._put(raw)
+        self.upload_artifact(digest)
+        return digest
+
+    def get_artifact(self, digest):
+        return self._fetch_artifact(digest)
+
+    def prepare(self, request):
+        """Validate an original request without contacting the provider."""
+        request = deepcopy(dict(request))
+        _check("formal-search-request", request)
+        if any(not request[k].startswith(request["proof_id"] + "/")
+               for k in ("claim_id", "formal_declaration_id", "run_id")):
+            raise MathsAIAPIError("request identities belong to different proofs")
+        return request
+
+    def restore_prepared(self, request):
+        """Register durable request identity before reconciling uncertain delivery."""
+        request = self.prepare(request)
+        previous = self._requests.get(request["run_id"])
+        if previous is not None and without_nulls(previous) != without_nulls(request):
+            raise MathsAIAPIError("run_id already belongs to a different request")
+        self._requests[request["run_id"]] = request
+
+    def _prepare(self, request):
+        request = self.prepare(request)
+        cap = self.formal_capabilities()
+        if 2 not in cap["protocol_versions"] or cap.get("frontier_resume") is not False:
+            raise MathsAIAPIError("unsupported provider lifecycle contract")
+        default = cap.get("default") or {}
+        deployment_id = request.get("deployment_id") or default.get("deployment_id")
+        deployment = cap["deployments"].get(deployment_id)
+        if not deployment or not deployment.get("available"):
+            raise MathsAIAPIError("selected deployment is unavailable")
+        backend = request.get("backend")
+        if backend is None:
+            profile = default.get("profile") if deployment_id == default.get("deployment_id") else None
+            if profile is None and len(deployment["profiles"]) == 1:
+                profile = next(iter(deployment["profiles"]))
+            backend = {"name": deployment["backend"], "profile": profile}
+        for key, expected in (("backend", backend["name"]),
+                              ("environment_id", request["environment_id"]),
+                              ("environment_hash", request["environment_hash"])):
+            if deployment.get(key) != expected:
+                raise MathsAIAPIError(f"deployment {key} mismatch")
+        if request["input"]["kind"] not in deployment["inputs"]:
+            raise MathsAIAPIError("deployment does not support the selected input kind")
+        if backend["profile"] not in deployment["profiles"]:
+            raise MathsAIAPIError("deployment does not support the selected profile")
+        if backend["name"] == "accepted-gnn" and request["input"].get("universe_levels"):
+            raise MathsAIAPIError("accepted-gnn does not support universe-polymorphic goals")
+        return request, deployment
+
+    def _check_snapshot(self, snapshot, request, *, admission=False, deployment=None):
+        _check("formal-admission" if admission else "formal-run", snapshot)
+        if snapshot.get("protocol_version") != 2:
+            raise MathsAIAPIError("provider did not return protocol_version 2")
+        for key, expected in (("run_id", request["run_id"]),
+                              ("request_digest", content_hash(without_nulls(request))),
+                              ("input_kind", request["input"]["kind"])):
+            if snapshot.get(key) != expected:
+                raise MathsAIAPIError(f"run {key} mismatch")
+        resolved = snapshot["resolved"]
+        for assertion in (request.get("model_bundle"), request.get("corpus_manifest")):
+            if assertion and any(value is not None and resolved["model"].get(key) != value for key, value in assertion.items()):
+                raise MathsAIAPIError("provider changed asserted model or corpus")
+        requested_backend = request.get("backend") or {}
+        for key, expected in (("deployment_id", request.get("deployment_id")),
+                              ("backend", requested_backend.get("name")),
+                              ("profile", requested_backend.get("profile")),
+                              ("proposal_mode", requested_backend.get("proposal_mode")),
+                              ("seed", requested_backend.get("seed")),
+                              ("environment_id", request["environment_id"]),
+                              ("environment_hash", request["environment_hash"])):
+            if expected is not None and resolved.get(key) != expected:
+                raise MathsAIAPIError(f"resolved {key} mismatch")
+        if deployment and resolved["profile_config_hash"] != deployment["profile_config_hashes"].get(resolved["profile"]):
+            raise MathsAIAPIError("resolved profile configuration mismatch")
+        previous = self._snapshots.get(request["run_id"])
+        budget = snapshot["budget"]
+        if budget["requested_max_steps"] != request["budget"]["max_steps"]:
+            raise MathsAIAPIError("requested tactic allowance mismatch")
+        admitted, used, remaining = (budget[k] for k in ("admitted_max_steps", "consumed_steps", "remaining_steps"))
+        if not (0 <= used <= admitted <= budget["requested_max_steps"] and remaining == admitted - used):
+            raise MathsAIAPIError("invalid provider tactic accounting")
+        if budget["admitted_wall_clock_ms"] <= 0:
+            raise MathsAIAPIError("invalid provider wall clock allowance")
+        requested_wall = request["budget"].get("wall_clock_ms")
+        if budget["requested_wall_clock_ms"] != requested_wall or (
+            requested_wall is not None and budget["admitted_wall_clock_ms"] > requested_wall
+        ):
+            raise MathsAIAPIError("provider changed the requested wall-clock allowance")
+        if deployment:
+            profile = deployment["profiles"][resolved["profile"]]
+            expected_steps = min(request["budget"]["max_steps"], profile["max_steps"])
+            expected_wall = min(request["budget"].get("wall_clock_ms") or profile["default_wall_clock_ms"], profile["wall_clock_ms"])
+            if admitted != expected_steps or budget["admitted_wall_clock_ms"] != expected_wall:
+                raise MathsAIAPIError("provider did not acknowledge the deployment budget ceilings")
+        if previous:
+            if resolved != previous["resolved"]:
+                raise MathsAIAPIError("run deployment changed after admission")
+            for key in ("admitted_max_steps", "admitted_wall_clock_ms", "verification_max_steps"):
+                if budget[key] != previous["budget"][key]:
+                    raise MathsAIAPIError("run allowance changed after admission")
+            if used < previous["budget"]["consumed_steps"] or snapshot["attempts"] < previous["attempts"]:
+                raise MathsAIAPIError("run accounting moved backwards")
+            if not previous["budget"]["consumed_steps_exact"] and budget["consumed_steps_exact"]:
+                raise MathsAIAPIError("unknown run costs cannot become exact")
+            for key in ("input_artifact_hash", "source_artifact_hash", "source_origin"):
+                if previous.get(key) and previous[key] != snapshot.get(key):
+                    raise MathsAIAPIError(f"run {key} changed after admission")
+        if snapshot.get("source_artifact_hash") and request["input"]["kind"] == "source":
+            if snapshot["source_artifact_hash"] != request["input"]["artifact_hash"]:
+                raise MathsAIAPIError("source input was replaced")
+        if snapshot.get("source_origin") and snapshot["source_origin"] != {
+                "source": "caller-artifact", "goal": "generated-from-text"}[request["input"]["kind"]]:
+            raise MathsAIAPIError("source origin does not match the input kind")
+
+    @staticmethod
+    def _json_artifact(raw):
         try:
-            body = self._call("POST", "/formal-replay", payload)
+            body = _json(raw)
+            if not isinstance(body, dict) or canonical_json(body) != raw:
+                raise ValueError("expected a canonical JSON object")
+            return body
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise MathsAIAPIError(f"invalid canonical JSON artifact: {exc}") from exc
+
+    def _evidence(self, result, request, *, local_only=False):
+        fetch = self._local_bytes if local_only else self._fetch_artifact
+        fetched = {a["sha256"]: fetch(a["sha256"]) for a in result["artifacts"]}
+        def load(digest):
+            if not digest:
+                raise MathsAIAPIError("proof is missing its evidence address")
+            if digest not in fetched:
+                fetched[digest] = fetch(digest)
+            return fetched[digest]
+        if result.get("input_artifact_hash"):
+            manifest = self._json_artifact(load(result["input_artifact_hash"]))
+            for key, expected in (("format", "maths-ai-formal-input-v1"),
+                                  ("input", request["input"]), ("kind", request["input"]["kind"]),
+                                  ("environment_id", request["environment_id"]),
+                                  ("environment_hash", request["environment_hash"]),
+                                  ("source_artifact_hash", result["source_artifact_hash"]),
+                                  ("source_origin", result["source_origin"])):
+                if manifest.get(key) != expected:
+                    raise MathsAIAPIError(f"admitted-input artifact {key} mismatch")
+            load(result["source_artifact_hash"])
+        if result.get("certificate"):
+            cert = self._json_artifact(load(result["certificate"]["artifact_hash"]))
+            expected_format = "maths-ai-mcts-certificate-v1" if result["backend"]["name"] == "mcts-actor-critic" else "maths-ai-accepted-certificate-v1"
+            for key, expected in (("format", expected_format), ("run_id", request["run_id"]),
+                                  ("attempt", result["attempts"]), ("backend", result["backend"]["name"]),
+                                  ("input_artifact_hash", result["input_artifact_hash"]),
+                                  ("source_artifact_hash", result["source_artifact_hash"]),
+                                  ("environment_hash", request["environment_hash"])):
+                if cert.get(key) != expected:
+                    raise MathsAIAPIError(f"certificate artifact {key} mismatch")
+
+    @staticmethod
+    def _scope_graph(result, request, attempt):
+        # Provider ids include their run and attempt. Validate that binding
+        # before mapping them into persistent-ATP's flat fs/ta id grammar.
+        scope = f"{request['run_id']}/attempt-{attempt}"
+        def ids(records, field, prefix):
+            original = [r[field] for r in records]
+            if len(set(original)) != len(original):
+                raise MathsAIAPIError(f"duplicate provider {field}")
+            if any(not i.startswith(request["proof_id"] + "/") for i in original):
+                raise MathsAIAPIError("provider graph crosses proof scopes")
+            pattern = re.escape(scope) + rf"/{prefix}-[1-9][0-9]*"
+            if any(re.fullmatch(pattern, i) is None for i in original):
+                raise MathsAIAPIError("provider graph ids do not match the run and attempt")
+            return {i: f"{request['proof_id']}/{prefix}-{int(content_hash([request['run_id'], attempt, i])[7:], 16) or 1}"
+                    for i in original}
+        states = ids(result["states"], "state_id", "fs")
+        tactics = ids(result["tactic_edges"], "tactic_id", "ta")
+        try:
+            result["root_state_id"] = states[result["root_state_id"]]
+            for state in result["states"]:
+                state["state_id"] = states[state["state_id"]]
+            for edge in result["tactic_edges"]:
+                edge["tactic_id"] = tactics[edge["tactic_id"]]
+                edge["source_state_id"] = states[edge["source_state_id"]]
+                edge["produced_goal_ids"] = [states[i] for i in edge["produced_goal_ids"]]
+            for obstruction in result["obstructions"]:
+                if "formal_state_ids" in obstruction:
+                    obstruction["formal_state_ids"] = [states[i] for i in obstruction["formal_state_ids"]]
+        except KeyError as exc:
+            raise MathsAIAPIError(f"provider graph references an absent state: {exc}") from exc
+
+    def _translate(self, snapshot, request, *, admission=False, deployment=None, local_only=False):
+        self._check_snapshot(snapshot, request, admission=admission, deployment=deployment)
+        provider_result = snapshot.get("result")
+        result = {"run_id": request["run_id"], "proof_id": request["proof_id"],
+                  "declaration_id": request["formal_declaration_id"],
+                  "environment_hash": request["environment_hash"], "disposition": "searching",
+                  "states": [], "tactic_edges": [], "artifacts": []}
+        if not admission and snapshot["status"] not in self._ACTIVE:
+            if provider_result is None:
+                raise MathsAIAPIError("terminal run is missing its result")
+            _check("formal-result", provider_result)
+            bindings = {"run_id": request["run_id"], "proof_id": request["proof_id"],
+                        "declaration_id": request["formal_declaration_id"],
+                        "environment_hash": request["environment_hash"],
+                        "request_digest": snapshot["request_digest"], "attempts": snapshot["attempts"],
+                        "input_kind": snapshot["input_kind"],
+                        "input_artifact_hash": snapshot["input_artifact_hash"],
+                        "source_artifact_hash": snapshot["source_artifact_hash"],
+                        "source_origin": snapshot["source_origin"], "disposition": snapshot["disposition"],
+                        "coordinator_binding": {k: request[k] for k in ("claim_id", "base_revision", "lease_id", "fencing_token")}}
+            if any(provider_result.get(k) != v for k, v in bindings.items()):
+                raise MathsAIAPIError("result does not match its run and coordinator binding")
+            backend = provider_result["backend"]
+            if backend != {"name": snapshot["resolved"]["backend"], **{k: snapshot["resolved"][k] for k in ("deployment_id", "profile", "profile_config_hash")}}:
+                raise MathsAIAPIError("result backend mismatch")
+            if provider_result["termination"]["reason"] != snapshot["termination"]:
+                raise MathsAIAPIError("result termination mismatch")
+            for k in ("disposition", "root_state_id", "states", "tactic_edges", "obstructions", "artifacts"):
+                result[k] = deepcopy(provider_result[k])
+            if provider_result.get("certificate"):
+                result["certificate"] = deepcopy(provider_result["certificate"])
+                if (result["certificate"]["status"] != "replay-pending"
+                        or result["certificate"]["producer_run_id"] != request["run_id"]):
+                    raise MathsAIAPIError("search cannot supply an accepted replay verdict")
+            cost = provider_result["budget_used"]
+            if cost["tactic_steps"] != snapshot["budget"]["consumed_steps"]:
+                raise MathsAIAPIError("result cost mismatch")
+            if cost["tactic_steps_exact"] != snapshot["budget"]["consumed_steps_exact"]:
+                raise MathsAIAPIError("result cost exactness mismatch")
+            if provider_result["budget"] != {k: snapshot["budget"][k] for k in (
+                    "admitted_max_steps", "admitted_wall_clock_ms", "remaining_steps")}:
+                raise MathsAIAPIError("result allowance mismatch")
+            result["budget_used"] = {"tactic_steps": cost["tactic_steps"]}
+            if cost.get("attempt", {}).get("wall_clock_ms") is not None:
+                result["budget_used"]["wall_clock_ms"] = cost["attempt"]["wall_clock_ms"]
+            self._scope_graph(result, request, snapshot["attempts"])
+            errors = validate_canonical("formal-search-result", result)
+            findings = validate_formal_search_result(result, pinned_environment_hash=request["environment_hash"])
+            if errors or findings:
+                raise MathsAIAPIError(f"invalid or unsound result: {errors or findings}")
+            self._evidence(provider_result, request, local_only=local_only)
+            cert = result.get("certificate")
+            if cert:
+                replay = self._replays.get((request["run_id"], cert["artifact_hash"]))
+                if replay:
+                    cert["status"] = {"verified": "replay-accepted", "rejected": "replay-rejected", "inconclusive": "replay-pending"}[replay["status"]]
+                    cert["replay_result"] = deepcopy(replay)
+        # Keep admission/accounting available without claiming a saved search frontier.
+        result["provider"] = {k: deepcopy(v) for k, v in snapshot.items() if k not in {"result", "replays"}}
+        result["provider"]["frontier_resume"] = False
+        # Replay history grows after search finishes. Attestations have their
+        # own artifacts; they must not change the immutable candidate binding.
+        binding_snapshot = deepcopy(snapshot)
+        if "replays" in binding_snapshot:
+            binding_snapshot["replays"] = []
+        binding = self._put(canonical_json({"format": "persistent-atp-formal-v2-binding-v1",
+                                           "request": request, "snapshot": binding_snapshot}))
+        if result.get("certificate"):
+            result["certificate"]["binding_artifact_hash"] = binding
+        self._requests[request["run_id"]] = deepcopy(request)
+        self._snapshots[request["run_id"]] = deepcopy(snapshot)
+        self._latest[request["run_id"]] = deepcopy(result)
+        return result
+
+    def formal_search_start(self, request):
+        request, deployment = self._prepare(request)
+        run_id = request["run_id"]
+        if run_id in self._requests and without_nulls(self._requests[run_id]) != without_nulls(request):
+            raise MathsAIAPIError("run_id already belongs to a different request")
+        if request["input"]["kind"] == "source":
+            self.upload_artifact(request["input"]["artifact_hash"])
+        try:
+            admission = self._call("POST", "/formal-search/start", request,
+                                   expected_statuses=frozenset({200, 202}))
         except MathsAIAPIError as exc:
-            # Mathematics-ai-atp maps a Lean tactic rejection (ValueError) to
-            # HTTP 400. The request was already locally validated and bound to
-            # the stored run, so this is an independent negative verdict.
-            if exc.status_code != 400:
+            if exc.status_code is not None:
                 raise
-            verdict = {
-                "status": "rejected",
-                "environment_hash": environment_hash,
-                "rejection_reason": str(exc),
-            }
-        else:
-            if body.get("verified") is True and body.get("status") == "verified":
-                if (body.get("run_id") != run_id
-                    or body.get("certificate_hash") != latest_certificate["artifact_hash"]
-                    or body.get("environment_hash") != environment_hash):
-                    raise MathsAIAPIError(
-                        "replay verification unavailable: provider did not attest "
-                        "the run, certificate, and actual environment"
-                    )
-                verdict = {"status": "verified", "environment_hash": environment_hash}
-            elif body.get("verified") is False and body.get("status") == "rejected":
-                verdict = {
-                    "status": "rejected",
-                    "environment_hash": environment_hash,
-                    "rejection_reason": str(body.get("error") or "Lean rejected the proof"),
-                }
-            else:
-                raise MathsAIAPIError("formal-replay returned an invalid verdict")
-        key = (run_id, latest_certificate["artifact_hash"], environment_hash)
-        self._replays[key] = verdict
-        if run_id in self._latest and "certificate" in self._latest[run_id]:
-            updated = dict(self._latest[run_id])
-            updated_certificate = dict(updated["certificate"])
-            updated_certificate["status"] = (
-                "replay-accepted" if verdict["status"] == "verified" else "replay-rejected"
-            )
-            updated_certificate["replay_result"] = dict(verdict)
-            updated["certificate"] = updated_certificate
-            self._validate_result(updated, request)
-            self._latest[run_id] = updated
+            # A lost start reply is uncertain. Adopt only the run bound to this digest.
+            snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
+            return self._translate(snapshot, request, deployment=deployment)
+        result = self._translate(admission, request, admission=True, deployment=deployment)
+        if admission["status"] not in self._ACTIVE:
+            return self.formal_search_status(run_id)
+        return result
+
+    def restore_run(self, request):
+        """Reattach after client restart using the coordinator's original request."""
+        request = deepcopy(dict(request))
+        _check("formal-search-request", request)
+        snapshot = self._call("GET", "/formal-search/" + quote(request["run_id"], safe="/"))
+        return self._translate(snapshot, request)
+
+    def _known(self, run_id):
+        if run_id not in self._requests:
+            raise MathsAIAPIError("unknown run; use restore_run(original_request) after restart")
+        return self._requests[run_id]
+
+    def formal_search_status(self, run_id):
+        request = self._known(run_id)
+        return self._translate(self._call("GET", "/formal-search/" + quote(run_id, safe="/")), request)
+
+    def formal_search_resume(self, run_id, budget=None):
+        request = self._known(run_id)
+        if budget is not None and dict(budget) != request["budget"]:
+            raise MathsAIAPIError("retry cannot replace or replenish the bound budget")
+        snapshot = self._call("GET", "/formal-search/" + quote(run_id, safe="/"))
+        result = self._translate(snapshot, request)
+        retryable = not (snapshot.get("disposition") in {"invalid-request", "environment-error"}
+                         and snapshot.get("input_artifact_hash") is None)
+        if retryable and snapshot["status"] in {"finished", "interrupted"} and snapshot["budget"]["remaining_steps"] > 0 and not (snapshot.get("result") or {}).get("certificate"):
+            snapshot = self._call("POST", "/formal-search/" + quote(run_id, safe="/") + "/retry",
+                                  {}, expected_statuses=frozenset({202}))
+            return self._translate(snapshot, request)
+        return result
+
+    def formal_search_cancel(self, run_id):
+        request = self._known(run_id)
+        snapshot = self._call("POST", "/formal-search/" + quote(run_id, safe="/") + "/cancel",
+                              {}, expected_statuses=frozenset({202}))
+        return self._translate(snapshot, request)
+
+    def formal_replay(self, certificate, environment_hash, *, max_steps=None, wall_clock_ms=None):
+        # The binding artifact makes replay independent of this client's old memory.
+        if not certificate.get("binding_artifact_hash"):
+            raise MathsAIAPIError("v2 replay requires the certificate's durable binding_artifact_hash")
+        binding = self._json_artifact(self._local_bytes(certificate["binding_artifact_hash"]))
+        if binding.get("format") != "persistent-atp-formal-v2-binding-v1":
+            raise MathsAIAPIError("unsupported local certificate binding")
+        request, snapshot = binding["request"], binding["snapshot"]
+        stored = (snapshot.get("result") or {}).get("certificate") or {}
+        if (certificate.get("artifact_hash") != stored.get("artifact_hash")
+                or certificate.get("producer_run_id") != request["run_id"]
+                or environment_hash != request["environment_hash"]):
+            raise MathsAIAPIError("certificate does not match its durable run binding")
+        self._check_snapshot(snapshot, request)
+        # Check durable local bytes before replay; provider rechecks its own copies.
+        for digest in (stored["artifact_hash"], snapshot["input_artifact_hash"], snapshot["source_artifact_hash"]):
+            self._local_bytes(digest)
+        budget = dict(self.replay_budget)
+        if max_steps is not None:
+            budget["max_steps"] = max_steps
+        if wall_clock_ms is not None:
+            budget["wall_clock_ms"] = wall_clock_ms
+        payload = {"protocol_version": 2, "run_id": request["run_id"],
+                   "certificate_hash": stored["artifact_hash"], "environment_hash": environment_hash,
+                   "input_artifact_hash": snapshot["input_artifact_hash"],
+                   "source_artifact_hash": snapshot["source_artifact_hash"], "budget": budget}
+        _check("formal-replay-request", payload)
+        body = _check("formal-replay-attestation", self._call("POST", "/formal-replay", payload))
+        for key in ("run_id", "certificate_hash", "input_artifact_hash", "source_artifact_hash"):
+            if body[key] != payload[key]:
+                raise MathsAIAPIError(f"replay attestation {key} mismatch")
+        if body["backend"] != snapshot["resolved"]["backend"] or body["source_origin"] != snapshot["source_origin"]:
+            raise MathsAIAPIError("replay backend or source origin mismatch")
+        if body["status"] != "inconclusive" and body["environment_hash"] != environment_hash:
+            raise MathsAIAPIError("replay environment mismatch")
+        attestation_hash = self._put(canonical_json(body))
+        verdict = {"status": body["status"], "environment_hash": body["environment_hash"],
+                   "attestation_artifact_hash": attestation_hash}
+        if body.get("reason"):
+            verdict["rejection_reason"] = body["reason"]
+        self._replays[(request["run_id"], stored["artifact_hash"])] = deepcopy(verdict)
+        result = deepcopy(self._latest.get(request["run_id"]))
+        if result and result.get("certificate", {}).get("artifact_hash") == stored["artifact_hash"]:
+            result["certificate"]["status"] = {"verified": "replay-accepted", "rejected": "replay-rejected", "inconclusive": "replay-pending"}[body["status"]]
+            result["certificate"]["replay_result"] = verdict
+            self._latest[request["run_id"]] = result
         return verdict
 
+    def run_snapshot(self, run_id):
+        """Validated provider view for leased admission; the stable API stays canonical."""
+        return self.run_evidence(run_id)[0]
 
-def maths_ai_http_atp(
-    base_url: str,
-    *,
-    token: str | None = None,
-    timeout: float = 30.0,
-) -> MathsAIHTTPFormalATP:
-    """Build a Mathematics-ai-atp HTTP adapter."""
-    return MathsAIHTTPFormalATP(base_url, token=token, timeout=timeout)
+    def run_evidence(self, run_id):
+        canonical = self.formal_search_status(run_id)
+        return deepcopy(self._snapshots[run_id]), canonical
+
+    def cached_evidence(self, run_id):
+        """Return already validated evidence without network I/O."""
+        return deepcopy(self._snapshots[run_id]), deepcopy(self._latest[run_id])
+
+    def request_for(self, run_id):
+        return deepcopy(self._known(run_id))
+
+    def binding(self, run_id):
+        snapshot = deepcopy(self._snapshots[run_id])
+        if "replays" in snapshot:
+            snapshot["replays"] = []
+        return {"format": "persistent-atp-formal-v2-binding-v1",
+                "request": self.request_for(run_id), "snapshot": snapshot}
+
+    def restore(self, binding, *, refresh=True):
+        if binding.get("format") != "persistent-atp-formal-v2-binding-v1":
+            raise MathsAIAPIError("unsupported durable run binding")
+        request = self.prepare(binding["request"])
+        admission = "result" not in binding["snapshot"]
+        self._check_snapshot(binding["snapshot"], request, admission=admission)
+        self.restore_prepared(request)
+        if not refresh:
+            return self._translate(binding["snapshot"], request, admission=admission, local_only=True)
+        return self.restore_run(binding["request"])
+
+    def result(self, run_id):
+        """Return settled canonical evidence, or None while the provider is active."""
+        result = self.formal_search_status(run_id)
+        return None if self._snapshots[run_id]["status"] in self._ACTIVE else result
+
+    def formal_search_retry(self, run_id):
+        request = self._known(run_id)
+        snapshot = self._call("POST", "/formal-search/" + quote(run_id, safe="/") + "/retry",
+                              {}, expected_statuses=frozenset({202}))
+        return self._translate(snapshot, request)
+
+    def replay_attestation(self, certificate, environment_hash, *, max_steps, wall_clock_ms):
+        """Full stored native receipt for the independently leased replayer."""
+        verdict = self.formal_replay(certificate, environment_hash, max_steps=max_steps, wall_clock_ms=wall_clock_ms)
+        return self._json_artifact(self._local_bytes(verdict["attestation_artifact_hash"]))
+
+
+def maths_ai_http_atp(base_url: str, *, artifacts: ArtifactRepository,
+                      token: str | None = None, timeout: float = 30.0,
+                      replay_budget=None) -> MathsAIHTTPFormalATP:
+    return MathsAIHTTPFormalATP(base_url, artifacts=artifacts, token=token,
+                               timeout=timeout, replay_budget=replay_budget)

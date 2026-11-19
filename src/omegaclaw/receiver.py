@@ -21,7 +21,7 @@ from persistent_atp_client.errors import (
     UnsupportedCapability,
 )
 from persistent_atp_client.models import (
-    ACTION_TYPES, BASE_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
+    action_types_for_contract, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, CapabilitySet, DecisionResponse, Event, FormalResume,
     FormalSearch, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, ProofStatus, ProjectDigest,
@@ -103,7 +103,7 @@ class ReferenceReceiver:
     async def capabilities(self, contract_version: str = "2.0") -> CapabilitySet:
         if contract_version not in {"2.0", "2.1"}:
             raise UnsupportedCapability("unsupported contract version")
-        actions = BASE_ACTION_TYPES if contract_version == "2.0" else ACTION_TYPES
+        actions = action_types_for_contract(contract_version)
         available = self.service.formal is not None and self.service.formal.ready()
         if self.service.profile == "production":
             actions = {kind: value for kind, value in actions.items() if kind in {
@@ -355,7 +355,8 @@ class ReferenceReceiver:
             watermark = self.service.view.snapshot(proof_id)[0] if proof_id else None
         return OperationSnapshot(ref, row["request_id"], row["observation_version"], row["lifecycle"],
             execution_phase=(outcome or {}).get("phase"),
-            mathematical_disposition=(outcome or {}).get("cycle_disposition"),
+            mathematical_disposition=(outcome or {}).get("mathematical_disposition")
+                or (outcome or {}).get("cycle_disposition"),
             proof_id=proof_id, project_revision=head[0], journal_hash=head[1],
             projection_watermark=watermark, result=outcome)
 

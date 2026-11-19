@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Sequence
 
 from shared.vocab import (
@@ -307,6 +307,20 @@ class TranspositionEntry:
 
 
 @dataclass(frozen=True)
+class FormalV2Selection:
+    """Explicit provider deployment and input mode, owned by the coordinator."""
+
+    deployment_id: str
+    backend: str
+    profile: str
+    input_kind: str
+    universe_levels: tuple[str, ...] = ()
+    proposal_mode: str | None = None
+    seed: int | None = None
+    provider_environment_id: str | None = None
+
+
+@dataclass(frozen=True)
 class FormalRequestPayload:
     proof_id: str
     task_id: str
@@ -387,6 +401,8 @@ class FormalRequestPayload:
             if formal_input is None:
                 if self.lean_name is None:
                     raise ContextValidationError("formal v2 source input requires the declaration's lean_name")
+                if self.lean_source_artifact == self.declaration_hash:
+                    raise ContextValidationError("v2 source input requires stored Lean source bytes, not the declaration record hash")
                 formal_input = {"kind": "source", "artifact_hash": self.lean_source_artifact,
                                 "declaration": self.lean_name, "starting_state": "binders-introduced"}
             request["input"] = _json_value(formal_input)
@@ -404,12 +420,46 @@ class FormalRequestPayload:
                 request["deployment_id"] = deployment_id
             # The pinned wire contract rejects unknown fields and incomplete
             # inputs before dispatch, without requiring a provider connection.
-            from mathproof.formal_v2 import FormalV2Error, FormalV2HTTPATP
+            from mathproof.formal_v2 import validate
+            errors = validate("formal-search-request", request)
+            if errors:
+                raise ContextValidationError("invalid v2 request: " + "; ".join(errors))
+        return request
 
-            try:
-                FormalV2HTTPATP("http://localhost").validate("start", request)
-            except FormalV2Error as exc:
-                raise ContextValidationError(str(exc)) from exc
+    def to_v2_schema_dict(self, *, deployment_id: str, backend: str,
+                          profile: str, input_kind: str,
+                          universe_levels: tuple[str, ...] = (),
+                          proposal_mode: str | None = None,
+                          seed: int | None = None,
+                          provider_environment_id: str | None = None) -> dict[str, Any]:
+        """Export the explicit source/goal union for the maths-AI v2 service.
+
+        Choose input_kind deliberately: a source failure must never fall back
+        to a different text goal. The adapter resolves source bytes by hash.
+        """
+        if input_kind == "source":
+            if not self.lean_name:
+                raise ContextValidationError("v2 source input requires the declaration's lean_name")
+            if self.lean_source_artifact == self.declaration_hash:
+                raise ContextValidationError("v2 source input requires a stored Lean source artifact; the declaration record hash is not source bytes")
+            formal_input = {"kind": "source", "artifact_hash": self.lean_source_artifact,
+                                "declaration": self.lean_name,
+                                "starting_state": "binders-introduced"}
+        elif input_kind == "goal":
+            formal_input = {"kind": "goal", "goal_text": self.root_state["goal_text"],
+                                "hypotheses": list(self.root_state.get("hypotheses", ())),
+                                "universe_levels": list(universe_levels)}
+        else:
+            raise ContextValidationError("v2 input_kind must be source or goal")
+        selection = {"name": backend, "profile": profile}
+        if proposal_mode is not None:
+            selection["proposal_mode"] = proposal_mode
+        if seed is not None:
+            selection["seed"] = seed
+        request = self.to_schema_dict(protocol_version=2, deployment_id=deployment_id,
+                                      backend=selection, formal_input=formal_input)
+        if provider_environment_id is not None:
+            request["environment_id"] = provider_environment_id
         return request
 
     def to_context_dict(self) -> dict[str, Any]:
@@ -580,6 +630,7 @@ def compile_formal(
     accessibility: PremiseAccessibility,
     *,
     context_limits: FormalContextLimits | None = None,
+    v2_selection: FormalV2Selection | None = None,
     compiler_version: str = DEFAULT_COMPILER_VERSION,
     rendering_version: str = DEFAULT_RENDERING_VERSION,
     protocol_version: int = 1,
@@ -880,6 +931,7 @@ def compile_formal(
         "source_hash": root.ref.content_hash,
     }
     for optional_key in (
+        "hypotheses",
         "kind",
         "context_digest",
         "environment_id",
@@ -932,9 +984,12 @@ def compile_formal(
         source_artifacts=tuple(refs),
     )
 
+    if v2_selection is not None and any(value is not None for value in (backend, deployment_id, formal_input)):
+        raise ContextValidationError("select the v2 request once")
     envelope = {
-        "request": payload.to_schema_dict(protocol_version=protocol_version, backend=backend,
-                                          deployment_id=deployment_id, formal_input=formal_input),
+        "request": (payload.to_v2_schema_dict(**asdict(v2_selection)) if v2_selection is not None
+                    else payload.to_schema_dict(protocol_version=protocol_version, backend=backend,
+                                                deployment_id=deployment_id, formal_input=formal_input)),
         "context": payload.to_context_dict(),
     }
     packet = ContextPacket(

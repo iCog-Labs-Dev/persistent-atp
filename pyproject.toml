@@ -9,7 +9,7 @@ description = "A durable, race-safe metagraph memory system for long-horizon aut
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "persistent-atp-client[http]>=0.2.1,<0.3",
+    "persistent-atp-client[http]>=0.3,<0.4",
     "python-dotenv>=1.0",
     "neo4j>=5.14",
     "psycopg[binary]>=3.3.6",
@@ -65,6 +65,7 @@ include = [
 ]
 
 [tool.setuptools.package-data]
+mathproof = ["contracts/formal-v2/manifest.json", "contracts/formal-v2/schemas/*.json"]
 omegaclaw = [
     "config/*.yaml",
     "config/*.conf",
@@ -95,4 +96,4 @@ testpaths = [
 
 [tool.uv.sources]
 persistent-atp-client = { path = "packages/persistent-atp-client", editable = true }
-mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git", rev = "e179d7c7b274eb1173bdfee1b92f1ffa94662a16" }
+mathematics-ai-atp = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git", rev = "a0e35e090c14bd36147ca651aebdae5c4f771495" }

@@ -10,7 +10,9 @@ import copy
 from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import AddEdge, RemoveEdge, SetField, UpsertNode
 from commit_gate.proposal import Proposal
-from .formal_v2 import FormalV2Error, _json
+from .formal_v2 import _json
+from .formal_run import formal_run_ops
+from .maths_ai_http import MathsAIAPIError as FormalV2Error
 
 
 def _id(proof, kind, *parts):
@@ -64,8 +66,8 @@ def search_proposal(client, run_id, lease, view, artifacts):
     """Import one settled, validated result under its original formal-atp lease."""
     if lease.worker_class != "formal-atp" or lease.selected_move_id != run_id:
         raise FormalV2Error("search evidence requires the run's formal-atp lease")
-    snapshot = client.formal_search_status(run_id)
-    request = client.requests[run_id]
+    snapshot, canonical = client.run_evidence(run_id)
+    request = client.request_for(run_id)
     for field in ("proof_id", "base_revision", "lease_id", "fencing_token"):
         if request[field] != getattr(lease, field):
             raise FormalV2Error("search evidence differs from original lease/revision/fencing")
@@ -101,18 +103,17 @@ def search_proposal(client, run_id, lease, view, artifacts):
         raise FormalV2Error("run already has a different producing actor or evidence binding")
     ops = [SetField("FormalRun", run_id, key, value, prior=run.fields.get(key))
            for key, value in pinned.items() if key not in {"actor", "environment_hash"} and run.fields.get(key) != value]
-    ops += [SetField("FormalRun", run_id, "status", result["disposition"], prior=run.fields.get("status")),
-           _edge(lease.proof_id, "RAN_UNDER", run_id, env_id)]
-    # Provider row IDs restart at fs-1/ta-1. Allocate deterministic run/attempt
-    # occurrence IDs; never merge these using pretty text or semantic signatures.
+    ops += list(formal_run_ops(canonical, run, actor=lease.actor))
+    ops.append(_edge(lease.proof_id, "RAN_UNDER", run_id, env_id))
+    # The adapter has already mapped run/attempt-scoped provider occurrences.
     scope = (snapshot["request_digest"], snapshot["attempts"])
-    states = {row["state_id"]: _id(lease.proof_id, "fs", *scope, row["state_id"]) for row in result["states"]}
-    for row in result["states"]:
+    states = {row["state_id"]: row["state_id"] for row in canonical["states"]}
+    for row in canonical["states"]:
         fields = {key: copy.deepcopy(value) for key, value in row.items() if key != "state_id"}
         fields.update(environment_hash=result["environment_hash"], exact_hash_scope="run-occurrence", transposition_eligible=False)
         ops.append(UpsertNode("FormalState", states[row["state_id"]], fields))
-    for row in result["tactic_edges"]:
-        identity = _id(lease.proof_id, "ta", *scope, row["tactic_id"])
+    for row in canonical["tactic_edges"]:
+        identity = row["tactic_id"]
         fields = {key: copy.deepcopy(value) for key, value in row.items() if key not in {"tactic_id", "source_state_id"}}
         fields["produced_goal_ids"] = [states[key] for key in row["produced_goal_ids"]]
         ops.extend([UpsertNode("TacticApplication", identity, fields),
@@ -123,7 +124,7 @@ def search_proposal(client, run_id, lease, view, artifacts):
             ops.append(_edge(lease.proof_id, "CLOSES_STATE", identity, states[row["source_state_id"]]))
     for root in view.edges_from(run_id, "HAS_ROOT"):
         ops.append(RemoveEdge("HAS_ROOT", root.edge_id))
-    ops.append(_edge(lease.proof_id, "HAS_ROOT", run_id, states[result["root_state_id"]]))
+    ops.append(_edge(lease.proof_id, "HAS_ROOT", run_id, states[canonical["root_state_id"]]))
     if result["disposition"] == "stagnated":
         obstruction = _id(lease.proof_id, "obs", *scope)
         ops.extend([UpsertNode("Obstruction", obstruction, {"kind": "search-policy", "actor": lease.actor,
@@ -131,10 +132,11 @@ def search_proposal(client, run_id, lease, view, artifacts):
             "environment_hash": result["environment_hash"], "diagnostic_artifact": result_hash}),
             _edge(lease.proof_id, "RAISED_OBSTRUCTION", run_id, obstruction)])
     if result.get("certificate"):
-        certificate = result["certificate"]
+        certificate = canonical["certificate"]
         identity = _id(lease.proof_id, "cert", certificate["artifact_hash"])
         ops.extend([UpsertNode("Certificate", identity, {"actor": lease.actor, "status": "replay-pending",
             "protocol_version": 2, "input_kind": source["kind"], "source_declaration": source.get("declaration"),
+            "binding_artifact_hash": certificate["binding_artifact_hash"],
             "artifact_hash": certificate["artifact_hash"], "producer_run_id": run_id,
             "environment_hash": result["environment_hash"], "request_digest": snapshot["request_digest"],
             "input_artifact_hash": result["input_artifact_hash"], "source_artifact_hash": result["source_artifact_hash"]}),
@@ -157,7 +159,8 @@ def replay_proposal(client, lease, view, artifacts, *, certificate_id, max_steps
     run = _node(view, run_id, "FormalRun")
     binding = _get(artifacts, run.fields["provider_binding_artifact"])
     client.restore(binding)
-    result = client.latest[run_id]["result"]
+    snapshot, canonical = client.run_evidence(run_id)
+    result = snapshot["result"]
     for field in ("artifact_hash", "producer_run_id"):
         if certificate.fields[field] != result["certificate"][field]:
             raise FormalV2Error("committed certificate differs from the persisted provider evidence")
@@ -168,7 +171,7 @@ def replay_proposal(client, lease, view, artifacts, *, certificate_id, max_steps
     declaration = _node(view, declarations[0].dst_id, "FormalDeclaration")
     if declaration.fields.get("lean_source_artifact") != certificate.fields["source_artifact_hash"]:
         raise FormalV2Error("declaration source changed since search admission")
-    receipt = client.formal_replay(result["certificate"], result["environment_hash"],
+    receipt = client.replay_attestation(canonical["certificate"], result["environment_hash"],
                                   max_steps=max_steps, wall_clock_ms=wall_clock_ms)
     receipt_hash = _put(artifacts, canonical_json(receipt))
     if receipt["status"] == "inconclusive":
@@ -179,6 +182,7 @@ def replay_proposal(client, lease, view, artifacts, *, certificate_id, max_steps
     ops = [UpsertNode("LeanReplay", replay_id, {"actor": lease.actor, "status": receipt["status"],
         "protocol_version": 2, "request_digest": certificate.fields["request_digest"], "run_id": run_id,
         "sorry_detected": receipt["verification_cost"].get("sorry_detected"), "receipt_artifact": receipt_hash,
+        "attestation_artifact_hash": receipt_hash,
         "artifact_hash": certificate.fields["artifact_hash"], "environment_hash": receipt["environment_hash"],
         "certificate_id": certificate_id, "input_artifact_hash": receipt["input_artifact_hash"],
         "source_artifact_hash": receipt["source_artifact_hash"]}),

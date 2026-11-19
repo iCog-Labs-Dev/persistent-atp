@@ -6,6 +6,7 @@ from .models import (
     CancelRequest, CapabilitySet, CoordinationItem, CoordinationPage, DecisionResponse, Event, FormalResume, FormalSearch, LemmaBridge, OperationRef,
     OperationSnapshot, Preconditions, ProjectDigest, ProofAudit, ProofCreate, ProofCycle,
     ProofExport, ProofStatus, QueueResearchMoves, ResearchGuidance, SelectedProofCycle, StatementAlign,
+    CoordinatorEscalation, QueueCoordinatorEscalations,
 )
 from .ports import ReceiverPort
 from .schemas import schema_manifest
@@ -16,4 +17,5 @@ __all__ = [
     "LemmaBridge", "OperationHandle", "OperationRef", "OperationSnapshot",
     "Preconditions", "ProjectDigest", "ProofAudit", "ProofCreate", "ProofCycle", "ProofExport",
     "ProofStatus", "QueueResearchMoves", "ResearchGuidance", "ReceiverPort", "SelectedProofCycle", "StatementAlign", "SyncClient", "schema_manifest",
+    "CoordinatorEscalation", "QueueCoordinatorEscalations",
 ]

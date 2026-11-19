@@ -256,3 +256,21 @@ def test_formal_runtime_config_rejects_invalid_values(field, value):
 
     with pytest.raises(ContextValidationError, match=field):
         FormalRuntimeConfig(**values)
+
+
+def test_runtime_v2_request_matches_the_audited_packet():
+    from context_compiler.formal import FormalV2Selection
+    from mathproof.formal_v2 import validate
+    _, store, lease, snapshot = runtime_case()
+    selection = FormalV2Selection('mcts-prod','mcts-actor-critic','puct','goal')
+    dispatch = compile_formal_for_lease(lease,snapshot,NoArtifacts(),config(v2_selection=selection))
+    wire = dispatch.worker_input
+    assert wire['protocol_version'] == 2
+    assert wire['input']['kind'] == 'goal'
+    assert wire['input']['goal_text'] == 'P n'
+    assert wire['lease_id'] == lease.lease_id
+    assert 'max_tactic_steps' not in wire['search_policy']
+    assert validate('formal-search-request',wire) == []
+    assert json.loads(dispatch.packet.content)['request'] == wire
+    assert dispatch.packet_digest == dispatch.manifest['packet_digest']
+    store.close()

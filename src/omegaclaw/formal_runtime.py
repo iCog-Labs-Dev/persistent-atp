@@ -11,21 +11,45 @@ import os
 from urllib.parse import urlsplit
 from types import SimpleNamespace
 
-from artifacts.errors import ArtifactNotFoundError
 from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
 from context_compiler.contracts import FormalExecutionLimits
 from context_compiler.formal import CheckpointPolicy, PremiseAccessibility
 from context_compiler.formal_runtime import FormalLeaseCompiler, FormalRuntimeConfig
-from mathproof.formal_v2 import FormalV2Error, FormalV2HTTPATP
+from mathproof.formal_v2 import MANIFEST_HASH
+from mathproof.maths_ai_http import MathsAIAPIError as FormalV2Error, MathsAIHTTPFormalATP
 from mathproof.formal_v2_admission import admit_search, admit_replay, admit_promotion
 from mathproof.scheduler import GlobalScheduler
 
 
 class ReplayReconciliationRequired(FormalV2Error):
-    code = 'FORMAL_REPLAY_RECONCILIATION_REQUIRED'
+    def __init__(self, message):
+        super().__init__(message, code='FORMAL_REPLAY_RECONCILIATION_REQUIRED')
     public_summary = 'Independent replay delivery is uncertain; reconcile its receipt before authorizing another replay.'
+
+
+class ContractMigrationRequired(FormalV2Error):
+    public_summary = 'This operation uses an earlier formal contract; reconcile it before starting a new operation.'
+
+    def __init__(self):
+        super().__init__(self.public_summary, code='FORMAL_CONTRACT_MIGRATION_REQUIRED')
+
+
+class _Artifacts:
+    """Serialize local repository access; provider I/O never holds this lock."""
+    def __init__(self, service):
+        self.service = service
+
+    def _call(self, method, *args):
+        if self.service is None:
+            raise FormalV2Error('readiness checks cannot access execution artifacts')
+        with self.service.lock:
+            return getattr(self.service.artifacts, method)(*args)
+
+    def get(self, key): return self._call('get', key)
+    def put(self, raw): return self._call('put', raw)
+    def exists(self, key): return self._call('exists', key)
 
 
 @dataclass(frozen=True)
@@ -53,7 +77,9 @@ class FormalProviderConfig:
             raise ValueError('invalid formal execution mode or poll interval')
         if self.replay_wall_clock_ms / 1000 > self.timeout:
             raise ValueError('formal HTTP timeout must cover independent replay allowance')
-        FormalV2HTTPATP(self.url, timeout=self.timeout)
+        if not 0 < self.timeout <= 120:
+            raise ValueError('formal HTTP timeout must be within (0, 120] seconds')
+        MathsAIHTTPFormalATP(self.url, artifacts=_Artifacts(None), timeout=self.timeout)
 
     @classmethod
     def from_environment(cls):
@@ -72,14 +98,17 @@ class FormalProviderConfig:
 
 class _Evidence:
     """Already validated network evidence, consumed offline under the gate lock."""
-    def __init__(self, binding, artifacts, receipt=None):
-        self.value, self.artifacts, self.receipt = deepcopy(binding), artifacts, receipt
+    def __init__(self, binding, canonical, artifacts, receipt=None):
+        self.value, self.canonical, self.artifacts, self.receipt = deepcopy(binding), deepcopy(canonical), artifacts, receipt
         run = binding['request']['run_id']
         self.requests = {run: binding['request']}
         self.latest = {run: binding['snapshot']}
 
-    def formal_search_status(self, run_id):
-        return deepcopy(self.latest[run_id])
+    def run_evidence(self, run_id):
+        return deepcopy(self.latest[run_id]), deepcopy(self.canonical)
+
+    def request_for(self, run_id):
+        return deepcopy(self.requests[run_id])
 
     def binding(self, run_id):
         assert run_id in self.requests
@@ -92,7 +121,7 @@ class _Evidence:
         if binding != self.value:
             raise FormalV2Error('persisted search binding changed')
 
-    def formal_replay(self, *args, **kwargs):
+    def replay_attestation(self, *args, **kwargs):
         if self.receipt is None:
             raise FormalV2Error('independent replay receipt is unavailable')
         return deepcopy(self.receipt)
@@ -104,30 +133,11 @@ class FormalWorkflow:
         self._callbacks = {}
 
     def client(self):
-        client = FormalV2HTTPATP(self.config.url, timeout=self.config.timeout, token=self.config.token)
-        if self.service is not None:
-            download = client.get_artifact
-            def cached_artifact(address):
-                # Keep validated evidence with the receiver, so a saved replay
-                # receipt can be admitted even if its provider is now offline.
-                with self.service.lock:
-                    try:
-                        data = self.service.artifacts.get(address)
-                    except (FileNotFoundError, ArtifactNotFoundError):
-                        data = None
-                if data is None:
-                    data = download(address)
-                    with self.service.lock:
-                        if self.service.artifacts.put(data) != address:
-                            raise FormalV2Error('cached provider artifact changed identity')
-                if 'sha256:' + hashlib.sha256(data).hexdigest() != address:
-                    raise FormalV2Error('cached provider artifact digest mismatch')
-                return data
-            client.get_artifact = cached_artifact
-        return client
+        return MathsAIHTTPFormalATP(self.config.url, artifacts=_Artifacts(self.service),
+            timeout=self.config.timeout, token=self.config.token)
 
     def deployment(self, client):
-        caps = client.capabilities()  # Includes exact seven-schema compatibility.
+        caps = client.formal_capabilities()  # Exact pinned nine-schema compatibility.
         identity = self.config.deployment_id or (caps.get('default') or {}).get('deployment_id')
         deployment = caps['deployments'].get(identity)
         if not deployment or not deployment['available'] or not deployment.get('environment_hash'):
@@ -252,7 +262,7 @@ class FormalWorkflow:
         except BaseException:
             self._release(lease)
             raise
-        return {'phase': 'prepared', 'run_id': run, 'proof_id': proof, 'claim_id': claim,
+        return {'contract_manifest': MANIFEST_HASH, 'phase': 'prepared', 'run_id': run, 'proof_id': proof, 'claim_id': claim,
             'provider_url': self.config.url, 'request': request, 'search_lease': lease.to_dict(),
             'replay_steps': min(self.config.replay_steps, selected['verification']['max_steps']),
             'replay_wall_clock_ms': min(self.config.replay_wall_clock_ms, selected['verification']['wall_clock_ms']),
@@ -270,6 +280,8 @@ class FormalWorkflow:
     def _run(self, operation, proof, claim, budget, cancelled, expected_revision):
         service, client = self.service, self.client()
         state = self._load(operation)
+        if state and state.get('contract_manifest') != MANIFEST_HASH:
+            raise ContractMigrationRequired()
         if state and state['provider_url'] != self.config.url:
             raise FormalV2Error('configured provider changed during an admitted operation')
         if cancelled() and not state:
@@ -284,7 +296,7 @@ class FormalWorkflow:
         run = state['run_id']
         client.restore_prepared(state['request'])
         if state.get('binding'):
-            client.restore(state['binding'])
+            client.restore(state['binding'], refresh=False)
         while True:
             with service.lock:
                 imported = service.view.node(run)
@@ -292,7 +304,8 @@ class FormalWorkflow:
             if admitted:
                 break
             try:
-                snapshot = client.formal_search_status(run)
+                client.formal_search_status(run)
+                snapshot, canonical = client.cached_evidence(run)
             except FormalV2Error as exc:
                 if exc.status_code is None or exc.status_code >= 500:
                     if time.time() >= state['deadline']:
@@ -306,14 +319,10 @@ class FormalWorkflow:
                         self._release(SimpleNamespace(**state['search_lease']))
                     return self._report(state, lifecycle='cancelled')
                 try:
-                    # The provider owns a separate content-addressed store.
-                    # Upload exact committed source bytes before admission;
-                    # repeating this upload cannot create another search run.
-                    with service.lock:
-                        source = service.artifacts.get(state['request']['input']['artifact_hash'])
-                    if client.put_artifact(source) != state['request']['input']['artifact_hash']:
-                        raise FormalV2Error('provider changed the committed source identity')
-                    snapshot = client.formal_search_start(state['request'])  # Same idempotent start only.
+                    # The consolidated adapter uploads the exact durable source
+                    # before sending this original idempotent request.
+                    client.formal_search_start(state['request'])  # Same idempotent start only.
+                    snapshot, canonical = client.cached_evidence(run)
                 except FormalV2Error as start_error:
                     if (start_error.status_code is None or start_error.status_code >= 500) and time.time() < state['deadline']:
                         time.sleep(self.config.poll_seconds)
@@ -323,7 +332,8 @@ class FormalWorkflow:
             self._save(operation, state)
             if cancelled() and not snapshot.get('cancel_requested') and snapshot.get('result') is None:
                 try:
-                    snapshot = client.formal_search_cancel(run)
+                    client.formal_search_cancel(run)
+                    snapshot, canonical = client.cached_evidence(run)
                 except FormalV2Error as error:
                     if (error.status_code is None or error.status_code >= 500) and time.time() < state['deadline']:
                         time.sleep(self.config.poll_seconds)
@@ -335,7 +345,7 @@ class FormalWorkflow:
                 result = snapshot['result']
                 addresses = {item['sha256'] for item in result['artifacts']}
                 addresses.update(value for key, value in result.items() if key in {'input_artifact_hash', 'source_artifact_hash'} and value)
-                evidence = _Evidence(client.binding(run), {key: client.get_artifact(key) for key in addresses})
+                evidence = _Evidence(client.binding(run), canonical, {key: _Artifacts(service).get(key) for key in addresses})
                 with service.lock:
                     self._accepted(admit_search(evidence, run, SimpleNamespace(**state['search_lease']), service.gate, service.artifacts))
                     service.catch_up(proof)
@@ -363,12 +373,13 @@ class FormalWorkflow:
                         worker_class='replayer', selected_move_id=certificate, ttl_seconds=self.config.replay_wall_clock_ms / 1000 + 120)
                     state['replay_lease'] = checker.to_dict()
             independent = self.client()
-            independent.restore(state['binding'])
+            independent.restore(state['binding'], refresh=False)
+            _, canonical = independent.cached_evidence(run)
             if 'receipt' not in state:
                 state['phase'] = 'replay-started'
                 self._save(operation, state)
                 try:
-                    state['receipt'] = independent.formal_replay(result['certificate'], result['environment_hash'],
+                    state['receipt'] = independent.replay_attestation(canonical['certificate'], result['environment_hash'],
                         max_steps=state['replay_steps'], wall_clock_ms=state['replay_wall_clock_ms'])
                 except (FormalV2Error, OSError) as error:
                     raise ReplayReconciliationRequired('replay delivery is uncertain') from error
@@ -379,7 +390,7 @@ class FormalWorkflow:
                     self._release(SimpleNamespace(**state['replay_lease']))
                     self._save(operation, state)
                     return self._report(state)
-                evidence = _Evidence(state['binding'], {}, state['receipt'])
+                evidence = _Evidence(state['binding'], canonical, {}, state['receipt'])
                 self._accepted(admit_replay(evidence, SimpleNamespace(**state['replay_lease']), service.gate,
                     service.artifacts, certificate_id=certificate, max_steps=state['replay_steps'],
                     wall_clock_ms=state['replay_wall_clock_ms']))
@@ -398,13 +409,18 @@ class FormalWorkflow:
                     service.catch_up(proof)
                 finally:
                     self._release(coordinator)
+            state['claim_status'] = service.view.node(claim).fields['status']
             state['phase'] = 'completed'
             self._save(operation, state)
         return self._report(state)
 
     def _report(self, state, lifecycle='succeeded'):
         snapshot = state.get('binding', {}).get('snapshot', {})
+        disposition = (snapshot.get('result') or {}).get('disposition')
+        if state.get('claim_status') == 'lean-verified':
+            disposition = 'lean-verified'
         return {'proof_id': state['proof_id'], 'run_id': state['run_id'], 'phase': state['phase'],
-            'lifecycle': lifecycle, 'mathematical_disposition': (snapshot.get('result') or {}).get('disposition'),
+            'lifecycle': lifecycle, 'mathematical_disposition': disposition,
+            'claim_status': state.get('claim_status'),
             'budget': snapshot.get('budget'), 'replay_status': state.get('receipt', {}).get('status'),
             'component_mode': 'formal-v2-' + self.config.mode}

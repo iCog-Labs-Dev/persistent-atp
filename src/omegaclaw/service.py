@@ -65,9 +65,9 @@ class OperationService:
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace = workspace
         self.store = JournalStore(str(self.root / "journal.sqlite3"), allow_cross_thread=True)
-        self.gate = CommitGate(self.view, self.store)
-        self.jobs = JobLedger(self.root / "operations.sqlite3")
         self.artifacts = artifacts or ReferenceArtifactStore(self.root / "artifacts")
+        self.gate = CommitGate(self.view, self.store, artifacts=self.artifacts)
+        self.jobs = JobLedger(self.root / "operations.sqlite3")
         if critic_timeout_s <= 0 or critic_timeout_s > 10:
             raise ValueError("reference critic timeout must be within (0, 10] seconds")
         self.critic_command = critic_command or (sys.executable, "-m", "omegaclaw.reference_critic")

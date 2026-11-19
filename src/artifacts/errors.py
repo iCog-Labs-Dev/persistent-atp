@@ -14,6 +14,7 @@ __all__ = [
     "ArtifactNotFoundError",
     "ArtifactQueryError",
     "ArtifactIntegrityError",
+    "ArtifactCorruptError",
 ]
 
 
@@ -49,3 +50,7 @@ class ArtifactQueryError(ArtifactStoreError):
 
 class ArtifactIntegrityError(ArtifactStoreError):
     """Stored bytes no longer match their content address."""
+
+
+class ArtifactCorruptError(ArtifactIntegrityError):
+    """Corruption detected by the artifact store; retains the receiver error API."""

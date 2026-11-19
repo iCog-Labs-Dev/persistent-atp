@@ -19,6 +19,7 @@ from .dispatch import CompiledDispatch
 from .errors import FormalRunPreparationRequired
 from .formal_runtime import (
     FormalLeaseCompiler,
+    FormalV2Selection,
     FormalRuntimeConfig,
     compile_formal_for_lease,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "FormalLeaseCompiler",
     "FormalRunPreparationRequired",
     "FormalRuntimeConfig",
+    "FormalV2Selection",
     "FormalizationCompilation",
     "MappingArtifactReader",
     "LeaseSnapshotProvider",

@@ -9,8 +9,8 @@ works offline in tests and tooling.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -53,6 +53,9 @@ def validator_for(name: str) -> Draft202012Validator:
 
 def validate(name: str, payload: Any) -> list[str]:
     """Human-readable error strings for every violation of `name` by `payload`."""
+    if name == "formal-search-request" and isinstance(payload, dict) and "protocol_version" in payload:
+        from .formal_v2 import validate as validate_v2
+        return validate_v2(name, payload)
     return [
         f"{'/'.join(str(p) for p in err.absolute_path)}: {err.message}"
         for err in validator_for(name).iter_errors(payload)

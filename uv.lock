@@ -990,7 +990,7 @@ wheels = [
 [[package]]
 name = "mathematics-ai-atp"
 version = "0.1.0"
-source = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git?rev=e179d7c7b274eb1173bdfee1b92f1ffa94662a16#e179d7c7b274eb1173bdfee1b92f1ffa94662a16" }
+source = { git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git?rev=a0e35e090c14bd36147ca651aebdae5c4f771495#a0e35e090c14bd36147ca651aebdae5c4f771495" }
 dependencies = [
     { name = "datasets" },
     { name = "faiss-cpu" },
@@ -1634,7 +1634,7 @@ real-atp = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'formal-tests'", specifier = ">=0.115,<1" },
     { name = "jsonschema", specifier = ">=4.0" },
-    { name = "mathematics-ai-atp", marker = "extra == 'real-atp'", git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git?rev=e179d7c7b274eb1173bdfee1b92f1ffa94662a16" },
+    { name = "mathematics-ai-atp", marker = "extra == 'real-atp'", git = "https://github.com/iCog-Labs-Dev/Mathematics-ai-atp.git?rev=a0e35e090c14bd36147ca651aebdae5c4f771495" },
     { name = "neo4j", specifier = ">=5.14" },
     { name = "openai", marker = "extra == 'provider-sdk'", specifier = ">=2.0,<3" },
     { name = "persistent-atp-client", extras = ["http"], editable = "packages/persistent-atp-client" },
@@ -1649,7 +1649,7 @@ provides-extras = ["dev", "formal-tests", "omega-playground", "provider-sdk", "r
 
 [[package]]
 name = "persistent-atp-client"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "packages/persistent-atp-client" }
 
 [package.optional-dependencies]
