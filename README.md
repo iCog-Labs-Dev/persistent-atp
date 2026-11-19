@@ -102,6 +102,25 @@ bash scripts/omegaclaw-test.sh --tier reference
 bash scripts/omegaclaw-test.sh --tier omega
 ```
 
+For standalone Omega capability tests with a real model, configure its provider
+key in `.env` and run the playground. It starts an isolated container with the
+ATP plugin disabled, retains a dedicated memory volume, and recreates the
+container to check persistence:
+
+```bash
+uv run --extra omega-playground persistent-atp-omega-playground --list
+uv run --extra omega-playground persistent-atp-omega-playground --build-image
+```
+
+`--cases shell,file_append,query` selects cases and their prerequisites;
+`--provider ASIOne --model <model>` selects another configured provider.
+Each run writes `.runs/omega-capabilities/<run>/pairs.json` as
+`{"query": "actual response"}` and a `report.json` with tool, filesystem,
+memory, and recovery checks. Unavailable or unexecuted cases have null responses
+and explicit reasons. Logs and reports remain outside Git. Live model calls
+use the configured provider; passing generation checks do not establish
+mathematical verification.
+
 The full container test builds from a locally pulled official image and uses a
 local model stub, an isolated proxy port, a reference receiver, and an Omega
 restart. It makes no paid provider calls:

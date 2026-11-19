@@ -24,6 +24,9 @@ formal-tests = [
     "pytest>=8.0",
     "fastapi>=0.115,<1",
 ]
+omega-playground = [
+    "websockets>=16,<17",
+]
 provider-sdk = [
     "openai>=2.0,<3",
     "PyYAML>=6.0",
@@ -39,6 +42,7 @@ real-atp = [
 [project.scripts]
 persistent-atp-omega = "omegaclaw.cli:main"
 persistent-atp-provider-probe = "omegaclaw.deepseek_probe:main"
+persistent-atp-omega-playground = "omegaclaw.playground:main"
 
 [tool.setuptools]
 package-dir = {"" = "src", "mork" = "mork"}
