@@ -350,7 +350,7 @@ def test_bridge_returns_before_receiver_finishes_and_preserves_outbox_until_ack(
         assert all(item["notification_id"] not in delivered for item in adapter.pending_reports())
         bridge.disable()
         assert json.loads(bridge.proof_cycle("p1", "reference"))["error_code"] == "PLUGIN_DISABLED"
-        assert len(SKILLS) == 9
+        assert len(SKILLS) == 10
     finally:
         bridge.disable()
         bridge._pool.shutdown(wait=True)

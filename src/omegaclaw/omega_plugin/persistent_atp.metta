@@ -1,4 +1,4 @@
-; Base catalogue: exactly nine string-argument tools. No workers call MeTTa.
+; Proof catalogue: ten string-argument tools. No workers call MeTTa.
 ; The loader imports into this plugin's space on every reload. Remove old
 ; function definitions as well as catalogue entries, so one tool call cannot
 ; execute several compiled copies of the wrapper.
@@ -15,6 +15,7 @@
 !(import_prolog_function formal-resume)
 !(import_prolog_function statement-align)
 !(import_prolog_function lemma-bridge)
+!(import_prolog_function hypothesis-formalize)
 !(import_prolog_function persistent-atp-collect-results)
 
 (= (loadOmegaPlugin)
@@ -37,6 +38,7 @@
             (add-skill formal-resume "Continue only when durable checkpoint resume is advertised; never silently restart." (proof run budget workspace))
             (add-skill statement-align "Review a claim against an authorized Lean source artifact hash, never a filename or URL." (proof claim lean_source workspace))
             (add-skill lemma-bridge "Request speculative invention linked to the exact obstruction." (proof obstruction workspace))
+            (add-skill hypothesis-formalize "Formalize one explicitly selected speculative hypothesis at the exact expected revision. Produces a provisional claim and statement review, not a verified lemma." (proof hypothesis expected_revision workspace))
             (add-heartbeat-listener persistent_atp (|-> ($iter) (persistent-atp-collect-results $iter))))
          (progn
             (remove-skill proof-create)
@@ -48,6 +50,7 @@
             (remove-skill formal-resume)
             (remove-skill statement-align)
             (remove-skill lemma-bridge)
+            (remove-skill hypothesis-formalize)
             (py-call (omega_persistent_atp_bridge.disable))))
       ())))
 
@@ -79,3 +82,5 @@
    (py-call (omega_persistent_atp_bridge.statement_align $proof $claim $lean_source $workspace)))
 (= (lemma-bridge $proof $obstruction $workspace)
    (py-call (omega_persistent_atp_bridge.lemma_bridge $proof $obstruction $workspace)))
+(= (hypothesis-formalize $proof $hypothesis $expected_revision $workspace)
+   (py-call (omega_persistent_atp_bridge.hypothesis_formalize $proof $hypothesis $expected_revision $workspace)))

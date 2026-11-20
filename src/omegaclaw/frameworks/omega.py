@@ -13,14 +13,14 @@ from urllib.parse import urlsplit
 from persistent_atp_client import (
     AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,
     Preconditions, ProofAudit, ProofCreate, ProofCycle, ProofExport, StatementAlign,
-    SyncClient,
+    SyncClient, HypothesisFormalize,
 )
 from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.codecs import fingerprint, request_from_dict, to_dict
 from persistent_atp_client.errors import (
     AdmissionRejected, ClientError, CursorExpired, ReceiverProtocolError,
-    UnsupportedCapability,
+    UnsupportedCapability, StalePrecondition,
 )
 
 from ..specification import parse_json, validate_spec
@@ -31,6 +31,7 @@ SKILLS = {
     "proof-audit": ("proof",), "proof-export": ("proof", "destination"),
     "formal-search": ("proof", "claim", "budget"), "formal-resume": ("proof", "run", "budget"),
     "statement-align": ("proof", "claim", "lean_source"), "lemma-bridge": ("proof", "obstruction"),
+    "hypothesis-formalize": ("proof", "hypothesis", "expected_revision"),
 }
 
 
@@ -89,6 +90,14 @@ class OmegaAdapter:
             parsed["budget"] = to_dict(Budget(**value))
         if kind == "statement-align":
             ArtifactRef(arguments["lean_source"])
+        if kind == "hypothesis-formalize":
+            HypothesisFormalize(arguments['proof'], arguments['hypothesis'])
+            if not arguments['hypothesis'].startswith(arguments['proof'] + '/'):
+                raise ValueError('hypothesis is outside the requested proof')
+            revision = arguments['expected_revision']
+            if not revision.isascii() or not revision.isdecimal():
+                raise ValueError('expected_revision must be a nonnegative decimal revision')
+            parsed['expected_revision'] = str(int(revision))
         # SDK-generated DTO identifiers also constrain proof/destination inputs.
         if "proof" in arguments:
             ProofCycle(arguments["proof"])
@@ -237,6 +246,16 @@ class OmegaAdapter:
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
         proof = args["proof"]
+        if kind == 'hypothesis-formalize':
+            expected = int(args['expected_revision'])
+            if digest.revision != expected:
+                raise StalePrecondition('selected hypothesis revision changed; review before starting a new intent')
+            caps = self.client.capabilities(contract_version='2.2')
+            if kind not in caps.actions:
+                raise UnsupportedCapability('hypothesis formalization is unavailable')
+            self._check_identity(proof, args['hypothesis'], 'SpeculativeHypothesis')
+            return HypothesisFormalize(proof, args['hypothesis']), Preconditions(
+                expected_revision=expected, expected_theorem_hash=digest.target_artifact.hash)
         if kind in {"formal-search", "formal-resume"}:
             if self.caps.backend_mode != "real":
                 raise UnsupportedCapability("FORMAL_BACKEND_UNAVAILABLE")

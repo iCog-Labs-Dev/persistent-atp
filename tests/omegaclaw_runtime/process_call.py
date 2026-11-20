@@ -88,7 +88,7 @@ assert "deepseek_provider" in catalogue, catalogue
 skills_once = execute("!(getSkills)")[0]
 assert skills_once.count('(proof-create "') == 1, skills_once
 for name in ("proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export",
-             "formal-search", "formal-resume", "statement-align", "lemma-bridge"):
+             "formal-search", "formal-resume", "statement-align", "lemma-bridge", "hypothesis-formalize"):
     assert skills_once.count(f'({name} "') == 1, (name, skills_once)
 execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
 skills_twice = execute("!(getSkills)")[0]
@@ -97,7 +97,7 @@ listener_count = janus_swi.query_once("findall(1, clause('heartbeat-listener'(pe
 assert listener_count == 1, listener_count
 for name, arity in (("proof-create", 3), ("proof-cycle", 3), ("proof-status", 3),
                     ("proof-audit", 3), ("proof-export", 4), ("formal-search", 5),
-                    ("formal-resume", 5), ("statement-align", 5), ("lemma-bridge", 4)):
+                    ("formal-resume", 5), ("statement-align", 5), ("lemma-bridge", 4), ("hypothesis-formalize", 5)):
     args = ",".join("_" for _ in range(arity))
     count = janus_swi.query_once(f"findall(1, clause('{name}'({args}), _), L), length(L, Count)")["Count"]
     assert count == 1, (name, count)
@@ -165,6 +165,7 @@ tool_names = {
     "formal-resume": ("proof", "run", "budget", "workspace"),
     "statement-align": ("proof", "claim", "lean_source", "workspace"),
     "lemma-bridge": ("proof", "obstruction", "workspace"),
+    "hypothesis-formalize": ("proof", "hypothesis", "expected_revision", "workspace"),
 }
 native_skills = janus_swi.query_once("'getSkills'(Skills)")["Skills"]
 tools = providers.getTools(native_skills)
@@ -242,6 +243,7 @@ all_calls = {
     "formal-resume": {"proof": proof, "run": f"{proof}/missing-run", "budget": '{"max_steps":5,"wall_clock_ms":1000}'},
     "statement-align": {"proof": proof, "claim": f"{proof}/c-1", "lean_source": envelope["artifact_pointers"][0]},
     "lemma-bridge": {"proof": proof, "obstruction": f"{proof}/missing-obstruction"},
+    "hypothesis-formalize": {"proof": proof, "hypothesis": f"{proof}/hyp-" + "0" * 32, "expected_revision": "0"},
 }
 for name, arguments in all_calls.items():
     arguments["workspace"] = "reference"
@@ -255,7 +257,7 @@ for name, arguments in all_calls.items():
     expression = f'!({name} ' + ' '.join(json.dumps(call.arguments[key]) for key in tool_names[name]) + ')'
     result = await_reply(execute(expression)[0], read=name == "proof-status", allow_error=True)
     assert not result.get("formal_verified"), result
-    if name in {"formal-search", "formal-resume", "lemma-bridge"}:
+    if name in {"formal-search", "formal-resume", "lemma-bridge", "hypothesis-formalize"}:
         assert result.get("error_code"), result
 
 # Run Omega's real recursive loop with a bounded test communication channel.
@@ -301,4 +303,4 @@ print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
     "sdk_provider_roundtrip": sdk_roundtrip,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
-    "registered_skills": 9, "total_tools": len(tools), "actual_loop_verified": channel.confirmed}, sort_keys=True), flush=True)
+    "registered_skills": len(tool_names), "total_tools": len(tools), "actual_loop_verified": channel.confirmed}, sort_keys=True), flush=True)

@@ -209,3 +209,5 @@ def formal_search(proof, claim, budget, workspace): return _invoke("formal-searc
 def formal_resume(proof, run, budget, workspace): return _invoke("formal-resume", workspace, proof=proof, run=run, budget=budget)
 def statement_align(proof, claim, lean_source, workspace): return _invoke("statement-align", workspace, proof=proof, claim=claim, lean_source=lean_source)
 def lemma_bridge(proof, obstruction, workspace): return _invoke("lemma-bridge", workspace, proof=proof, obstruction=obstruction)
+def hypothesis_formalize(proof, hypothesis, expected_revision, workspace):
+    return _invoke("hypothesis-formalize", workspace, proof=proof, hypothesis=hypothesis, expected_revision=expected_revision)
