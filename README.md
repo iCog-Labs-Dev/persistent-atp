@@ -125,8 +125,8 @@ mathematical verification.
 
 For model-driven ATP acceptance, use a production receiver configuration with
 `formal_provider: true`, a compatible formal provider, PostgreSQL artifacts, and
-preloaded native MORK. The runner owns the receiver HTTP process and recreates
-it against the same durable storage during recovery checks:
+preloaded native MORK. The runner owns the receiver HTTP service and recreates
+it in the host process against the same durable storage during recovery checks:
 
 ```bash
 scripts/with-mork.sh .venv/bin/python -m omegaclaw.playground \
@@ -145,10 +145,9 @@ This file authorizes host-side declaration intake; it is never a model tool.
 
 Omega calls creation, formal search, status, audit, and export through its real
 tools. Acceptance independently checks native replay receipts, journal hashes,
-artifact bytes, MORK projection, and recovery after both Omega and the receiver
-restart. Each run saves actual query/response pairs and the verified export.
-This mode tests a prepared declaration; automatic formalization and review of a
-new theorem remain separate integration work.
+artifact bytes, MORK projection, and recovery after Omega container and receiver
+service recreation. Each run saves actual query/response pairs and the verified export.
+This mode tests a prepared declaration.
 
 Add `--atp-cycle` to exercise Omega's `proof-cycle` tool instead of explicit
 `formal-search`. The receiver scheduler selects an aligned declaration and
@@ -158,6 +157,23 @@ configuration. An unformalized theorem reports blocked; unavailable research
 and critic workers do not trigger scripted fallback. Existing provider runs
 remain associated with their original operation and require reconciliation
 rather than an implicit new search.
+
+For automatic intake, set `PERSISTENT_ATP_INTAKE_PROVIDER` to `DeepSeek` or
+`ASIOne`, and set `PERSISTENT_ATP_INTAKE_TOOLCHAIN` and
+`PERSISTENT_ATP_INTAKE_IMPORTS` to match the configured formal deployment.
+The receiver uses the corresponding provider credentials from `.env`.
+On an unformalized proof, `proof-cycle` compiles the complete committed theorem
+context, runs the existing formalizer, commits a draft, and separately reviews
+exact statement alignment. Only an accepted review makes the declaration
+available to formal search. Ambiguous reviews remain pending; alignment alone
+does not verify a proof.
+
+Add `--atp-intake` alongside `--atp --atp-cycle` to test this path. Its input
+file contains only `{"spec": <complete theorem specification>}`. The runner
+supplies no declaration or host alignment review. Initial intake supports one
+proposition with trusted imports; custom universe declarations and additional
+source commands require explicit preparation. Saved draft/review output is
+reused after interruption; expired leases require reconciliation.
 
 The full container test builds from a locally pulled official image and uses a
 local model stub, an isolated proxy port, a reference receiver, and an Omega

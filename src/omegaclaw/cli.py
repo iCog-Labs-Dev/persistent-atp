@@ -106,6 +106,13 @@ def _formal_config(config):
     return None
 
 
+def _intake_config(config):
+    if config.get('formal_provider'):
+        from .intake_runtime import IntakeConfig
+        return IntakeConfig.from_environment()
+    return None
+
+
 def doctor(profile: str) -> dict:
     blockers: list[str] = []
     if profile == "deepseek":
@@ -192,7 +199,7 @@ def main(argv=None) -> int:
     if args.command == "serve":
         config, root = load_config(args.config)
         token = os.environ.get(config["token_env"], "")
-        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config))
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config), intake_config=_intake_config(config))
         receiver = ReferenceReceiver(service)
         server = serve(service, token, config["host"], int(config["port"]), receiver=receiver)
         print(json.dumps({"status": "ready", "host": config["host"], "port": server.server_port,
@@ -209,7 +216,7 @@ def main(argv=None) -> int:
         source = Path(args.file)
         if not source.is_file() or source.stat().st_size > 16 * 1024 * 1024:
             raise SystemExit("artifact input must be a file of at most 16 MiB")
-        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config))
+        service = OperationService(root, workspace=config["workspace"], profile=config.get("profile", "reference"), formal_config=_formal_config(config), intake_config=_intake_config(config))
         receiver = ReferenceReceiver(service)
         try:
             artifact = asyncio.run(receiver.put_artifact(source.read_bytes(), workspace_id=config["workspace"],

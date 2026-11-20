@@ -58,6 +58,7 @@ def test_formalizer_emits_one_draft_for_compiled_claim():
     assert validate_proposal(result.proposal, view) == []
     assert result.proposal.ops[0].fields["status"] == "draft"
     assert result.proposal.ops[1].dst_id == "p1/c-1"
+    assert result.proposal.ops[1].edge_id.startswith('p1/drafts-')
     assert compilation.packet_digest.startswith("sha256:")
     assert result.backend_id == "llm-v1"
 

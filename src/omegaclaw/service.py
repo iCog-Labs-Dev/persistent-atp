@@ -37,7 +37,7 @@ ACTOR = "omega-coordinator"
 class OperationService:
     def __init__(self, root: str | Path, *, workspace: str = "reference", artifacts=None,
                  critic_command: tuple[str, ...] | None = None, critic_timeout_s: float = 2.0,
-                 profile: str = "reference", artifact_db_url: str | None = None, formal_config=None):
+                 profile: str = "reference", artifact_db_url: str | None = None, formal_config=None, intake_config=None):
         if profile not in {"reference", "persistence", "production"}:
             raise ValueError("unknown receiver profile")
         if formal_config is not None:
@@ -46,6 +46,11 @@ class OperationService:
                 raise ValueError('formal_config must be a trusted FormalProviderConfig')
             if profile == 'production' and formal_config.mode != 'real':
                 raise ValueError('production cannot use a scripted formal provider')
+        if intake_config is not None:
+            from .intake_runtime import IntakeConfig
+            if not isinstance(intake_config, IntakeConfig) or formal_config is None:
+                raise ValueError('intake requires a trusted IntakeConfig and configured formal provider')
+            intake_config.llm()  # Fail at startup if the selected credentials are absent.
         self.profile = profile
         self.lock = threading.RLock()
         self.receiver_mode = {"reference": "reference-scripted", "persistence": "persistence-scripted",
@@ -74,11 +79,14 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
-        self.formal = self.cycles = None
+        self.formal = self.cycles = self.intake = None
         if formal_config is not None:
             self.formal = FormalWorkflow(self, formal_config)
             from .cycle_runtime import CycleWorkflow
             self.cycles = CycleWorkflow(self)
+        if intake_config is not None:
+            from .intake_runtime import IntakeWorkflow
+            self.intake = IntakeWorkflow(self, intake_config)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:

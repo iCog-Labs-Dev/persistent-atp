@@ -131,3 +131,11 @@ def test_receiver_root_cannot_be_owned_by_two_playgrounds(tmp_path, monkeypatch)
         fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(ValueError, match='another playground owns'):
             ReceiverHost('unused', tmp_path, {})
+
+
+def test_automated_intake_accepts_spec_only_and_rejects_prepared_review(reviewed):
+    path, value = reviewed
+    with pytest.raises(ValueError, match='only the exact theorem spec'):
+        load_input(path, intake=True)
+    path.write_text(json.dumps({'spec': value['spec']}))
+    assert load_input(path, intake=True) == {'spec': value['spec']}

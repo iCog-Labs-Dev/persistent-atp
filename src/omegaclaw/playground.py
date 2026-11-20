@@ -448,6 +448,7 @@ def main(argv=None):
     parser.add_argument('--keep-container', action='store_true')
     parser.add_argument('--atp', action='store_true', help='Run model-driven proof acceptance against a production receiver')
     parser.add_argument('--atp-cycle', action='store_true', help='Use scheduler-selected proof-cycle in ATP acceptance')
+    parser.add_argument('--atp-intake', action='store_true', help='Generate and review the declaration from a spec-only input')
     parser.add_argument('--atp-config', default=os.environ.get('OMEGA_PLAYGROUND_ATP_CONFIG', 'formal'))
     parser.add_argument('--atp-input', default=os.environ.get('OMEGA_PLAYGROUND_ATP_INPUT'),
         help='Trusted host JSON containing the exact theorem, declaration, and bound alignment review')
@@ -456,6 +457,8 @@ def main(argv=None):
         parser.error('timeouts must be positive')
     if args.atp_cycle and not args.atp:
         parser.error('--atp-cycle requires --atp')
+    if args.atp_intake and not (args.atp and args.atp_cycle):
+        parser.error('--atp-intake requires --atp --atp-cycle')
     if args.atp:
         from .playground_atp import run
         if not args.atp_input and not args.list:

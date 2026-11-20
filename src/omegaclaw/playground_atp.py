@@ -28,6 +28,7 @@ from .api import serve
 from .cli import load_config
 from .export import check_export
 from .formal_runtime import FormalProviderConfig
+from .intake_runtime import IntakeConfig
 from .playground import Docker, MEMORY, Session, command_records, free_port, provider_model, save, utcnow
 from .receiver import ReferenceReceiver
 from .service import OperationService
@@ -52,9 +53,13 @@ def notification_ids(history):
     return found
 
 
-def load_input(path):
+def load_input(path, *, intake=False):
     path = Path(path).resolve()
     value = parse_json(path.read_text())
+    if intake:
+        if not isinstance(value, dict) or set(value) != {'spec'}:
+            raise ValueError('automated intake input requires only the exact theorem spec')
+        return {'spec': validate_spec(value['spec'])}
     if not isinstance(value, dict) or set(value) != {'spec', 'declaration', 'review'}:
         raise ValueError('ATP input requires spec, declaration and review')
     spec = validate_spec(value['spec'])
@@ -82,7 +87,7 @@ def load_input(path):
 
 class ReceiverHost:
     """Owned HTTP receiver; graph/journal and PostgreSQL artifacts survive restart."""
-    def __init__(self, config_name, output, prepared):
+    def __init__(self, config_name, output, prepared, *, intake=False):
         self.config, self.root = load_config(config_name)
         if self.config.get('profile') != 'production' or not self.config.get('formal_provider'):
             raise ValueError('ATP playground requires a production config with formal_provider enabled')
@@ -91,6 +96,9 @@ class ReceiverHost:
         if not os.environ.get('ARTIFACT_DB_URL') or not os.environ.get('MORK_LIBRARY'):
             raise ValueError('ARTIFACT_DB_URL and preloaded MORK_LIBRARY are required')
         self.formal_config = FormalProviderConfig.from_environment()
+        self.intake_config = IntakeConfig.from_environment() if intake else None
+        if intake and self.intake_config is None:
+            raise ValueError('automated intake requires PERSISTENT_ATP_INTAKE_PROVIDER')
         self.prepared, self.output = prepared, output
         self.workspace = self.config['workspace']
         self.token, self.port = secrets.token_urlsafe(32), int(self.config.get('port', 0))
@@ -105,14 +113,15 @@ class ReceiverHost:
         try:
             self.start()
             _, _, self.deployment = self.service.formal.deployment(self.service.formal.client())
-            if self.deployment['environment_hash'] != prepared['review']['environment_hash']:
+            if not intake and self.deployment['environment_hash'] != prepared['review']['environment_hash']:
                 raise ValueError('host review pins another provider environment')
         except BaseException:
             self.close()
             raise
 
     def start(self):
-        self.service = OperationService(self.root, workspace=self.workspace, profile='production', formal_config=self.formal_config)
+        self.service = OperationService(self.root, workspace=self.workspace, profile='production',
+            formal_config=self.formal_config, intake_config=self.intake_config)
         try:
             self.receiver = ReferenceReceiver(self.service)
             self.server = serve(self.service, self.token, '127.0.0.1', self.port, receiver=self.receiver)
@@ -241,6 +250,7 @@ class ReceiverHost:
 
 def run(args):
     cycle_mode = getattr(args, 'atp_cycle', False)
+    intake_mode = getattr(args, 'atp_intake', False)
     steps = tuple('cycle' if step == 'search' and cycle_mode else step for step in STEPS)
     tools = {**TOOLS, 'cycle': 'proof-cycle'}
     if args.list:
@@ -252,12 +262,14 @@ def run(args):
     report = {'run_id': run_id, 'started_at': utcnow(), 'mode': 'atp-scheduled-cycle' if cycle_mode else 'atp-prepared-declaration',
         'provider': args.provider, 'model': provider_model(args.provider, args.model),
         'results': [], 'output': str(output), 'review_mode': 'explicit trusted host review; no automatic formalization'}
+    if intake_mode:
+        report.update(mode='atp-automated-intake', review_mode='configured LLM formalization and exact semantic review')
     runner = host = session = client = None
     def event(name, **fields):
         print(json.dumps({'event': name, **fields}), flush=True)
     try:
-        prepared = load_input(args.atp_input)
-        host = ReceiverHost(args.atp_config, output, prepared)
+        prepared = load_input(args.atp_input, intake=intake_mode)
+        host = ReceiverHost(args.atp_config, output, prepared, intake=intake_mode)
         report.update(receiver_root=str(host.root), workspace=host.workspace, deployment=host.deployment)
         runner = Docker(args.image, args.provider, report['model'], output, run_id, free_port(), atp=host.environment)
         if args.build_image:
@@ -276,7 +288,8 @@ def run(args):
             if step == 'create':
                 instruction = 'Invoke proof-create exactly once with workspace ' + host.workspace + ' and this exact JSON spec: ' + json.dumps(prepared['spec'], ensure_ascii=False)
             elif step in {'search', 'cycle'}:
-                host.prepare_declaration(proof)
+                if not intake_mode:
+                    host.prepare_declaration(proof)
                 budget = {'max_steps': host.formal_config.max_steps, 'wall_clock_ms': host.formal_config.wall_clock_ms}
                 instruction = f'Invoke formal-search exactly once with proof {proof}, claim {proof}/c-1, workspace {host.workspace}, budget JSON {json.dumps(budget)}. Report admission accurately; verification arrives asynchronously.'
                 if step == 'cycle':
@@ -331,7 +344,14 @@ def run(args):
                         search_row = operation
                         checks['verified_operation_result'] = operation['result'].get('mathematical_disposition') == 'lean-verified'
                         if step == 'cycle':
-                            checks['scheduler_selected_declaration'] = operation['result'].get('selected_move_id') == proof + '/fd-1'
+                            selected = operation['result'].get('selected_move_id')
+                            with host.service.lock:
+                                declarations = host.service.view.list_nodes(proof, 'FormalDeclaration')
+                                checks['scheduler_selected_declaration'] = any(d.node_id == selected for d in declarations)
+                                if intake_mode:
+                                    checks['generated_draft_committed'] = bool(host.service.view.edges_from(selected, 'DRAFTS_CLAIM'))
+                                    alignments = host.service.view.edges_to(selected, 'ALIGNS_DECLARATION')
+                                    checks['semantic_review_committed'] = any(host.service.view.node(e.src_id).fields.get('report_artifact') for e in alignments)
                             checks['formal_cycle_executed'] = operation['result'].get('cycle_disposition') == 'formal-executed'
                     if step in {'status', 'restart'}:
                         checks['model_reports_verification'] = 'lean-verified' in row['response'].lower() and proof in row['response']

@@ -28,6 +28,27 @@ class CycleWorkflow:
         service = self.service
         if category not in {None, 'formal-run'}:
             raise ValueError('only formal-run has a configured production cycle executor')
+        if service.intake is not None:
+            with service.lock:
+                saved = service.jobs.cycle_state(operation)
+                intake = service.jobs.intake_state(operation)
+                service.catch_up(proof)
+                revision = service.store.head(proof)[0]
+                if not saved and not intake and expected_revision is not None and revision != expected_revision:
+                    raise ValueError('proof changed before intake; review the original intent')
+                needs_intake = not saved and (bool(intake) or (revision > 0
+                    and not service._status(proof)['formal_verified']
+                    and not any(item.category == 'formal-run' for item in GlobalScheduler(service.view, service.store).build_frontier(proof))))
+            if needs_intake:
+                prepared = service.intake.run(operation, proof, cancelled=cancelled, on_progress=on_progress)
+                if not prepared['ready']:
+                    outcome = self._blocked(proof, 'cancelled' if prepared.get('cancelled') else 'waiting-on-review', **prepared)
+                    if prepared.get('cancelled'):
+                        outcome['lifecycle'] = 'cancelled'
+                    self._save(operation, {'contract_manifest': MANIFEST_HASH, 'proof_id': proof,
+                        'category': category, 'phase': 'finished', 'outcome': outcome})
+                    return outcome
+                expected_revision = prepared['revision']
         with service.lock:
             state = service.jobs.cycle_state(operation)
             if state:
