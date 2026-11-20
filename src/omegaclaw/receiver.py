@@ -287,8 +287,7 @@ class ReferenceReceiver:
                         self.service.jobs.update(job['operation_id'], {**outcome, 'phase': 'finished',
                             'transport_status': 'ok', 'operation_id': job['operation_id']})
             else:
-                with self._service_lock:
-                    outcome = self._execute_reference(request, operation_id)
+                outcome = self._execute_reference(request, operation_id)
             lifecycle = outcome.get('lifecycle') or ('failed' if outcome.get('phase') == 'failed'
                 or outcome.get('transport_status') == 'error' else 'succeeded')
         except Exception as exc:
@@ -305,12 +304,17 @@ class ReferenceReceiver:
     def _execute_reference(self, request, operation_id):
         if isinstance(request.action, SelectedProofCycle):
             action = request.action
-            outcome = self.service._cycle(action.proof_id, operation_id,
-                category=action.category, record_progress=False)
+            with self._service_lock:
+                outcome = self.service._cycle(action.proof_id, operation_id,
+                    category=action.category, record_progress=False)
         elif isinstance(request.action, QueueResearchMoves):
-            outcome = self.service.queue_research_moves(request.action,
-                expected_revision=request.preconditions.expected_revision)
+            with self._service_lock:
+                outcome = self.service.queue_research_moves(request.action,
+                    expected_revision=request.preconditions.expected_revision)
         else:
+            # Service admission/completion and its workflow stages own their
+            # locks. An enclosing lock would also cover provider I/O and waits
+            # for another execution of the same operation.
             outcome = self.service.submit(self._legacy_request(request))
         return outcome
 

@@ -54,6 +54,7 @@ class OperationService:
             intake_config.llm()  # Fail at startup if the selected credentials are absent.
         self.profile = profile
         self.lock = threading.RLock()
+        self._executing = {}
         self.receiver_mode = {"reference": "reference-scripted", "persistence": "persistence-scripted",
                               "production": "persistent-storage"}[profile]
         self._owns_artifacts = artifacts is None
@@ -108,21 +109,51 @@ class OperationService:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
-        if request["operation"] == "proof-cycle":
-            active = self.jobs.active_cycle(request["arguments"]["proof"], self.workspace,
-                excluding_request_id=request["request_id"])
-            if active:
-                return active
-        record, created = self.jobs.submit(request)
-        if not created and record["phase"] in ("finished", "failed"):
-            return record
-        operation_id = record["operation_id"]
+        with self.lock:
+            if request["operation"] == "proof-cycle":
+                active = self.jobs.active_cycle(request["arguments"]["proof"], self.workspace,
+                    excluding_request_id=request["request_id"])
+                if active:
+                    return active
+            record, created = self.jobs.submit(request)
+            if not created and record["phase"] in ("finished", "failed"):
+                return record
+            operation_id = record["operation_id"]
+            # Wait only on another execution of this operation, never while
+            # holding the shared journal/projection lock. Count waiters so the
+            # entry can be removed safely when the last caller leaves.
+            execution = self._executing.setdefault(operation_id, [threading.Lock(), 0])
+            execution[1] += 1
         try:
-            result = self._execute(request, operation_id)
+            with execution[0]:
+                with self.lock:
+                    latest = self.jobs.get(operation_id, self.workspace)
+                    if latest["phase"] in ("finished", "failed"):
+                        return latest
+                return self._run_admitted(request, operation_id)
+        finally:
+            with self.lock:
+                execution[1] -= 1
+                if execution[1] == 0:
+                    del self._executing[operation_id]
+
+    def _run_admitted(self, request, operation_id):
+        # These workflows own short locks around their durable stages. Their
+        # provider calls must run without an enclosing service lock.
+        staged_workflow = (request["operation"] == "hypothesis-formalize"
+            or request["operation"] == "lemma-bridge" and self.research is not None
+            or request["operation"] == "proof-cycle" and self.cycles is not None)
+        try:
+            if staged_workflow:
+                result = self._execute(request, operation_id)
+            else:
+                with self.lock:
+                    result = self._execute(request, operation_id)
             response = {"operation_id": operation_id, "phase": "finished", "transport_status": "ok", **result}
         except (ContractError, ValueError, KeyError) as exc:
             response = {"operation_id": operation_id, "phase": "failed", "transport_status": "error", "error_code": type(exc).__name__, "summary": str(exc)[:500]}
-        self.jobs.update(operation_id, response)
+        with self.lock:
+            self.jobs.update(operation_id, response)
         return response
 
     def close(self):
@@ -139,9 +170,10 @@ class OperationService:
         proof_id = args["proof"]
         if not _ID.fullmatch(proof_id):
             raise ContractError("invalid proof id")
-        if self.store.head(proof_id)[0] == 0:
-            raise ContractError("unknown proof")
-        self.catch_up(proof_id)
+        with self.lock:
+            if self.store.head(proof_id)[0] == 0:
+                raise ContractError("unknown proof")
+            self.catch_up(proof_id)
         if operation == "proof-status":
             return self._status(proof_id)
         if operation == "proof-audit":

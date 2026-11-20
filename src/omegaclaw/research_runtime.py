@@ -366,7 +366,8 @@ class ResearchWorkflow:
         finally:
             lease = state.get("lease")
             if lease:
-                service.store.release_lease(proof_id, lease["lease_id"], fencing_token=lease["fencing_token"])
+                with service.lock:
+                    service.store.release_lease(proof_id, lease["lease_id"], fencing_token=lease["fencing_token"])
 
     @staticmethod
     def _outcome(proof_id: str, obstruction_id: str, hypothesis_ids: list[str], state: dict) -> dict[str, Any]:
