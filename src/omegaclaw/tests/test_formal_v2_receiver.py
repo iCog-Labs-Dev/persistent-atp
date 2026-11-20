@@ -43,7 +43,7 @@ from omegaclaw.formal_runtime import FormalProviderConfig
 from omegaclaw.formal_runtime import FormalWorkflow
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
-from persistent_atp_client import (AsyncClient, Budget, CancelRequest, FormalSearch,
+from persistent_atp_client import (ArtifactRef, AsyncClient, Budget, CancelRequest, FormalSearch,
     HypothesisFormalize, Preconditions)
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 
@@ -220,6 +220,9 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
         assert outcome.result['phase'] == 'obstruction-ready'
         contexts = outcome.result['obstruction_contexts']
         assert len(contexts) == 1
+        for field in ('packet_artifact', 'manifest_artifact', 'payload_artifact'):
+            pointer = contexts[0][field]
+            assert await client.get_artifact(ArtifactRef(pointer), workspace_id='reference') == service.artifacts.get(pointer)
         obstruction_id = contexts[0]['obstruction_id']
         obstruction = service.view.node(obstruction_id)
         assert obstruction is not None and obstruction.label == 'Obstruction'

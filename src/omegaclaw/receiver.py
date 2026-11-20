@@ -337,22 +337,22 @@ class ReferenceReceiver:
 
     def _finish(self, operation_id, lifecycle, version, outcome):
         with self._lock:
+            owner = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (operation_id,)).fetchone()
+        pointers = []
+        if isinstance(outcome, dict):
+            pointers = list(outcome.get("artifact_pointers", ()))
+            pointers += [outcome[key] for key in ("packet_ref", "result_ref", "report_artifact", "export_artifact")
+                         if isinstance(outcome.get(key), str)]
+            pointers += self._bound_result_artifacts(request_from_json(owner['body']), outcome)
+        pointers = self._available_artifacts(pointers)
+        with self._lock:
             version = max(version, self._db.execute('SELECT observation_version FROM requests WHERE operation_id=?',
                 (operation_id,)).fetchone()['observation_version'])
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                if outcome is not None:
-                    pointers = list(outcome.get("artifact_pointers", ()))
-                    pointers += [outcome[key] for key in ("packet_ref", "result_ref", "report_artifact", "export_artifact")
-                                 if isinstance(outcome.get(key), str)]
-                    for pointer in pointers:
-                        try:
-                            ArtifactRef(pointer)
-                        except (ValueError, TypeError):
-                            continue
-                        if self.service.artifacts.exists(pointer):
-                            self._db.execute("INSERT OR IGNORE INTO artifact_grants VALUES (?,?,?)",
-                                (self.principal, self.workspace_id, pointer))
+                for pointer in pointers:
+                    self._db.execute("INSERT OR IGNORE INTO artifact_grants VALUES (?,?,?)",
+                        (owner['principal'], owner['workspace_id'], pointer))
                 self._db.execute("UPDATE requests SET lifecycle=?, observation_version=?, result=? WHERE operation_id=?",
                                  (lifecycle, version + 1, json.dumps(outcome, sort_keys=True), operation_id))
                 self._event(operation_id, lifecycle, version + 1)
@@ -360,6 +360,69 @@ class ReferenceReceiver:
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
+
+    def _available_artifacts(self, pointers):
+        available = set()
+        for pointer in pointers:
+            try:
+                ArtifactRef(pointer)
+            except (ValueError, TypeError):
+                continue
+            if self.service.artifacts.exists(pointer):
+                available.add(pointer)
+        return available
+
+    def _bound_result_artifacts(self, request, outcome):
+        """New result pointers must match committed records in the requested proof.
+
+        Do not recurse through model output or grant access from arbitrary hash
+        strings. These are the receiver's published research/obstruction fields.
+        """
+        action = request.action
+        proof = getattr(action, 'proof_id', None)
+        if not isinstance(outcome, dict) or not proof or outcome.get('proof_id') != proof:
+            return []
+        pointers = []
+        with self._service_lock:
+            self.service.catch_up(proof)
+            if isinstance(action, LemmaBridge) and outcome.get('obstruction_id') == action.obstruction_id:
+                ids = outcome.get('hypothesis_ids')
+                if isinstance(ids, list) and 1 <= len(ids) <= 3:
+                    for node_id in ids:
+                        if not isinstance(node_id, str) or not node_id.startswith(proof + '/'):
+                            break
+                        node = self.service.view.node(node_id)
+                        if (node is None or node.label != 'SpeculativeHypothesis'
+                                or action.obstruction_id not in node.fields.get('source_ids', [])
+                                or any(not isinstance(outcome.get(key), str)
+                                    or node.fields.get(key) != outcome[key]
+                                    for key in ('packet_artifact', 'result_artifact'))):
+                            break
+                    else:
+                        pointers.extend(outcome[key] for key in ('packet_artifact', 'result_artifact'))
+            if isinstance(action, (FormalSearch, ProofCycle, SelectedProofCycle)):
+                for context in outcome.get('obstruction_contexts', []):
+                    if not isinstance(context, dict):
+                        continue
+                    obstruction_id = context.get('obstruction_id')
+                    if not isinstance(obstruction_id, str) or not obstruction_id.startswith(proof + '/'):
+                        continue
+                    obstruction = self.service.view.node(obstruction_id)
+                    run = outcome.get('run_id')
+                    if (obstruction is None or obstruction.label != 'Obstruction'
+                            or obstruction.fields.get('formal_run_id') != run
+                            or not any(edge.src_id == run for edge in
+                                self.service.view.edges_to(obstruction_id, 'RAISED_OBSTRUCTION'))):
+                        continue
+                    bindings = {'packet_artifact': 'artifact_hash', 'manifest_artifact': 'report_artifact',
+                                'payload_artifact': 'result_artifact'}
+                    for edge in self.service.view.edges_from(obstruction_id, 'HAS_ARTIFACT'):
+                        record = self.service.view.node(edge.dst_id)
+                        if (record is not None and record.label == 'Artifact'
+                                and all(isinstance(context.get(key), str)
+                                    and record.fields.get(field) == context[key] for key, field in bindings.items())):
+                            pointers.extend(context[key] for key in bindings)
+        return pointers
 
     async def lookup_request(self, workspace_id: str, request_id: str) -> Admission | None:
         self._scope(workspace_id)
@@ -377,6 +440,13 @@ class ReferenceReceiver:
             raise KeyError("operation not found")
         request = request_from_json(row["body"])
         outcome = json.loads(row["result"]) if row["result"] else None
+        if row['lifecycle'] in TERMINAL_LIFECYCLES and outcome is not None:
+            # Repair missing grants for already completed operations from an
+            # older receiver without changing their observation or proof revision.
+            pointers = self._available_artifacts(self._bound_result_artifacts(request, outcome))
+            with self._lock:
+                self._db.executemany('INSERT OR IGNORE INTO artifact_grants VALUES (?,?,?)',
+                    [(row['principal'], row['workspace_id'], pointer) for pointer in pointers])
         proof_id = getattr(request.action, "proof_id", None) or (outcome or {}).get("proof_id")
         with self._service_lock:
             head = self.service.store.head(proof_id) if proof_id else (None, None)
