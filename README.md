@@ -123,6 +123,33 @@ and explicit reasons. Logs and reports remain outside Git. Live model calls
 use the configured provider; passing generation checks do not establish
 mathematical verification.
 
+For model-driven ATP acceptance, use a production receiver configuration with
+`formal_provider: true`, a compatible formal provider, PostgreSQL artifacts, and
+preloaded native MORK. The runner owns the receiver HTTP process and recreates
+it against the same durable storage during recovery checks:
+
+```bash
+scripts/with-mork.sh .venv/bin/python -m omegaclaw.playground \
+  --atp --atp-config formal --atp-input /absolute/path/to/reviewed-input.json \
+  --build-image --provider DeepSeek --output .runs/omega-atp
+```
+
+The trusted host input contains `spec` (the complete theorem specification),
+`declaration` (`source`, `lean_name`, `lean_type`, `toolchain`), and `review`.
+The source path is relative to the input file. The review must include
+`reviewer`, `rationale`, `verdict: "aligned"`, `claim_text`, `lean_name`,
+`lean_type`, `toolchain`, `source_hash`, `spec_hash`, and `environment_hash`.
+Hashes use `sha256:<hex>`; `spec_hash` binds the canonical JSON specification.
+The review must match every supplied value and the actual provider environment.
+This file authorizes host-side declaration intake; it is never a model tool.
+
+Omega calls creation, formal search, status, audit, and export through its real
+tools. Acceptance independently checks native replay receipts, journal hashes,
+artifact bytes, MORK projection, and recovery after both Omega and the receiver
+restart. Each run saves actual query/response pairs and the verified export.
+This mode tests a prepared declaration; automatic formalization and review of a
+new theorem remain separate integration work.
+
 The full container test builds from a locally pulled official image and uses a
 local model stub, an isolated proxy port, a reference receiver, and an Omega
 restart. It makes no paid provider calls:

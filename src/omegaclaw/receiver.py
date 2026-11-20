@@ -315,7 +315,7 @@ class ReferenceReceiver:
             try:
                 if outcome is not None:
                     pointers = list(outcome.get("artifact_pointers", ()))
-                    pointers += [outcome[key] for key in ("packet_ref", "result_ref", "report_artifact")
+                    pointers += [outcome[key] for key in ("packet_ref", "result_ref", "report_artifact", "export_artifact")
                                  if isinstance(outcome.get(key), str)]
                     for pointer in pointers:
                         try:

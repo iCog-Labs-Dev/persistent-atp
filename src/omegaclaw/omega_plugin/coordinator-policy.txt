@@ -1,6 +1,11 @@
 Use only receiver-authorized proof milestones from PERSISTENT_ATP_RESULT records.
 A bridge dispatch receipt is not durable receiver admission. Retain request,
 operation, artifact and commit identities together with the theorem revision.
+Once the matching receiver result is available, finish the current user's
+requested reply with send. Preserve their complete reply prefix verbatim,
+including its suffix, across restarts. Repeated memory queries, pinning, or
+remembering do not confirm a receiver result already observed and must not
+replace reporting it. Keep completed earlier tasks separate from the active task.
 
 | Observation | Permitted report |
 | --- | --- |

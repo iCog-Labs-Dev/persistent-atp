@@ -315,6 +315,24 @@ def test_separate_native_replay_and_gate_promotion(provider, tmp_path):
         assert result.result['replay_status'] == 'verified'
         assert result.mathematical_disposition == 'lean-verified'
         assert (await client.status(workspace_id='reference', proof_id='p1')).formal_verified
+        audit = await (await client.proof_audit('p1', workspace_id='reference')).wait(timeout=10)
+        assert audit.result['audit_status'] == 'ok'
+        exported = await (await client.proof_export('p1', 'default', workspace_id='reference')).wait(timeout=10)
+        from persistent_atp_client import ArtifactRef
+        from omegaclaw.export import check_export
+        import json
+        bundle = await client.get_artifact(ArtifactRef(exported.result['export_artifact']), workspace_id='reference')
+        checked = check_export(bundle)
+        assert checked['revision'] == service.store.head('p1')[0]
+        included = set(json.loads(bundle)['artifacts'])
+        for node in service.view.list_nodes('p1', 'Certificate'):
+            assert {node.fields[k] for k in ('artifact_hash', 'binding_artifact_hash',
+                'input_artifact_hash', 'source_artifact_hash')} <= included
+        for node in service.view.list_nodes('p1', 'LeanReplay'):
+            assert node.fields['receipt_artifact'] in included
+        for node in service.view.list_nodes('p1', 'FormalRun'):
+            provider_result = json.loads(service.artifacts.get(node.fields['provider_result_artifact']))
+            assert {item['sha256'] for item in provider_result['artifacts']} <= included
         assert backend.replays == 1
     try: asyncio.run(scenario())
     finally:

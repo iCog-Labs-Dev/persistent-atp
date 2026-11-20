@@ -235,22 +235,28 @@ class Session:
 
 
 class Docker:
-    def __init__(self, image, provider, model, output, run_id, ws_port):
+    def __init__(self, image, provider, model, output, run_id, ws_port, *, atp=None):
         self.image, self.provider, self.model, self.output = image, provider, model, output
         self.name, self.volume = 'omega-playground-' + run_id, 'omega-playground-memory-' + run_id
         self.ws_port, self.proxy_port = ws_port, free_port()
         self.key_name = PROVIDERS[provider][0]
         self.key = os.environ.get(self.key_name, '')
+        self.atp = atp
         if not self.key:
             raise ValueError(self.key_name + ' is not configured')
         self.owned = False
 
     def scrub(self, text):
-        return text.replace(self.key, '[REDACTED]') if self.key else text
+        for secret in (self.key, (self.atp or {}).get('PERSISTENT_ATP_OMEGA_TOKEN')):
+            if secret:
+                text = text.replace(secret, '[REDACTED]')
+        return text
 
     def call(self, *args, timeout=40, required=True):
+        environment = os.environ.copy()
+        environment.update(self.atp or {})
         result = subprocess.run(['docker', *args], capture_output=True, text=True,
-            timeout=timeout, env=os.environ.copy())
+            timeout=timeout, env=environment)
         result.stdout, result.stderr = self.scrub(result.stdout), self.scrub(result.stderr)
         if required and result.returncode:
             raise RuntimeError('docker ' + args[0] + ': ' + result.stderr[-1500:])
@@ -270,6 +276,8 @@ class Docker:
             path.chmod(0o644)
             self.call('volume', 'create', '--label', 'persistent-atp.omega-playground=' + self.name, self.volume)
         self.owned = True  # Cleanup checks the ownership label even after a failed start.
+        enabled = 'enabled' if self.atp else 'disabled'
+        bridge_environment = [item for name in (self.atp or {}) for item in ('-e', name)]
         result = self.call('run', '-d', '-it', '--name', self.name, '--network=host', '--init',
             '--label', 'persistent-atp.omega-playground=' + self.name,
             '--security-opt=no-new-privileges:true', '--tmpfs', '/tmp:size=64m,mode=1777,exec',
@@ -277,11 +285,13 @@ class Docker:
             '--volume', self.volume + ':' + MEMORY,
             '--mount', f'type=bind,src={self.output / "nginx.conf.template"},dst=/opt/nginx/playground-template,readonly',
             '-e', self.key_name, '-e', 'NGINX_TEMPLATE=/opt/nginx/playground-template',
-            '-e', 'IMPORT_KB_ON_START=0', '-e', 'OMEGA_persistentAtpEnabled=disabled',
+            '-e', 'IMPORT_KB_ON_START=0', '-e', 'OMEGA_persistentAtpEnabled=' + enabled,
+            *bridge_environment,
             self.image, 'commchannel=websocket', f'WS_URL=ws://127.0.0.1:{self.ws_port}',
             'provider=' + self.provider, 'model=' + self.model, 'embeddingprovider=Local',
-            f'GATEWAY_URL=http://localhost:{self.proxy_port}', 'persistentAtpEnabled=disabled',
-            'showStartupVersion=false', 'maxNewInputLoops=12', 'maxOutputToken=3000',
+            f'GATEWAY_URL=http://localhost:{self.proxy_port}', 'persistentAtpEnabled=' + enabled,
+            'persistentAtpWorkspace=' + (self.atp or {}).get('PERSISTENT_ATP_OMEGA_WORKSPACE', 'reference'),
+            'showStartupVersion=false', 'maxNewInputLoops=' + ('24' if self.atp else '12'), 'maxOutputToken=3000',
             'sleepInterval=1', 'wakeupInterval=3600', 'maxWakeLoops=0')
         self.container_id = result.stdout.strip()
 
@@ -436,9 +446,20 @@ def main(argv=None):
     parser.add_argument('--cases', help='Comma-separated case IDs; default runs every standalone case')
     parser.add_argument('--list', action='store_true', help='List cases without starting Docker or calling a model')
     parser.add_argument('--keep-container', action='store_true')
+    parser.add_argument('--atp', action='store_true', help='Run model-driven proof acceptance against a production receiver')
+    parser.add_argument('--atp-config', default=os.environ.get('OMEGA_PLAYGROUND_ATP_CONFIG', 'formal'))
+    parser.add_argument('--atp-input', default=os.environ.get('OMEGA_PLAYGROUND_ATP_INPUT'),
+        help='Trusted host JSON containing the exact theorem, declaration, and bound alignment review')
     args = parser.parse_args(argv)
     if args.timeout <= 0 or args.startup_timeout <= 0:
         parser.error('timeouts must be positive')
+    if args.atp:
+        from .playground_atp import run
+        if not args.atp_input and not args.list:
+            parser.error('--atp requires --atp-input or OMEGA_PLAYGROUND_ATP_INPUT')
+        if args.cases:
+            parser.error('--atp runs its complete acceptance sequence; --cases selects standalone cases')
+        return run(args)
     run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:6]
     catalog = cases(run_id)
     if args.list:

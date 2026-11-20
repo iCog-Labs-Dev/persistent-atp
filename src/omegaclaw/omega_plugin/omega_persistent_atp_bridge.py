@@ -1,6 +1,7 @@
 """String-only Omega bridge. Workers never call Janus or mutate atomspaces."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -20,7 +21,12 @@ _observe_offset = 0
 
 
 def reporting_policy():
-    return Path(__file__).with_name("coordinator-policy.txt").read_text()
+    workspace = json.dumps(os.environ.get('PERSISTENT_ATP_OMEGA_WORKSPACE', 'reference'))
+    return (f'The configured persistent-ATP workspace argument is exactly {workspace}. '
+        'Use this exact value for every proof tool. The Omega agent name is not a workspace. '
+        'An immediate transport_status=error is a rejected bridge call: report its error_code; '
+        'no asynchronous result will arrive for that call. Do not search memory for an admission.\n\n'
+        + Path(__file__).with_name("coordinator-policy.txt").read_text())
 
 
 def disable():

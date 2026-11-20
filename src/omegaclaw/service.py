@@ -389,7 +389,8 @@ class OperationService:
             "literal_target": claim.fields["claim_text"] if claim else None,
             "target_media_type": "application/json" if claim and project and project.fields["target_artifact"] != claim.fields["literal_target_hash"] else "text/plain; charset=utf-8",
             "artifact_pointers": list(dict.fromkeys([project.fields["target_artifact"], claim.fields["literal_target_hash"]])) if claim and project else [],
-            "summary": f"claim remains {status}; independent Lean replay not recorded"}
+            "summary": ("Target is lean-verified through independently replayed, committed evidence."
+                if status == "lean-verified" else f"claim remains {status}; independent Lean replay not recorded")}
 
     def _cycle(self, proof_id: str, operation_id: str, *, category: str | None = None,
                record_progress: bool = True) -> dict:
@@ -559,7 +560,7 @@ class OperationService:
             "audit_status": "ok" if not missing else "failed"}
 
     def _artifact_pointers(self, proof_id: str) -> list[str]:
-        return sorted(referenced_artifacts(self.store.read_events(proof_id)))
+        return sorted(referenced_artifacts(self.store.read_events(proof_id), read=self.artifacts.get))
 
     def _export(self, proof_id: str, destination: str) -> dict:
         if destination != "default":
