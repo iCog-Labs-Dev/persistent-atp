@@ -334,8 +334,10 @@ def collect_sources(
     if "diagnostic" in emittable:
         for owner_id in sorted(list(bodies)):
             owner = bodies[owner_id]
-            for key in _DIAGNOSTIC_FIELDS:
-                digest = owner.get(key)
+            diagnostics = [owner.get(key) for key in _DIAGNOSTIC_FIELDS]
+            if isinstance(owner.get('diagnostic_artifacts'), (list, tuple)):
+                diagnostics.extend(owner['diagnostic_artifacts'])
+            for digest in diagnostics:
                 if not (isinstance(digest, str) and _SHA256.fullmatch(digest)):
                     continue
                 if digest in bodies:

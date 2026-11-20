@@ -107,7 +107,9 @@ class ReferenceReceiver:
         available = self.service.formal is not None and self.service.formal.ready()
         if self.service.profile == "production":
             actions = {kind: value for kind, value in actions.items() if kind in {
-                "proof-create", "proof-status", "proof-audit", "proof-export", *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if available else set())}}
+                "proof-create", "proof-status", "proof-audit", "proof-export",
+                *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if available else set()),
+                *({'lemma-bridge'} if self.service.research is not None else set())}}
         elif self.service.formal is not None:
             actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
                        and (kind != 'formal-search' or available)}

@@ -64,6 +64,23 @@ def test_reference_receiver_durable_admission_gate_and_restart(tmp_path):
     asyncio.run(scenario())
 
 
+def test_production_advertises_lemma_bridge_only_with_research_worker(tmp_path):
+    service = OperationService(tmp_path)
+    receiver = ReferenceReceiver(service)
+    service.profile = "production"
+
+    async def scenario():
+        assert "lemma-bridge" not in (await receiver.capabilities()).actions
+        service.research = object()
+        assert "lemma-bridge" in (await receiver.capabilities()).actions
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        receiver.close()
+        service.close()
+
+
 def test_reference_http_port_matches_local_contract(tmp_path):
     service = OperationService(tmp_path)
     receiver = ReferenceReceiver(service)

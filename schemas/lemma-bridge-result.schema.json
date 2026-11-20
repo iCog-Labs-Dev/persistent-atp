@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://persistent-atp.invalid/schemas/lemma-bridge-result.schema.json",
+  "title": "LemmaBridgeResultV1",
+  "description": "Bounded research suggestions from an LLM. These are speculative inputs, never proof evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidates"],
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/candidate"}
+    }
+  },
+  "$defs": {
+    "shortText": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "textList": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/shortText"}
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "novelty", "cost", "risk", "falsification_test", "expiry_review", "consequences"],
+      "properties": {
+        "statement": {"$ref": "#/$defs/shortText"},
+        "novelty": {"$ref": "#/$defs/shortText"},
+        "cost": {"$ref": "#/$defs/shortText"},
+        "risk": {"$ref": "#/$defs/shortText"},
+        "falsification_test": {"$ref": "#/$defs/shortText"},
+        "expiry_review": {"$ref": "#/$defs/shortText"},
+        "consequences": {"$ref": "#/$defs/textList"}
+      }
+    }
+  }
+}

@@ -79,14 +79,16 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
-        self.formal = self.cycles = self.intake = None
+        self.formal = self.cycles = self.intake = self.research = None
         if formal_config is not None:
             self.formal = FormalWorkflow(self, formal_config)
             from .cycle_runtime import CycleWorkflow
             self.cycles = CycleWorkflow(self)
         if intake_config is not None:
             from .intake_runtime import IntakeWorkflow
+            from .research_runtime import ResearchWorkflow
             self.intake = IntakeWorkflow(self, intake_config)
+            self.research = ResearchWorkflow(self, intake_config)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:
@@ -99,7 +101,8 @@ class OperationService:
         request = validate_request(raw)
         if self.profile == "production" and request["operation"] not in {
                 "proof-create", "proof-status", "proof-audit", "proof-export",
-                *({"proof-cycle"} if self.cycles is not None else set())}:
+                *({"proof-cycle"} if self.cycles is not None else set()),
+                *({"lemma-bridge"} if self.research is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
@@ -263,6 +266,8 @@ class OperationService:
             self.store.release_lease(proof_id, lease_id, fencing_token=row.fencing_token)
 
     def _bridge(self, proof_id: str, obstruction_id: str, operation_id: str) -> dict:
+        if self.research is not None:
+            return self.research.run(proof_id, obstruction_id, operation_id)
         obstruction = self.view.node(obstruction_id)
         if obstruction is None or obstruction.label != "Obstruction" or not obstruction_id.startswith(proof_id + "/"):
             raise ContractError("unknown obstruction")

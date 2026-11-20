@@ -376,6 +376,9 @@ class FormalWorkflow:
                 raise FormalV2Error('formal observation deadline exceeded; retain original request for reconciliation')
             time.sleep(self.config.poll_seconds)
         result = state['binding']['snapshot']['result']
+        if not cancelled() and result['disposition'] == 'stagnated':
+            from .obstruction_runtime import prepare_obstruction_context
+            prepare_obstruction_context(self, operation, state)
         if cancelled() or result['disposition'] != 'proved-pending-replay':
             return self._report(state, lifecycle='cancelled' if cancelled() else 'succeeded')
         if self.config.mode != 'real':
@@ -443,5 +446,8 @@ class FormalWorkflow:
             'lifecycle': lifecycle, 'mathematical_disposition': disposition,
             'claim_status': state.get('claim_status'),
             **({'selected_move_id': state['selected_move_id']} if 'selected_move_id' in state else {}),
+            **({'obstruction_contexts': [{'obstruction_id': key, **{field: value for field, value in entry.items()
+                if field.endswith('_artifact')}} for key, entry in sorted(state['obstruction_dispatches'].items())]}
+                if state.get('obstruction_dispatches') else {}),
             'budget': snapshot.get('budget'), 'replay_status': state.get('receipt', {}).get('status'),
             'component_mode': 'formal-v2-' + self.config.mode}

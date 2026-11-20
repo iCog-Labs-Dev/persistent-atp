@@ -1,6 +1,7 @@
 """PR85/95 receiver wiring. The backend fixture is scripted, not a trained model."""
 import asyncio
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ from maths_ai.formal.service import FormalService
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
 from mathproof.maths_ai_http import MathsAIHTTPFormalATP, MathsAIAPIError as FormalV2Error
+from mathproof.scheduler import GlobalScheduler
 from omegaclaw.formal_runtime import FormalProviderConfig
 from omegaclaw.formal_runtime import FormalWorkflow
 from omegaclaw.service import OperationService
@@ -52,6 +54,7 @@ def provider(tmp_path, monkeypatch):
         delay = 0
         replays = 0
         active = False
+        stagnate = False
         def ready(self): return True
         def imports(self): return []
         def environment_manifest(self): return {'fixture': 'scripted-search-native-replay'}
@@ -66,6 +69,10 @@ def provider(tmp_path, monkeypatch):
             self.active = True
             try:
                 await asyncio.sleep(self.delay)
+                if self.stagnate:
+                    # Exercise the real provider's typed unsuccessful outcome
+                    # without claiming a counterexample or a Lean rejection.
+                    return AttemptOutcome('frontier-exhausted', steps_used=1)
                 trace = {'goal': task.statement['expression'], 'tactic': 'trivial', 'arguments': [], 'subgoals': []}
                 certificate = {'format': 'maths-ai-accepted-certificate-v1', 'statement': task.statement, 'proof_trace': trace}
                 return AttemptOutcome('certified', True, 1, trace, certificate)
@@ -161,6 +168,126 @@ def test_search_admission_lost_reply_is_reconciled_without_duplicate_run(provide
         assert (await client.submit(request)).ref == handle.ref
         assert 'search_lease' not in str(result.result) and 'fencing_token' not in str(result.result)
     try: asyncio.run(scenario())
+    finally:
+        receiver.close()
+        service.close()
+
+
+def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(provider, tmp_path, monkeypatch):
+    """A stagnated result becomes a compiled packet and only a speculative LLM proposal."""
+    deployment, backend, *_ = provider
+    backend.stagnate = True
+    service, receiver = configured(tmp_path / 'receiver', deployment)
+    save = FormalWorkflow._save
+    injected_duplicate = False
+
+    def save_with_legacy_environment_edge(workflow, operation, state):
+        nonlocal injected_duplicate
+        save(workflow, operation, state)
+        if state.get('phase') != 'search-admitted' or injected_duplicate:
+            return
+        injected_duplicate = True
+        run_id = state['run_id']
+        environment_id = service.view.edges_from(run_id, 'RAN_UNDER')[0].dst_id
+        lease = service.store.issue_lease(
+            'p1', 'p1/legacy-ran-under', actor='legacy-fixture',
+            worker_class='coordinator', selected_move_id=run_id,
+        )
+        try:
+            committed = service.gate.commit(Proposal('p1', lease.actor, lease.worker_class,
+                ops=(AddEdge('RAN_UNDER', run_id, environment_id, 'p1/legacy-ran-under-edge'),),
+                base_revision=lease.base_revision, lease_id=lease.lease_id,
+                fencing_token=lease.fencing_token, selected_move_id=run_id))
+            assert committed.accepted, committed.to_dict()
+            service.catch_up('p1')
+        finally:
+            service.store.release_lease('p1', lease.lease_id, fencing_token=lease.fencing_token)
+
+    monkeypatch.setattr(FormalWorkflow, '_save', save_with_legacy_environment_edge)
+
+    async def scenario():
+        client = AsyncClient(LocalReceiverAdapter(receiver))
+        request = client.prepare(
+            FormalSearch('p1', 'p1/c-1', Budget(5, 3000)),
+            workspace_id='reference',
+            request_id='stagnated-search',
+        )
+        handle = await client.submit(request)
+        outcome = await handle.wait(timeout=15, poll_interval=.05)
+        assert outcome.lifecycle == 'succeeded', outcome.result
+        assert outcome.result['mathematical_disposition'] == 'stagnated'
+        assert outcome.result['phase'] == 'obstruction-ready'
+        contexts = outcome.result['obstruction_contexts']
+        assert len(contexts) == 1
+        obstruction_id = contexts[0]['obstruction_id']
+        obstruction = service.view.node(obstruction_id)
+        assert obstruction is not None and obstruction.label == 'Obstruction'
+        assert obstruction.fields['formal_run_id'] == outcome.result['run_id']
+        assert obstruction.fields['formal_state_ids']
+        assert obstruction.fields['diagnostic_artifacts']
+        assert service.view.edges_to(obstruction_id, 'RESOLVES')[0].src_id == 'p1/c-1'
+        assert len(service.view.edges_from(outcome.result['run_id'], 'RAN_UNDER')) == 1
+        assert any(candidate.move_id == obstruction_id and candidate.category == 'obstruction-task'
+            for candidate in GlobalScheduler(service.view, service.store).build_frontier('p1'))
+        state_edges = service.view.edges_from(obstruction_id, 'AT_STATE')
+        assert len(state_edges) == 1
+        failed_state = service.view.node(state_edges[0].dst_id)
+        assert failed_state.fields['context_scope'] == 'admitted-root'
+        assert failed_state.fields['target'] == '(:c True)'
+        assert failed_state.fields['hypotheses'] == []
+        assert service.view.edges_from(obstruction_id, 'HAS_ARTIFACT')
+
+        context_ref = contexts[0]['payload_artifact']
+        payload = json.loads(service.artifacts.get(context_ref))
+        assert payload['obstruction_id'] == obstruction_id
+        assert payload['formal_state_ids'] == [failed_state.node_id]
+        packet = service.artifacts.get(contexts[0]['packet_artifact']).decode('utf-8')
+        assert 'id=p1/c-1' in packet
+        assert 'statement:' in packet
+
+        from types import SimpleNamespace
+        from alignment.llm_client import MockLLMClient
+        from omegaclaw.research_runtime import ResearchWorkflow
+        llm = MockLLMClient(responses=[{"candidates": [{
+            "statement": "Prove the successor case through an intermediate equality.",
+            "novelty": "Separates the successor step from the base case.",
+            "cost": "One auxiliary lemma and one bounded formal search.",
+            "risk": "The equality may not follow from the current assumptions.",
+            "falsification_test": "Attempt to prove the auxiliary equality under the pinned environment.",
+            "expiry_review": "Review after one failed formal attempt.",
+            "consequences": ["May reduce the original target to a simpler equality."],
+        }]}])
+        service.research = ResearchWorkflow(
+            service, SimpleNamespace(provider="fixture", timeout=5), llm_factory=lambda: llm,
+        )
+        bridge = service.submit({
+            "schema_version": 1,
+            "request_id": "stagnated-bridge",
+            "workspace": "reference",
+            "operation": "lemma-bridge",
+            "arguments": {"proof": "p1", "obstruction": obstruction_id},
+        })
+        assert bridge["phase"] == "finished", bridge
+        assert bridge["hypothesis_status"] == "speculative"
+        assert len(bridge["hypothesis_ids"]) == 1
+        hypothesis = service.view.node(bridge["hypothesis_ids"][0])
+        assert hypothesis.label == "SpeculativeHypothesis"
+        assert hypothesis.fields["support"] == "LLM-generated research suggestion; no proof or verification is asserted."
+        assert obstruction_id in hypothesis.fields["source_ids"]
+        assert packet in llm.history[0][1]
+        assert service.view.node("p1/c-1").fields["status"] == "provisional"
+        assert len(service.view.list_nodes("p1", "FormalDeclaration")) == 1
+        operation_id = service.jobs.conn.execute(
+            "SELECT operation_id FROM operations WHERE request_id='stagnated-bridge'"
+        ).fetchone()[0]
+        revision = service.store.head("p1")[0]
+        recovered = service.research.run("p1", obstruction_id, operation_id)
+        assert recovered["hypothesis_ids"] == bridge["hypothesis_ids"]
+        assert service.store.head("p1")[0] == revision
+        assert len(llm.history) == 1
+
+    try:
+        asyncio.run(scenario())
     finally:
         receiver.close()
         service.close()

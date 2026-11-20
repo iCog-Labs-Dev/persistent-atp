@@ -24,7 +24,7 @@ class JobLedger:
             operation TEXT NOT NULL, phase TEXT NOT NULL, response TEXT NOT NULL
         )""")
         columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}
-        for column in ('formal_json', 'cycle_json', 'intake_json'):
+        for column in ('formal_json', 'cycle_json', 'intake_json', 'research_json'):
             if column not in columns:
                 self.conn.execute(f'ALTER TABLE operations ADD COLUMN {column} TEXT')
 
@@ -104,3 +104,13 @@ class JobLedger:
             (json.dumps(state, sort_keys=True, allow_nan=False), operation_id)).rowcount
         if changed != 1:
             raise ValueError('intake requires a durably admitted operation')
+
+    def research_state(self, operation_id: str) -> dict:
+        row = self.conn.execute('SELECT research_json FROM operations WHERE operation_id=?', (operation_id,)).fetchone()
+        return json.loads(row['research_json']) if row and row['research_json'] else {}
+
+    def save_research(self, operation_id: str, state: dict) -> None:
+        changed = self.conn.execute('UPDATE operations SET research_json=? WHERE operation_id=?',
+            (json.dumps(state, sort_keys=True, allow_nan=False), operation_id)).rowcount
+        if changed != 1:
+            raise ValueError('research requires a durably admitted operation')
