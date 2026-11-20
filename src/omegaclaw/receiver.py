@@ -107,7 +107,7 @@ class ReferenceReceiver:
         available = self.service.formal is not None and self.service.formal.ready()
         if self.service.profile == "production":
             actions = {kind: value for kind, value in actions.items() if kind in {
-                "proof-create", "proof-status", "proof-audit", "proof-export", *({'formal-search'} if available else set())}}
+                "proof-create", "proof-status", "proof-audit", "proof-export", *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if available else set())}}
         elif self.service.formal is not None:
             actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
                        and (kind != 'formal-search' or available)}
@@ -134,6 +134,9 @@ class ReferenceReceiver:
                 raise IdempotencyConflict("request ID reused with a different body", request_id=request.request_id)
             return Admission(request.request_id, digest, True,
                              OperationRef(self.workspace_id, existing["operation_id"]))
+        if (self.service.cycles is not None and isinstance(request.action, SelectedProofCycle)
+                and request.action.category != 'formal-run'):
+            raise UnsupportedCapability('selected category has no configured cycle executor')
         capabilities = await self.capabilities(request.contract_version)
         if request.action.kind not in capabilities.actions:
             raise UnsupportedCapability("action is unavailable under this contract version")
@@ -212,6 +215,7 @@ class ReferenceReceiver:
         if isinstance(action, ProofCreate):
             raw = self._artifact(action.spec_artifact.hash).decode("utf-8")
             args = {"spec": raw}
+        elif isinstance(action, SelectedProofCycle): args = {"proof": action.proof_id, "category": action.category}
         elif isinstance(action, ProofCycle): args = {"proof": action.proof_id}
         elif isinstance(action, ProofStatus): args = {"proof": action.proof_id}
         elif isinstance(action, ProofAudit): args = {"proof": action.proof_id}
@@ -245,9 +249,11 @@ class ReferenceReceiver:
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
+        job = None
         try:
             request = request_from_json(row["body"])
-            if isinstance(request.action, FormalSearch) and self.service.formal is not None:
+            native_cycle = isinstance(request.action, (ProofCycle, SelectedProofCycle)) and self.service.cycles is not None
+            if (isinstance(request.action, FormalSearch) and self.service.formal is not None) or native_cycle:
                 raw = self._legacy_request(request)
                 with self._service_lock:
                     job, _ = self.service.jobs.submit(raw)
@@ -258,11 +264,17 @@ class ReferenceReceiver:
                         with self._lock:
                             return self._db.execute('SELECT lifecycle FROM requests WHERE operation_id=?',
                                 (operation_id,)).fetchone()['lifecycle'] == 'cancelling'
-                    outcome = self.service.formal.run(job['operation_id'], request.action.proof_id,
-                        request.action.claim_id, {'max_steps': request.action.budget.max_steps,
-                            'wall_clock_ms': request.action.budget.wall_clock_ms}, cancelled=cancelled,
-                        expected_revision=request.preconditions.expected_revision,
-                        on_progress=lambda report: self._progress(operation_id, report))
+                    if native_cycle:
+                        outcome = self.service.cycles.run(job['operation_id'], request.action.proof_id,
+                            category=getattr(request.action, 'category', None), cancelled=cancelled,
+                            expected_revision=request.preconditions.expected_revision,
+                            on_progress=lambda report: self._progress(operation_id, report))
+                    else:
+                        outcome = self.service.formal.run(job['operation_id'], request.action.proof_id,
+                            request.action.claim_id, {'max_steps': request.action.budget.max_steps,
+                                'wall_clock_ms': request.action.budget.wall_clock_ms}, cancelled=cancelled,
+                            expected_revision=request.preconditions.expected_revision,
+                            on_progress=lambda report: self._progress(operation_id, report))
                     with self._service_lock:
                         self.service.jobs.update(job['operation_id'], {**outcome, 'phase': 'finished',
                             'transport_status': 'ok', 'operation_id': job['operation_id']})
@@ -276,6 +288,10 @@ class ReferenceReceiver:
             outcome = {'error_code': getattr(exc, 'code', type(exc).__name__),
                 'summary': getattr(exc, 'public_summary',
                     'Operation requires reconciliation; no mathematical outcome is inferred.')}
+            if job is not None:
+                with self._service_lock:
+                    self.service.jobs.update(job['operation_id'], {**outcome, 'phase': 'failed',
+                        'lifecycle': 'failed', 'transport_status': 'error', 'operation_id': job['operation_id']})
         self._finish(operation_id, lifecycle, version, outcome)
 
     def _execute_reference(self, request, operation_id):
@@ -484,8 +500,10 @@ class ReferenceReceiver:
         body = canonical_json(control)
         with self._lock:
             row = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (ref.operation_id,)).fetchone()
-            if not isinstance(request_from_json(row['body']).action, FormalSearch):
-                raise UnsupportedCapability('only formal-search operations support cancellation')
+            action = request_from_json(row['body']).action
+            if not (isinstance(action, FormalSearch) or self.service.cycles is not None
+                    and isinstance(action, (ProofCycle, SelectedProofCycle))):
+                raise UnsupportedCapability('operation has no configured cancellation handler')
             previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
                 (self.principal, self.workspace_id, control.request_id)).fetchone()
             if previous:

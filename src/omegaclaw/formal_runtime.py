@@ -181,7 +181,7 @@ class FormalWorkflow:
         if not result.accepted:
             raise FormalV2Error('commit gate rejected formal evidence; review current revision and authority')
 
-    def _prepare(self, operation, proof, claim, budget, client, deployment):
+    def _prepare(self, operation, proof, claim, budget, client, deployment, *, selection=None):
         identity, profile, selected = deployment
         service = self.service
         declarations = [edge.dst_id for edge in service.view.edges_from(claim, 'FORMALIZES')]
@@ -192,6 +192,8 @@ class FormalWorkflow:
         declarations = sorted({name for name in declarations if service.view.node(name)
             and service.view.node(name).label == 'FormalDeclaration'
             and service.view.node(name).fields.get('status') in {'aligned', 'searching'}})
+        if selection is not None:
+            declarations = [name for name in declarations if name == selection['declaration_id']]
         if len(declarations) != 1:
             raise FormalV2Error('one reviewed formal declaration is required for this claim')
         declaration = service.view.node(declarations[0])
@@ -213,8 +215,14 @@ class FormalWorkflow:
         number = int(content_hash(operation)[7:], 16)
         run, root, checkpoint = f'{proof}/fr-{number}', f'{proof}/fs-{number}', f'{proof}/fc-{number}'
         actor = 'omega-formal-atp'
+        if selection is not None:
+            original = SimpleNamespace(**selection['selection_lease'])
+            if (original.proof_id != proof or original.worker_class != 'formal-atp'
+                    or original.actor != actor or original.selected_move_id != declaration.node_id):
+                raise FormalV2Error('cycle selection does not authorize this declaration')
         if service.view.node(run) is None:
-            seed = service.store.issue_lease(proof, f'{proof}/prepare-{operation}', actor='omega-coordinator',
+            seed = original if selection is not None else service.store.issue_lease(
+                proof, f'{proof}/prepare-{operation}', actor='omega-coordinator',
                 worker_class='coordinator', selected_move_id=claim)
             try:
                 # This display root is a run occurrence, never a native state identity.
@@ -223,7 +231,7 @@ class FormalWorkflow:
                     'semantic_signature': content_hash(declaration.fields['lean_type']),
                     'exact_hash_scope': 'run-occurrence', 'transposition_eligible': False}
                 ops = (UpsertNode('FormalRun', run, {'status': 'searching', 'actor': actor,
-                        'environment_hash': selected['environment_hash']}), UpsertNode('FormalState', root, fields),
+                        'environment_hash': selected['environment_hash'], 'operation_id': operation}), UpsertNode('FormalState', root, fields),
                     UpsertNode('FormalCheckpoint', checkpoint, {}),
                     AddEdge('SEARCHES', run, declaration.node_id, f'{proof}/search-{operation}'),
                     AddEdge('RAN_UNDER', run, environment.node_id, f'{proof}/env-{operation}'),
@@ -232,7 +240,7 @@ class FormalWorkflow:
                     AddEdge('CHECKPOINT_FRONTIER', checkpoint, root, f'{proof}/frontier-{operation}'))
                 self._accepted(service.gate.commit(Proposal(proof, seed.actor, seed.worker_class, ops=ops,
                     base_revision=seed.base_revision, lease_id=seed.lease_id, fencing_token=seed.fencing_token,
-                    selected_move_id=claim)))
+                    selected_move_id=seed.selected_move_id)))
                 service.catch_up(proof)
             finally:
                 self._release(seed)
@@ -241,11 +249,14 @@ class FormalWorkflow:
             # between leasing/compiling and saving can leave only our own
             # orphaned lease; release it before recompiling the same run.
             existing = service.view.node(run)
-            if existing.fields.get('actor') != actor or existing.fields.get('provider_binding_artifact'):
+            if (existing.fields.get('actor') != actor or existing.fields.get('provider_binding_artifact')
+                    or selection is not None and existing.fields.get('operation_id') != operation):
                 raise FormalV2Error('formal run already belongs to another execution')
             for orphan in service.store.active_leases(proof):
                 if orphan.selected_move_id == run and orphan.actor == actor and orphan.worker_class == 'formal-atp':
                     self._release(orphan)
+            if selection is not None:
+                self._release(original)
         lease = GlobalScheduler(service.view, service.store).lease_selected(proof, run, 'formal-atp', actor=actor,
             ttl_seconds=self.config.wall_clock_ms / 1000 + 300)
         if lease is None:
@@ -264,20 +275,27 @@ class FormalWorkflow:
             raise
         return {'contract_manifest': MANIFEST_HASH, 'phase': 'prepared', 'run_id': run, 'proof_id': proof, 'claim_id': claim,
             'provider_url': self.config.url, 'request': request, 'search_lease': lease.to_dict(),
+            **({'selected_move_id': selection['selected_move_id'], 'operation_kind': 'proof-cycle'} if selection else {}),
             'replay_steps': min(self.config.replay_steps, selected['verification']['max_steps']),
             'replay_wall_clock_ms': min(self.config.replay_wall_clock_ms, selected['verification']['wall_clock_ms']),
             'packet_artifact': packet, 'deadline': time.time() + self.config.wall_clock_ms / 1000 + 120}
 
-    def run(self, operation, proof, claim, budget, cancelled=lambda: False, expected_revision=None, on_progress=None):
+    def run_selected(self, operation, selection, *, cancelled=lambda: False, on_progress=None):
+        """Execute a durable scheduler selection through the same provider workflow."""
+        return self.run(operation, selection['proof_id'], selection['claim_id'], selection['budget'],
+            cancelled=cancelled, on_progress=on_progress, selection=selection)
+
+    def run(self, operation, proof, claim, budget, cancelled=lambda: False, expected_revision=None, on_progress=None,
+            *, selection=None):
         with self.service.lock:
             self._callbacks[operation] = on_progress
         try:
-            return self._run(operation, proof, claim, budget, cancelled, expected_revision)
+            return self._run(operation, proof, claim, budget, cancelled, expected_revision, selection=selection)
         finally:
             with self.service.lock:
                 self._callbacks.pop(operation, None)
 
-    def _run(self, operation, proof, claim, budget, cancelled, expected_revision):
+    def _run(self, operation, proof, claim, budget, cancelled, expected_revision, *, selection=None):
         service, client = self.service, self.client()
         state = self._load(operation)
         if state and state.get('contract_manifest') != MANIFEST_HASH:
@@ -291,7 +309,8 @@ class FormalWorkflow:
             with service.lock:
                 if expected_revision is not None and service.store.head(proof)[0] != expected_revision:
                     raise FormalV2Error('proof changed before formal dispatch; reconsider the original intent')
-                state = self._prepare(operation, proof, claim, budget, client, deployment)
+                state = self._prepare(operation, proof, claim, budget, client, deployment,
+                    **({'selection': selection} if selection is not None else {}))
                 self._save(operation, state)  # BEFORE any provider mutation.
         run = state['run_id']
         client.restore_prepared(state['request'])
@@ -420,7 +439,9 @@ class FormalWorkflow:
         if state.get('claim_status') == 'lean-verified':
             disposition = 'lean-verified'
         return {'proof_id': state['proof_id'], 'run_id': state['run_id'], 'phase': state['phase'],
+            'claim_id': state['claim_id'],
             'lifecycle': lifecycle, 'mathematical_disposition': disposition,
             'claim_status': state.get('claim_status'),
+            **({'selected_move_id': state['selected_move_id']} if 'selected_move_id' in state else {}),
             'budget': snapshot.get('budget'), 'replay_status': state.get('receipt', {}).get('status'),
             'component_mode': 'formal-v2-' + self.config.mode}

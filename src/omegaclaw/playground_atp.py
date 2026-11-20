@@ -240,13 +240,16 @@ class ReceiverHost:
 
 
 def run(args):
+    cycle_mode = getattr(args, 'atp_cycle', False)
+    steps = tuple('cycle' if step == 'search' and cycle_mode else step for step in STEPS)
+    tools = {**TOOLS, 'cycle': 'proof-cycle'}
     if args.list:
-        print(json.dumps([{'id': 'atp_' + step, 'tool': TOOLS[step]} for step in STEPS], indent=2))
+        print(json.dumps([{'id': 'atp_' + step, 'tool': tools[step]} for step in steps], indent=2))
         return 0
     run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:6]
     output = (Path(args.output) / run_id).resolve()
     output.mkdir(parents=True)
-    report = {'run_id': run_id, 'started_at': utcnow(), 'mode': 'atp-prepared-declaration',
+    report = {'run_id': run_id, 'started_at': utcnow(), 'mode': 'atp-scheduled-cycle' if cycle_mode else 'atp-prepared-declaration',
         'provider': args.provider, 'model': provider_model(args.provider, args.model),
         'results': [], 'output': str(output), 'review_mode': 'explicit trusted host review; no automatic formalization'}
     runner = host = session = client = None
@@ -268,14 +271,16 @@ def run(args):
         client = SyncClient(AsyncClient(HTTPReceiverAdapter(host.environment['PERSISTENT_ATP_OMEGA_URL'], host.token)))
         proof = None
         search_row = before_restart = None
-        for step in STEPS:
+        for step in steps:
             tag = 'CASE_' + run_id + '_atp_' + step
             if step == 'create':
                 instruction = 'Invoke proof-create exactly once with workspace ' + host.workspace + ' and this exact JSON spec: ' + json.dumps(prepared['spec'], ensure_ascii=False)
-            elif step == 'search':
+            elif step in {'search', 'cycle'}:
                 host.prepare_declaration(proof)
                 budget = {'max_steps': host.formal_config.max_steps, 'wall_clock_ms': host.formal_config.wall_clock_ms}
                 instruction = f'Invoke formal-search exactly once with proof {proof}, claim {proof}/c-1, workspace {host.workspace}, budget JSON {json.dumps(budget)}. Report admission accurately; verification arrives asynchronously.'
+                if step == 'cycle':
+                    instruction = f'Invoke proof-cycle exactly once for proof {proof}, workspace {host.workspace}. Let the receiver scheduler select formal work using its configured execution bounds. Report the actual receiver outcome; operation admission alone does not establish verification.'
             elif step == 'restart':
                 before_restart = host.evidence(proof)
                 cache_before = json.loads(runner.read(MEMORY + '/persistent_atp/workflow.json'))
@@ -295,7 +300,7 @@ def run(args):
             elif step == 'export':
                 instruction = f'Invoke proof-export for proof {proof}, destination default, workspace {host.workspace}. Report the actual export artifact hash from the completed receiver result.'
             else:
-                instruction = f'Invoke {TOOLS[step]} for proof {proof} in workspace {host.workspace}. Report the actual receiver result, literal target, proof ID, and exact claim_status.'
+                instruction = f'Invoke {tools[step]} for proof {proof} in workspace {host.workspace}. Report the actual receiver result, literal target, proof ID, and exact claim_status.'
             query = instruction + f' Use only the named persistent-ATP tool; do not use shell, metta, Python, or direct HTTP. Do not invent tool results. Tool results arrive as PERSISTENT_ATP_RESULT records in later iterations. When reporting this task, use send with a reply starting {tag}. Stop after the reply.'
             row = {'id': 'atp_' + step, 'query': query, 'response': None, 'response_source': 'omega-agent', 'started_at': utcnow()}
             event('case_started', id=row['id'])
@@ -305,10 +310,10 @@ def run(args):
                 row['response'] = session.ask(query, tag, args.timeout)
                 logs = runner.logs(since)
                 records = command_records(logs)
-                checks = {'actual_tool_call': any(r['tool'] == TOOLS[step] for r in records)}
+                checks = {'actual_tool_call': any(r['tool'] == tools[step] for r in records)}
                 operation = None
-                if step in {'create', 'search', 'audit', 'export'}:
-                    operation = host.settled(old_operations, TOOLS[step], args.timeout)
+                if step in {'create', 'search', 'cycle', 'audit', 'export'}:
+                    operation = host.settled(old_operations, tools[step], args.timeout)
                     row['operation'] = {k: operation[k] for k in ('request_id', 'operation_id', 'lifecycle', 'observation_version', 'result')}
                 if step == 'create':
                     proof = operation['result']['proof_id']
@@ -322,9 +327,12 @@ def run(args):
                         projection_caught_up=evidence['status']['projection_lag'] == 0,
                         journal_intact=evidence['chain_events'] == evidence['status']['revision'],
                         independently_replayed=all(c['fields']['status'] == 'replay-accepted' for c in evidence['certificates']))
-                    if step == 'search':
+                    if step in {'search', 'cycle'}:
                         search_row = operation
                         checks['verified_operation_result'] = operation['result'].get('mathematical_disposition') == 'lean-verified'
+                        if step == 'cycle':
+                            checks['scheduler_selected_declaration'] = operation['result'].get('selected_move_id') == proof + '/fd-1'
+                            checks['formal_cycle_executed'] = operation['result'].get('cycle_disposition') == 'formal-executed'
                     if step in {'status', 'restart'}:
                         checks['model_reports_verification'] = 'lean-verified' in row['response'].lower() and proof in row['response']
                     if step == 'audit':
@@ -341,7 +349,7 @@ def run(args):
                         (output / 'proof-export.json').write_bytes(payload)
                     if step == 'restart':
                         checks['same_committed_state'] = evidence == before_restart
-                        current = [r for r in host.operations() if r['body']['action']['kind'] == 'formal-search' and r['result'] and r['result'].get('proof_id') == proof]
+                        current = [r for r in host.operations() if r['body']['action']['kind'] == ('proof-cycle' if cycle_mode else 'formal-search') and r['result'] and r['result'].get('proof_id') == proof]
                         checks['search_not_duplicated'] = len(current) == 1 and current[0]['operation_id'] == search_row['operation_id']
                         cache_after = json.loads(runner.read(MEMORY + '/persistent_atp/workflow.json'))
                         checks['prepared_requests_preserved'] = all(
@@ -379,9 +387,9 @@ def run(args):
         if host:
             host.close()
         recorded = {r['id'] for r in report['results']}
-        for step in STEPS:
+        for step in steps:
             if 'atp_' + step not in recorded:
-                report['results'].append({'id': 'atp_' + step, 'query': 'Invoke ' + TOOLS[step], 'response': None,
+                report['results'].append({'id': 'atp_' + step, 'query': 'Invoke ' + tools[step], 'response': None,
                     'status': 'not_tested', 'reason': 'Prior acceptance step failed; inspect recorded evidence.'})
         report['finished_at'] = utcnow()
         report['summary'] = {status: sum(r['status'] == status for r in report['results']) for status in ('passed', 'failed', 'not_tested')}

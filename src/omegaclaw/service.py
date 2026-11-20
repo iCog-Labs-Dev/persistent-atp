@@ -74,9 +74,11 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
-        self.formal = None
+        self.formal = self.cycles = None
         if formal_config is not None:
             self.formal = FormalWorkflow(self, formal_config)
+            from .cycle_runtime import CycleWorkflow
+            self.cycles = CycleWorkflow(self)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:
@@ -88,7 +90,8 @@ class OperationService:
     def submit(self, raw: object) -> dict:
         request = validate_request(raw)
         if self.profile == "production" and request["operation"] not in {
-                "proof-create", "proof-status", "proof-audit", "proof-export"}:
+                "proof-create", "proof-status", "proof-audit", "proof-export",
+                *({"proof-cycle"} if self.cycles is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
@@ -131,6 +134,8 @@ class OperationService:
         if operation == "proof-audit":
             return self._audit(proof_id)
         if operation == "proof-cycle":
+            if self.cycles is not None:
+                return self.cycles.run(operation_id, proof_id)
             return self._cycle(proof_id, operation_id)
         if operation == "proof-export":
             return self._export(proof_id, args["destination"])

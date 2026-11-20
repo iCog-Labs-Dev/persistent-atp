@@ -23,8 +23,10 @@ class JobLedger:
             body_hash TEXT NOT NULL, workspace TEXT NOT NULL,
             operation TEXT NOT NULL, phase TEXT NOT NULL, response TEXT NOT NULL
         )""")
-        if 'formal_json' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}:
-            self.conn.execute('ALTER TABLE operations ADD COLUMN formal_json TEXT')
+        columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}
+        for column in ('formal_json', 'cycle_json'):
+            if column not in columns:
+                self.conn.execute(f'ALTER TABLE operations ADD COLUMN {column} TEXT')
 
     def submit(self, request: dict) -> tuple[dict, bool]:
         body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
@@ -40,7 +42,7 @@ class JobLedger:
             else:
                 operation_id = str(uuid.uuid4())
                 result = {"operation_id": operation_id, "phase": "submitted", "transport_status": "accepted"}
-                if request["operation"] == "proof-cycle":
+                if request["operation"] in {"proof-cycle", "proof-cycle-selected"}:
                     result["proof_id"] = request["arguments"]["proof"]
                 self.conn.execute("INSERT INTO operations (operation_id, request_id, body_hash, workspace, operation, phase, response) VALUES (?,?,?,?,?,?,?)", (
                     operation_id, request["request_id"], digest, request["workspace"],
@@ -74,9 +76,17 @@ class JobLedger:
         self.conn.execute('UPDATE operations SET formal_json=? WHERE operation_id=?',
                           (json.dumps(state, sort_keys=True, allow_nan=False), operation_id))
 
+    def cycle_state(self, operation_id: str) -> dict:
+        row = self.conn.execute('SELECT cycle_json FROM operations WHERE operation_id=?', (operation_id,)).fetchone()
+        return json.loads(row['cycle_json']) if row and row['cycle_json'] else {}
+
+    def save_cycle(self, operation_id: str, state: dict) -> None:
+        self.conn.execute('UPDATE operations SET cycle_json=? WHERE operation_id=?',
+            (json.dumps(state, sort_keys=True, allow_nan=False), operation_id))
+
     def active_cycle(self, proof_id: str, workspace: str, *, excluding_request_id: str | None = None) -> dict | None:
         # Operational deduplication only while a cycle is in flight.
-        rows = self.conn.execute("SELECT request_id, response FROM operations WHERE workspace=? AND operation='proof-cycle' AND phase NOT IN ('finished','failed')", (workspace,)).fetchall()
+        rows = self.conn.execute("SELECT request_id, response FROM operations WHERE workspace=? AND operation IN ('proof-cycle','proof-cycle-selected') AND phase NOT IN ('finished','failed')", (workspace,)).fetchall()
         for row in rows:
             if row["request_id"] == excluding_request_id:
                 continue

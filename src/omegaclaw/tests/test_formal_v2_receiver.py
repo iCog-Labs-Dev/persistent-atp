@@ -374,11 +374,21 @@ def test_cancel_remains_pending_until_provider_stops(provider, tmp_path, monkeyp
 
 
 @pytest.mark.skipif(shutil.which('lean') is None, reason='real Lean is required for persisted replay')
-def test_production_formal_result_survives_postgres_mork_receiver_restart(provider, tmp_path):
+@pytest.mark.parametrize('operation', ['formal-search', 'proof-cycle', 'selected-cycle'])
+def test_production_formal_result_survives_postgres_mork_receiver_restart(provider, tmp_path, operation):
     if not os.environ.get('MORK_LIBRARY') or not os.environ.get('ARTIFACT_TEST_DB_URL'):
         if os.environ.get('OMEGA_PERSISTENCE_REQUIRED') == '1':
             pytest.fail('formal persistence check requires native MORK and a dedicated artifact database')
         pytest.skip('native MORK and a dedicated PostgreSQL artifact database are required')
+    # The native library owns one process-wide space. Each parameter needs a
+    # fresh process so another journal's p1 projection cannot masquerade as ours.
+    if os.environ.get('OMEGA_FORMAL_STORAGE_CASE') != operation:
+        env = {**os.environ, 'OMEGA_FORMAL_STORAGE_CASE': operation}
+        result = subprocess.run([sys.executable, '-m', 'pytest', '-q',
+            f'{__file__}::test_production_formal_result_survives_postgres_mork_receiver_restart[{operation}]',
+            '--basetemp', str(tmp_path / 'native-process')], env=env, capture_output=True, text=True, timeout=90)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return
     from artifacts.schema import apply_schema
     apply_schema(os.environ['ARTIFACT_TEST_DB_URL'])
     deployment, backend, *_ = provider
@@ -389,9 +399,11 @@ def test_production_formal_result_survives_postgres_mork_receiver_restart(provid
         caps = await client.capabilities()
         assert caps.independent_replay and caps.backend_mode == 'real'
         assert 'formal-search' in caps.actions and 'formal-resume' not in caps.actions
-        assert 'proof-cycle' not in caps.actions and 'cancel' in caps.controls
-        request = client.prepare(FormalSearch('p1', 'p1/c-1', Budget(5, 3000)),
-            workspace_id='reference', request_id='persisted-formal')
+        assert 'proof-cycle' in caps.actions and 'cancel' in caps.controls
+        from persistent_atp_client import ProofCycle, SelectedProofCycle
+        action = (FormalSearch('p1', 'p1/c-1', Budget(5, 3000)) if operation == 'formal-search'
+            else ProofCycle('p1') if operation == 'proof-cycle' else SelectedProofCycle('p1', 'formal-run'))
+        request = client.prepare(action, workspace_id='reference', request_id='persisted-formal')
         handle = await client.submit(request)
         result = await handle.wait(timeout=20, poll_interval=.05)
         assert result.lifecycle == 'succeeded', result.result

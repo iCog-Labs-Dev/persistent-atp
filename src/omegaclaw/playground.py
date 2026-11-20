@@ -447,12 +447,15 @@ def main(argv=None):
     parser.add_argument('--list', action='store_true', help='List cases without starting Docker or calling a model')
     parser.add_argument('--keep-container', action='store_true')
     parser.add_argument('--atp', action='store_true', help='Run model-driven proof acceptance against a production receiver')
+    parser.add_argument('--atp-cycle', action='store_true', help='Use scheduler-selected proof-cycle in ATP acceptance')
     parser.add_argument('--atp-config', default=os.environ.get('OMEGA_PLAYGROUND_ATP_CONFIG', 'formal'))
     parser.add_argument('--atp-input', default=os.environ.get('OMEGA_PLAYGROUND_ATP_INPUT'),
         help='Trusted host JSON containing the exact theorem, declaration, and bound alignment review')
     args = parser.parse_args(argv)
     if args.timeout <= 0 or args.startup_timeout <= 0:
         parser.error('timeouts must be positive')
+    if args.atp_cycle and not args.atp:
+        parser.error('--atp-cycle requires --atp')
     if args.atp:
         from .playground_atp import run
         if not args.atp_input and not args.list:

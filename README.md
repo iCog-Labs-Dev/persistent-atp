@@ -150,6 +150,15 @@ restart. Each run saves actual query/response pairs and the verified export.
 This mode tests a prepared declaration; automatic formalization and review of a
 new theorem remain separate integration work.
 
+Add `--atp-cycle` to exercise Omega's `proof-cycle` tool instead of explicit
+`formal-search`. The receiver scheduler selects an aligned declaration and
+uses the same provider, independent replay, and commit-gate admission path.
+Cycle execution bounds come from the trusted `PERSISTENT_ATP_FORMAL_*`
+configuration. An unformalized theorem reports blocked; unavailable research
+and critic workers do not trigger scripted fallback. Existing provider runs
+remain associated with their original operation and require reconciliation
+rather than an implicit new search.
+
 The full container test builds from a locally pulled official image and uses a
 local model stub, an isolated proxy port, a reference receiver, and an Omega
 restart. It makes no paid provider calls:
@@ -163,7 +172,7 @@ Receiver configuration accepts `profile: reference`, `persistence`, or
 `production`. Persistent profiles require the PostgreSQL artifact schema and
 the native MORK library loaded with `scripts/with-mork.sh`. The persistence
 profile retains explicitly labeled scripted research. Production allows
-creation, status, audit, and export, and enables formal search when its
+creation, status, audit, and export, and enables formal search and formal cycles when its
 configured formal provider passes capability checks. Unavailable worker
 actions are rejected. Both recover the MORK projection from the journal at startup.
 
