@@ -24,6 +24,7 @@ from .models import (
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
     CoordinationPage, ProjectDigest, QueueCoordinatorEscalations, CoordinatorEscalation,
+    HypothesisFormalize,
 )
 from .ports import ReceiverPort
 
@@ -214,6 +215,11 @@ class AsyncClient:
 
     async def lemma_bridge(self, proof_id: str, obstruction_id: str, *, workspace_id: str, **request_options):
         return await self.submit_action(LemmaBridge(proof_id, obstruction_id), workspace_id=workspace_id, **request_options)
+
+    async def formalize_hypothesis(self, proof_id: str, hypothesis_id: str, *, workspace_id: str,
+                                   preconditions: Preconditions, **request_options):
+        return await self.submit_action(HypothesisFormalize(proof_id, hypothesis_id),
+            workspace_id=workspace_id, preconditions=preconditions, **request_options)
 
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:
         receipt = await self._port.lookup_request(workspace_id, request_id)

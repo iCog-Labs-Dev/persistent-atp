@@ -119,30 +119,33 @@ class IntakeWorkflow:
         return ('\n'.join('import ' + x for x in self.config.imports)
             + f'\n\ntheorem {result.lean_name} : {result.lean_type} := by\n  exact persistent_atp_pending_proof\n').encode()
 
-    def run(self, operation, proof, *, cancelled=lambda: False, on_progress=None):
+    def run(self, operation, proof, *, claim_id=None, cancelled=lambda: False, on_progress=None):
         service = self.service
+        target_claim_id = claim_id or proof + '/c-1'
+        if not isinstance(target_claim_id, str) or not target_claim_id.startswith(proof + '/'):
+            raise ValueError('formalization claim is outside the requested proof')
         with service.lock:
             state = service.jobs.intake_state(operation)
         if state and (state.get('contract_manifest') != MANIFEST_HASH or state['proof_id'] != proof
+                or state.get('claim_id') != target_claim_id
                 or state['config_hash'] != content_hash(self.config.__dict__)):
             raise ValueError('intake configuration or contract changed; reconcile the admitted operation')
         if not state:
             # Capability I/O happens before leasing, outside the shared lock.
             identity, _, deployment = service.formal.deployment(service.formal.client())
             with service.lock:
-                claim_id = proof + '/c-1'
-                claim = service.view.node(claim_id)
+                claim = service.view.node(target_claim_id)
                 if not claim or not claim.fields.get('theorem_spec_artifact'):
                     raise ValueError('automated intake requires the complete committed theorem specification')
-                if (service.view.edges_to(claim_id, 'DRAFTS_CLAIM') or service.view.edges_to(claim_id, 'ALIGNS_CLAIM')
-                        or service.view.edges_from(claim_id, 'FORMALIZES') or service.view.edges_to(claim_id, 'FORMALIZES')):
+                if (service.view.edges_to(target_claim_id, 'DRAFTS_CLAIM') or service.view.edges_to(target_claim_id, 'ALIGNS_CLAIM')
+                        or service.view.edges_from(target_claim_id, 'FORMALIZES') or service.view.edges_to(target_claim_id, 'FORMALIZES')):
                     return {'ready': False, 'error_code': 'EXISTING_FORMALIZATION_REQUIRES_REVIEW'}
                 spec = json.loads(service.artifacts.get(claim.fields['theorem_spec_artifact']))
                 from .specification import validate_spec
                 spec = validate_spec(spec)
                 if spec['theorem'] != claim.fields['claim_text']:
                     raise ValueError('committed theorem specification differs from the literal claim')
-                dependencies, pending, seen = [], [claim_id], {claim_id}
+                dependencies, pending, seen = [], [target_claim_id], {target_claim_id}
                 while pending:
                     for edge in service.view.edges_from(pending.pop(), 'DEPENDS_ON'):
                         if edge.dst_id not in seen:
@@ -151,14 +154,14 @@ class IntakeWorkflow:
                                 raise ValueError('formalization dependency is missing')
                             seen.add(edge.dst_id); pending.append(edge.dst_id)
                             dependencies.append({'id': node.node_id, 'label': node.label, 'fields': dict(node.fields)})
-                lease = self._lease(proof, claim_id, 'formalizer')
+                lease = self._lease(proof, target_claim_id, 'formalizer')
                 number = int(content_hash(['intake', operation])[7:], 16)
                 state = {'contract_manifest': MANIFEST_HASH, 'config_hash': content_hash(self.config.__dict__),
-                    'proof_id': proof, 'claim_id': claim_id, 'declaration_id': f'{proof}/fd-{number}',
+                    'proof_id': proof, 'claim_id': target_claim_id, 'declaration_id': f'{proof}/fd-{number}',
                     'environment_id': f'{proof}/env-{number}', 'alignment_id': f'{proof}/al-{number}',
                     'provider_url': service.formal.config.url, 'deployment_id': identity,
                     'environment_hash': deployment['environment_hash'], 'provider_environment_id': deployment['environment_id'],
-                    'claim': {'id': claim_id, 'label': 'Claim', 'fields': dict(claim.fields)},
+                    'claim': {'id': target_claim_id, 'label': 'Claim', 'fields': dict(claim.fields)},
                     'spec': spec, 'dependencies': dependencies, 'draft_lease': lease, 'phase': 'prepared'}
                 state['dependency_edges'] = sorted([record['id'], edge.dst_id]
                     for record in [state['claim'], *dependencies]

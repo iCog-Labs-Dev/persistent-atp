@@ -71,8 +71,11 @@ def test_production_advertises_lemma_bridge_only_with_research_worker(tmp_path):
 
     async def scenario():
         assert "lemma-bridge" not in (await receiver.capabilities()).actions
+        assert "hypothesis-formalize" not in (await receiver.capabilities(contract_version="2.2")).actions
         service.research = object()
         assert "lemma-bridge" in (await receiver.capabilities()).actions
+        service.intake = object()
+        assert "hypothesis-formalize" in (await receiver.capabilities(contract_version="2.2")).actions
 
     try:
         asyncio.run(scenario())

@@ -13,6 +13,7 @@ ARGUMENTS = {
     "formal-resume": ("proof", "run", "budget", "workspace"),
     "statement-align": ("proof", "claim", "lean_source", "workspace"),
     "lemma-bridge": ("proof", "obstruction", "workspace"),
+    "hypothesis-formalize": ("proof", "hypothesis", "expected_revision", "workspace"),
 }
 
 MAX_ARGUMENT_BYTES = 16_384

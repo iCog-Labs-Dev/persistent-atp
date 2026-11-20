@@ -276,11 +276,24 @@ class LemmaBridge:
         _identifier(self.obstruction_id, "obstruction_id")
 
 
+@dataclass(frozen=True, slots=True)
+class HypothesisFormalize:
+    """Explicitly admit one speculative hypothesis for formalization."""
+
+    kind: ClassVar[str] = "hypothesis-formalize"
+    proof_id: str
+    hypothesis_id: str
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.hypothesis_id, "hypothesis_id")
+
+
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
-COORDINATOR_ACTION_TYPES = {QueueCoordinatorEscalations.kind: QueueCoordinatorEscalations}
+COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize)}
 ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize
 
 
 def action_types_for_contract(version: str):
@@ -313,7 +326,8 @@ class ActionRequest:
         if (self.action.kind not in action_types_for_contract(self.contract_version)
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
-        if (self.contract_version == "2.2" and isinstance(self.action, (SelectedProofCycle, QueueCoordinatorEscalations))
+        if (self.contract_version == "2.2" and isinstance(self.action,
+                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize))
                 and self.preconditions.expected_revision is None):
             raise ValueError("coordinator mutations require expected_revision")
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):

@@ -119,7 +119,7 @@
       "required": ["contract_version", "actions", "controls", "backend_mode", "independent_replay", "receiver_mode"],
       "properties": {
         "contract_version": {"enum": ["2.0", "2.1", "2.2"]},
-        "actions": {"type": "array", "uniqueItems": true, "items": {"enum": ["proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export", "formal-search", "formal-resume", "statement-align", "lemma-bridge", "proof-cycle-selected", "queue-research-moves", "queue-coordinator-escalations"]}},
+        "actions": {"type": "array", "uniqueItems": true, "items": {"enum": ["proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export", "formal-search", "formal-resume", "statement-align", "lemma-bridge", "proof-cycle-selected", "queue-research-moves", "queue-coordinator-escalations", "hypothesis-formalize"]}},
         "controls": {"type": "array", "uniqueItems": true, "items": {"enum": ["cancel", "amend-budget", "answer-decision", "coordination-read", "cycle-execution-revision", "atomic-coordinator-escalations"]}},
         "backend_mode": {"enum": ["real", "scripted-test", "unavailable"]},
         "independent_replay": {"type": "boolean"},

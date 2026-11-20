@@ -43,7 +43,8 @@ from omegaclaw.formal_runtime import FormalProviderConfig
 from omegaclaw.formal_runtime import FormalWorkflow
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
-from persistent_atp_client import AsyncClient, Budget, CancelRequest, FormalSearch, Preconditions
+from persistent_atp_client import (AsyncClient, Budget, CancelRequest, FormalSearch,
+    HypothesisFormalize, Preconditions)
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 
 
@@ -285,6 +286,65 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
         assert recovered["hypothesis_ids"] == bridge["hypothesis_ids"]
         assert service.store.head("p1")[0] == revision
         assert len(llm.history) == 1
+
+        # Supply the complete root specification omitted by this fixture's
+        # legacy proof-create request; production-created roots already have it.
+        from commit_gate.canon import canonical_json
+        from commit_gate.ops import SetField
+        parent_spec = {"theorem": "True", "definitions": {}, "assumptions": [],
+            "quantifier_domains": {}, "allowed_background": [], "targets": ["True"],
+            "verification_policy": {"independent_lean_replay": True}}
+        parent_spec_ref = service.artifacts.put(canonical_json(parent_spec))
+        root_lease = service.store.issue_lease("p1", "p1/attach-root-spec", actor="fixture-coordinator",
+            worker_class="coordinator", selected_move_id="p1/c-1")
+        try:
+            attached = service.gate.commit(Proposal("p1", root_lease.actor, root_lease.worker_class,
+                ops=(SetField("Claim", "p1/c-1", "theorem_spec_artifact", parent_spec_ref, prior=None),
+                    SetField("Claim", "p1/c-1", "assumptions", [], prior=None)),
+                base_revision=root_lease.base_revision, lease_id=root_lease.lease_id,
+                fencing_token=root_lease.fencing_token, selected_move_id=root_lease.selected_move_id))
+            assert attached.accepted, attached.to_dict()
+            service.catch_up("p1")
+        finally:
+            service.store.release_lease("p1", root_lease.lease_id, fencing_token=root_lease.fencing_token)
+
+        from alignment.llm_client import MockLLMClient
+        from omegaclaw.intake_runtime import IntakeConfig, IntakeWorkflow
+        intake_llm = MockLLMClient(responses=[
+            {"lean_name": "bridge_candidate", "lean_type": "True", "notes": "Exact candidate formalization."},
+            {"verdict": "aligned", "relation": "exact", "quantifier_correspondence": "No quantifiers.",
+             "domain_correspondence": "The proposition True.", "selected_definitions_match": True,
+             "implication_to_target_explicit": True, "universe_assumptions": [],
+             "typeclass_assumptions": [], "classical_assumptions": [],
+             "constructive_assumptions": [], "reasoning": "The candidate statement is exact."},
+        ])
+        monkeypatch.setattr(IntakeConfig, "llm", lambda _config: intake_llm)
+        service.intake = IntakeWorkflow(service, IntakeConfig("DeepSeek", "fixture-lean"))
+        lemma_client = AsyncClient(LocalReceiverAdapter(receiver))
+        formalize_request = lemma_client.prepare(
+            HypothesisFormalize("p1", bridge["hypothesis_ids"][0]),
+            workspace_id="reference", request_id="formalize-bridge-candidate",
+            preconditions=Preconditions(expected_revision=service.store.head("p1")[0]),
+        )
+        formalized = await (await lemma_client.submit(formalize_request)).wait(timeout=15, poll_interval=.05)
+        assert formalized.lifecycle == "succeeded", formalized.result
+        accepted = formalized.result
+        assert accepted["formalization_ready"] is True, accepted
+        lemma_claim = service.view.node(accepted["claim_id"])
+        assert lemma_claim.fields["status"] == "provisional"
+        assert lemma_claim.fields["source_hypothesis_id"] == bridge["hypothesis_ids"][0]
+        assert service.view.edges_from(bridge["hypothesis_ids"][0], "PROMOTED_TO")[0].dst_id == accepted["claim_id"]
+
+        # The existing scheduler now sees the reviewed candidate declaration
+        # as formal work; the proof cycle remains the sole search/replay path.
+        backend.stagnate = False
+        proof_cycle_result = await (await lemma_client.proof_cycle("p1", workspace_id="reference",
+            request_id="verify-bridge-candidate")).wait(timeout=15, poll_interval=.05)
+        assert proof_cycle_result.lifecycle == "succeeded", proof_cycle_result.result
+        proof_cycle = proof_cycle_result.result
+        assert proof_cycle["cycle_disposition"] == "formal-executed", proof_cycle
+        assert proof_cycle["claim_id"] == accepted["claim_id"]
+        assert service.view.node(accepted["claim_id"]).fields["status"] == "provisional"
 
     try:
         asyncio.run(scenario())

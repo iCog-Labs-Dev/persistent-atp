@@ -63,6 +63,9 @@
         },
         {
           "$ref": "#/$defs/queueCoordinatorEscalations"
+        },
+        {
+          "$ref": "#/$defs/hypothesisFormalize"
         }
       ]
     },
@@ -595,6 +598,16 @@
           }
         }
       }
+    },
+    "hypothesisFormalize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "proof_id", "hypothesis_id"],
+      "properties": {
+        "kind": {"const": "hypothesis-formalize"},
+        "proof_id": {"$ref": "#/$defs/id"},
+        "hypothesis_id": {"$ref": "#/$defs/id"}
+      }
     }
   },
   "allOf": [
@@ -606,7 +619,8 @@
               "kind": {
                 "enum": [
                   "proof-cycle-selected",
-                  "queue-coordinator-escalations"
+                  "queue-coordinator-escalations",
+                  "hypothesis-formalize"
                 ]
               }
             },

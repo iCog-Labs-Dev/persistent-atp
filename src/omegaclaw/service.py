@@ -12,10 +12,11 @@ import threading
 from pathlib import Path
 
 from commit_gate.gate import CommitGate
+from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
-from commit_gate.store import JournalStore
+from commit_gate.store import JournalStore, LeaseCandidate
 from mathproof.scheduler import GlobalScheduler
 from mathproof.schemas import validate as validate_schema
 from alignment.models import AlignmentCriteria, AlignmentReviewRequest, AlignmentReviewResult
@@ -102,7 +103,8 @@ class OperationService:
         if self.profile == "production" and request["operation"] not in {
                 "proof-create", "proof-status", "proof-audit", "proof-export",
                 *({"proof-cycle"} if self.cycles is not None else set()),
-                *({"lemma-bridge"} if self.research is not None else set())}:
+                *({"lemma-bridge"} if self.research is not None else set()),
+                *({"hypothesis-formalize"} if self.intake is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
@@ -170,6 +172,9 @@ class OperationService:
             return self._align(proof_id, args["claim"], args["lean_source"], operation_id)
         if operation == "lemma-bridge":
             return self._bridge(proof_id, args["obstruction"], operation_id)
+        if operation == "hypothesis-formalize":
+            return self._formalize_hypothesis(proof_id, args["hypothesis"], operation_id,
+                expected_revision=args["expected_revision"])
         raise ContractError("unknown operation")
 
     @staticmethod
@@ -340,6 +345,111 @@ class OperationService:
                 "packet_ref": packet_ref, "result_ref": result_ref}
         finally:
             self.store.release_lease(proof_id, row.lease_id, fencing_token=row.fencing_token)
+
+    def _formalize_hypothesis(self, proof_id: str, hypothesis_id: str, operation_id: str,
+                              *, expected_revision: str) -> dict:
+        """Explicitly admit one speculative candidate, then reuse guarded intake."""
+        if self.intake is None:
+            raise ContractError("hypothesis formalization requires configured formalization and review workers")
+        if not expected_revision.isdecimal():
+            raise ContractError("expected_revision must be a nonnegative decimal revision")
+        expected = int(expected_revision)
+        if not hypothesis_id.startswith(proof_id + "/"):
+            raise ContractError("hypothesis is outside the requested proof")
+
+        with self.lock:
+            if self.store.head(proof_id)[0] != expected:
+                raise ContractError("proof changed before hypothesis admission; review the current candidate")
+            hypothesis = self.view.node(hypothesis_id)
+            if hypothesis is None or hypothesis.label != "SpeculativeHypothesis":
+                raise ContractError("unknown speculative hypothesis")
+            errors = validate_schema("speculative-hypothesis", dict(hypothesis.fields))
+            if errors:
+                raise ContractError("hypothesis does not satisfy its typed schema")
+
+            source_claims = [node_id for node_id in hypothesis.fields["source_ids"]
+                if (node := self.view.node(node_id)) is not None and node.label == "Claim"]
+            obstructions = [node_id for node_id in hypothesis.fields["source_ids"]
+                if (node := self.view.node(node_id)) is not None and node.label == "Obstruction"]
+            if len(source_claims) != 1 or len(obstructions) != 1:
+                raise ContractError("hypothesis must name exactly one source theorem and obstruction")
+            parent_claim_id, obstruction_id = source_claims[0], obstructions[0]
+            parent_claim = self.view.node(parent_claim_id)
+            obstruction = self.view.node(obstruction_id)
+            if (parent_claim is None or parent_claim.fields.get("status") in
+                    {"refuted", "retracted", "stale", "tainted", "lean-verified"}):
+                raise ContractError("source theorem is inactive or already verified")
+            if (obstruction is None or obstruction.fields.get("formal_run_id") is None
+                    or not any(edge.dst_id == obstruction_id
+                        for edge in self.view.edges_from(obstruction.fields["formal_run_id"], "RAISED_OBSTRUCTION"))):
+                raise ContractError("hypothesis obstruction provenance is no longer committed")
+
+            promotions = self.view.edges_from(hypothesis_id, "PROMOTED_TO")
+            if len(promotions) > 1:
+                raise ContractError("hypothesis has conflicting promotion links")
+            if promotions:
+                claim_id = promotions[0].dst_id
+                claim = self.view.node(claim_id)
+                if (claim is None or claim.label != "Claim"
+                        or claim.fields.get("source_hypothesis_id") != hypothesis_id
+                        or claim.fields.get("parent_claim_id") != parent_claim_id):
+                    raise ContractError("existing hypothesis promotion differs from its source")
+            else:
+                statement = hypothesis.fields["statement"].strip()
+                parent_spec_ref = parent_claim.fields.get("theorem_spec_artifact")
+                if not parent_spec_ref or not self.artifacts.exists(parent_spec_ref):
+                    raise ContractError("source theorem lacks a complete committed specification")
+                try:
+                    parent_spec = validate_spec(json.loads(self.artifacts.get(parent_spec_ref)))
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    raise ContractError("source theorem specification is unavailable or invalid") from exc
+                lemma_spec = {**parent_spec, "theorem": statement, "targets": [statement]}
+                try:
+                    lemma_spec = validate_spec(lemma_spec)
+                except ValueError as exc:
+                    raise ContractError("candidate cannot inherit the source theorem specification") from exc
+                statement_ref = self.artifacts.put(statement.encode("utf-8"))
+                spec_ref = self.artifacts.put(canonical_json(lemma_spec))
+                claim_serial = int(content_hash(["hypothesis-claim", hypothesis_id])[7:], 16)
+                claim_id = f"{proof_id}/c-{claim_serial}"
+                fields = {
+                    "status": "provisional",
+                    "claim_text": statement,
+                    "literal_target_hash": statement_ref,
+                    "theorem_spec_artifact": spec_ref,
+                    "assumptions": lemma_spec["assumptions"],
+                    "source_hypothesis_id": hypothesis_id,
+                    "parent_claim_id": parent_claim_id,
+                    "obstruction_id": obstruction_id,
+                    "research_context_artifact": hypothesis.fields["packet_artifact"],
+                    "research_result_artifact": hypothesis.fields["result_artifact"],
+                }
+                lease = self.store.claim_next(proof_id,
+                    [LeaseCandidate(hypothesis_id, {}, (parent_claim_id, obstruction_id))],
+                    actor=ACTOR, worker_class="coordinator", base_revision=expected, ttl_seconds=120)
+                if lease is None:
+                    raise ContractError("hypothesis is already leased by another operation")
+                try:
+                    result = self.gate.commit(Proposal(proof_id, lease.actor, lease.worker_class,
+                        ops=(UpsertNode("Claim", claim_id, fields),
+                             AddEdge("PROMOTED_TO", hypothesis_id, claim_id,
+                                f"{proof_id}/promote-{content_hash([hypothesis_id, claim_id])[7:]}")),
+                        base_revision=lease.base_revision, lease_id=lease.lease_id,
+                        fencing_token=lease.fencing_token, selected_move_id=hypothesis_id))
+                    if not result.accepted:
+                        raise ContractError("gate rejected hypothesis admission: " +
+                            ", ".join(item.reason.value for item in result.rejections))
+                    self.catch_up(proof_id)
+                finally:
+                    self.store.release_lease(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
+
+        intake = self.intake.run(operation_id, proof_id, claim_id=claim_id)
+        return {**self._status(proof_id), "claim_id": claim_id,
+            "parent_claim_id": parent_claim_id, "hypothesis_id": hypothesis_id,
+            "formalization_ready": intake.get("ready", False),
+            "declaration_id": intake.get("declaration_id"), "alignment_id": intake.get("alignment_id"),
+            "report_artifact": intake.get("report_artifact"),
+            "error_code": intake.get("error_code"), "component_mode": "hypothesis-formalization"}
 
     def _create(self, raw_spec: str, operation_id: str) -> dict:
         try:
