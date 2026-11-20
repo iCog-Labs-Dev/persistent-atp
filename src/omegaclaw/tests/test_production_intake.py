@@ -152,7 +152,12 @@ def test_intake_restart_reuses_saved_outputs_and_committed_nodes(provider, tmp_p
 def test_source_cannot_include_model_commands_or_proof(provider, tmp_path, monkeypatch, candidate):
     service, proof, _ = setup(tmp_path, monkeypatch, responses=[candidate])
     try:
-        with pytest.raises(ValueError): service.cycles.run(admit(service, proof), proof)
+        result = service.cycles.run(admit(service, proof), proof)
+        assert result['cycle_disposition'] == 'waiting-on-review'
+        assert result['formalization_disposition'] == 'needs-clarification'
+        assert result['error_code'] == 'FORMALIZATION_NEEDS_CLARIFICATION'
+        assert result['report_artifact']
+        assert not service.view.list_nodes(proof, 'FormalDeclaration')
         assert not service.view.list_nodes(proof, 'FormalRun')
         assert not service.store.active_leases(proof)
     finally: service.close()

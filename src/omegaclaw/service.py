@@ -30,6 +30,7 @@ from .jobs import JobLedger
 from .export import check_export, referenced_artifacts
 from .context import compile_packet, verify_packet
 from .specification import SPEC_FIELDS, parse_json, validate_spec
+from .candidates import formalization_spec
 
 _ID = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
 ACTOR = "omega-coordinator"
@@ -105,7 +106,7 @@ class OperationService:
                 "proof-create", "proof-status", "proof-audit", "proof-export",
                 *({"proof-cycle"} if self.cycles is not None else set()),
                 *({"lemma-bridge"} if self.research is not None else set()),
-                *({"hypothesis-formalize"} if self.intake is not None else set())}:
+                *({"hypothesis-formalize", "hypothesis-revise"} if self.intake is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
@@ -140,7 +141,7 @@ class OperationService:
     def _run_admitted(self, request, operation_id):
         # These workflows own short locks around their durable stages. Their
         # provider calls must run without an enclosing service lock.
-        staged_workflow = (request["operation"] == "hypothesis-formalize"
+        staged_workflow = (request["operation"] in {"hypothesis-formalize", "hypothesis-revise"}
             or request["operation"] == "lemma-bridge" and self.research is not None
             or request["operation"] == "proof-cycle" and self.cycles is not None)
         try:
@@ -207,6 +208,10 @@ class OperationService:
         if operation == "hypothesis-formalize":
             return self._formalize_hypothesis(proof_id, args["hypothesis"], operation_id,
                 expected_revision=args["expected_revision"])
+        if operation == "hypothesis-revise":
+            return self._formalize_hypothesis(proof_id, args["hypothesis"], operation_id,
+                expected_revision=args["expected_revision"], spec_artifact=args["spec_artifact"],
+                previous_claim_id=args["previous_claim"] or None)
         raise ContractError("unknown operation")
 
     @staticmethod
@@ -379,11 +384,11 @@ class OperationService:
             self.store.release_lease(proof_id, row.lease_id, fencing_token=row.fencing_token)
 
     def _formalize_hypothesis(self, proof_id: str, hypothesis_id: str, operation_id: str,
-                              *, expected_revision: str) -> dict:
+                              *, expected_revision: str, spec_artifact=None, previous_claim_id=None) -> dict:
         """Explicitly admit one speculative candidate, then reuse guarded intake."""
         if self.intake is None:
             raise ContractError("hypothesis formalization requires configured formalization and review workers")
-        if not expected_revision.isdecimal():
+        if not expected_revision.isascii() or not expected_revision.isdecimal():
             raise ContractError("expected_revision must be a nonnegative decimal revision")
         expected = int(expected_revision)
         if not hypothesis_id.startswith(proof_id + "/"):
@@ -418,17 +423,32 @@ class OperationService:
             input_digest = content_hash({"hypothesis_id": hypothesis_id, "hypothesis": dict(hypothesis.fields),
                 "parent_claim_id": parent_claim_id, "parent_claim": dict(parent_claim.fields),
                 "obstruction_id": obstruction_id, "obstruction": dict(obstruction.fields)})
+            lemma_spec = None
+            if spec_artifact is not None:
+                try:
+                    lemma_spec = validate_spec(parse_json(self.artifacts.get(spec_artifact).decode('utf-8')))
+                except (ValueError, KeyError) as exc:
+                    raise ContractError('revised candidate requires an available complete theorem specification') from exc
+                if lemma_spec['targets'] != [lemma_spec['theorem']]:
+                    raise ContractError('revised candidate must specify exactly one literal target')
+                input_digest = content_hash({'source': input_digest, 'spec_artifact': spec_artifact,
+                    'previous_claim_id': previous_claim_id})
 
             promotions = self.view.edges_from(hypothesis_id, "PROMOTED_TO")
-            if len(promotions) > 1:
-                raise ContractError("hypothesis has conflicting promotion links")
-            if promotions:
-                claim_id = promotions[0].dst_id
-                claim = self.view.node(claim_id)
+            promoted = [self.view.node(edge.dst_id) for edge in promotions]
+            for claim in promoted:
                 if (claim is None or claim.label != "Claim"
                         or claim.fields.get("source_hypothesis_id") != hypothesis_id
                         or claim.fields.get("parent_claim_id") != parent_claim_id):
                     raise ContractError("existing hypothesis promotion differs from its source")
+            matches = [claim for claim in promoted if claim.fields.get('hypothesis_input_digest') == input_digest]
+            if not matches and any(claim.fields.get('hypothesis_operation_id') == operation_id for claim in promoted):
+                raise ContractError('hypothesis admission inputs changed; reconcile the original operation')
+            if len(matches) > 1:
+                raise ContractError('hypothesis has conflicting promotion links')
+            if matches:
+                claim = matches[0]
+                claim_id = claim.node_id
                 if (claim.fields.get("hypothesis_operation_id") != operation_id
                         or claim.fields.get("hypothesis_admission_revision") != expected):
                     raise ContractError("hypothesis admission belongs to another operation or requires legacy reconciliation")
@@ -439,22 +459,40 @@ class OperationService:
             else:
                 if self.store.head(proof_id)[0] != expected:
                     raise ContractError("proof changed before hypothesis admission; review the current candidate")
-                statement = hypothesis.fields["statement"].strip()
-                parent_spec_ref = parent_claim.fields.get("theorem_spec_artifact")
-                if not parent_spec_ref or not self.artifacts.exists(parent_spec_ref):
-                    raise ContractError("source theorem lacks a complete committed specification")
-                try:
-                    parent_spec = validate_spec(json.loads(self.artifacts.get(parent_spec_ref)))
-                except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                    raise ContractError("source theorem specification is unavailable or invalid") from exc
-                lemma_spec = {**parent_spec, "theorem": statement, "targets": [statement]}
-                try:
-                    lemma_spec = validate_spec(lemma_spec)
-                except ValueError as exc:
-                    raise ContractError("candidate cannot inherit the source theorem specification") from exc
+                if promoted:
+                    previous = next((claim for claim in promoted if claim.node_id == previous_claim_id), None)
+                    if (spec_artifact is None or previous is None
+                            or previous.fields.get('status') != 'provisional'):
+                        raise ContractError('revision must identify a previous provisional claim from this hypothesis')
+                    if any(claim.fields.get('previous_claim_id') == previous_claim_id for claim in promoted):
+                        raise ContractError('previous claim already has a revision; review the latest attempt')
+                    prior = self.jobs.get(previous.fields.get('hypothesis_operation_id'), self.workspace)
+                    if prior is None or prior['phase'] not in {'finished', 'failed'}:
+                        raise ContractError('previous formalization is still active or requires legacy reconciliation')
+                    if prior['phase'] == 'finished' and prior.get('formalization_ready') is not False:
+                        raise ContractError('previous formalization is already ready; correction requires a refused or failed attempt')
+                elif previous_claim_id is not None:
+                    raise ContractError('previous claim does not belong to this hypothesis')
+                if lemma_spec is None:
+                    kind = hypothesis.fields.get('candidate_kind')
+                    code = ('RESEARCH_MOVE_NOT_A_CLAIM' if kind == 'research-move'
+                            else 'CANDIDATE_SPECIFICATION_REQUIRED')
+                    reason = 'Select a mathematical claim with a complete specification, or explicitly use hypothesis-revise.'
+                    if kind == 'mathematical-claim':
+                        try:
+                            lemma_spec = formalization_spec(dict(hypothesis.fields))
+                        except ContractError as exc:
+                            reason = str(exc)
+                    if lemma_spec is None:
+                        return {**self._status(proof_id), 'hypothesis_id': hypothesis_id,
+                            'formalization_ready': False, 'formalization_disposition': 'needs-clarification',
+                            'error_code': code, 'clarification_reasons': [reason],
+                            'component_mode': 'hypothesis-formalization'}
+                statement = lemma_spec['theorem']
                 statement_ref = self.artifacts.put(statement.encode("utf-8"))
                 spec_ref = self.artifacts.put(canonical_json(lemma_spec))
-                claim_serial = int(content_hash(["hypothesis-claim", hypothesis_id])[7:], 16)
+                claim_serial = int(content_hash(["hypothesis-claim", hypothesis_id] if spec_artifact is None
+                    else ['hypothesis-revision', hypothesis_id, spec_artifact, previous_claim_id])[7:], 16)
                 claim_id = f"{proof_id}/c-{claim_serial}"
                 fields = {
                     "status": "provisional",
@@ -471,8 +509,11 @@ class OperationService:
                     "hypothesis_admission_revision": expected,
                     "hypothesis_input_digest": input_digest,
                 }
+                if spec_artifact is not None:
+                    fields.update(revision_spec_artifact=spec_artifact, previous_claim_id=previous_claim_id)
                 lease = self.store.claim_next(proof_id,
-                    [LeaseCandidate(hypothesis_id, {}, (parent_claim_id, obstruction_id))],
+                    [LeaseCandidate(hypothesis_id, {}, tuple(i for i in
+                        (parent_claim_id, obstruction_id, previous_claim_id) if i))],
                     actor=ACTOR, worker_class="coordinator", base_revision=expected, ttl_seconds=120)
                 if lease is None:
                     raise ContractError("hypothesis is already leased by another operation")
@@ -497,6 +538,9 @@ class OperationService:
                 "formalization_ready": intake.get("ready", False),
                 "declaration_id": intake.get("declaration_id"), "alignment_id": intake.get("alignment_id"),
                 "report_artifact": intake.get("report_artifact"),
+                "formalization_disposition": intake.get('formalization_disposition',
+                    'ready' if intake.get('ready') else 'waiting-on-review'),
+                "clarification_reasons": intake.get('clarification_reasons', []),
                 "error_code": intake.get("error_code"), "component_mode": "hypothesis-formalization"}
 
     def _create(self, raw_spec: str, operation_id: str) -> dict:

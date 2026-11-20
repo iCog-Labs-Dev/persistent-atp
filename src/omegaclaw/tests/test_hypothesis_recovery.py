@@ -23,7 +23,7 @@ from persistent_atp_client.adapters.local import LocalReceiverAdapter
 
 
 class HypothesisCase:
-    def __init__(self, root, monkeypatch, *, profile="reference"):
+    def __init__(self, root, monkeypatch, *, profile="reference", suggestion=None):
         self.root, self.profile = root, profile
         self.llm = MockLLMClient(responses=[CANDIDATE, REVIEW])
         monkeypatch.setattr(IntakeConfig, "llm", lambda _config: self.llm)
@@ -34,7 +34,7 @@ class HypothesisCase:
         self.hypothesis = self.proof + "/hyp-" + "a" * 32
         self.claim = self.proof + "/c-1"
         artifact = self.service.artifacts.put(b"controlled research evidence")
-        proposal = candidate("True")
+        proposal = suggestion if suggestion is not None else candidate("True")
         self.commit([
             UpsertNode("FormalRun", self.proof + "/fr-1", {"status": "stagnated"}),
             UpsertNode("Obstruction", self.proof + "/obs-1", {"formal_run_id": self.proof + "/fr-1"}),

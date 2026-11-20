@@ -415,7 +415,7 @@ def unavailable_rows(provider):
                 'status': 'not_tested' if os.environ.get(PROVIDERS[name][0]) else 'unavailable',
                 'reason': 'Run separately with --provider ' + name if os.environ.get(PROVIDERS[name][0]) else 'Provider key is not configured.'})
     for name in ('proof-create', 'proof-cycle', 'proof-status', 'proof-audit', 'proof-export',
-                 'formal-search', 'formal-resume', 'statement-align', 'lemma-bridge', 'hypothesis-formalize'):
+                 'formal-search', 'formal-resume', 'statement-align', 'lemma-bridge', 'hypothesis-formalize', 'hypothesis-revise'):
         rows.append({'id': 'atp_' + name, 'feature': 'ATP plugin',
             'query': f'Invoke the {name} proof action and report the authoritative receiver outcome.',
             'response': None, 'status': 'unavailable',

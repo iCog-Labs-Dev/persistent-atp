@@ -40,3 +40,11 @@ never replace it silently during retry or admit every generated candidate.
 Formalization readiness means a provisional claim and statement review are
 available. Verification still requires formal search and independent replay;
 neither the lemma nor its parent theorem is proved by this action.
+
+Research moves and unclassified legacy suggestions are not mathematical claims.
+On needs-clarification, report the supplied reasons and stop this attempt.
+Use hypothesis-revise only with an explicitly selected complete mathematical
+specification and the current expected revision. Identify the previous claim
+when correcting an admitted attempt. A revision is a new intent and a separate
+provisional claim; never overwrite an earlier claim or silently retry a refused
+draft with changed inputs. The parent target and its verification stay separate.

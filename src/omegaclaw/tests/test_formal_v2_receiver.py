@@ -44,7 +44,7 @@ from omegaclaw.formal_runtime import FormalWorkflow
 from omegaclaw.service import OperationService
 from omegaclaw.receiver import ReferenceReceiver
 from persistent_atp_client import (ArtifactRef, AsyncClient, Budget, CancelRequest, FormalSearch,
-    HypothesisFormalize, Preconditions)
+    HypothesisFormalize, HypothesisRevise, Preconditions)
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 
 
@@ -253,6 +253,7 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
         from alignment.llm_client import MockLLMClient
         from omegaclaw.research_runtime import ResearchWorkflow
         llm = MockLLMClient(responses=[{"candidates": [{
+            "candidate_kind": "research-move", "formalization_spec": None,
             "statement": "Prove the successor case through an intermediate equality.",
             "novelty": "Separates the successor step from the base case.",
             "cost": "One auxiliary lemma and one bounded formal search.",
@@ -290,26 +291,12 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
         assert service.store.head("p1")[0] == revision
         assert len(llm.history) == 1
 
-        # Supply the complete root specification omitted by this fixture's
-        # legacy proof-create request; production-created roots already have it.
+        # Explicitly refine the procedural suggestion into a mathematical
+        # claim. The original suggestion and parent target are not rewritten.
         from commit_gate.canon import canonical_json
-        from commit_gate.ops import SetField
         parent_spec = {"theorem": "True", "definitions": {}, "assumptions": [],
             "quantifier_domains": {}, "allowed_background": [], "targets": ["True"],
             "verification_policy": {"independent_lean_replay": True}}
-        parent_spec_ref = service.artifacts.put(canonical_json(parent_spec))
-        root_lease = service.store.issue_lease("p1", "p1/attach-root-spec", actor="fixture-coordinator",
-            worker_class="coordinator", selected_move_id="p1/c-1")
-        try:
-            attached = service.gate.commit(Proposal("p1", root_lease.actor, root_lease.worker_class,
-                ops=(SetField("Claim", "p1/c-1", "theorem_spec_artifact", parent_spec_ref, prior=None),
-                    SetField("Claim", "p1/c-1", "assumptions", [], prior=None)),
-                base_revision=root_lease.base_revision, lease_id=root_lease.lease_id,
-                fencing_token=root_lease.fencing_token, selected_move_id=root_lease.selected_move_id))
-            assert attached.accepted, attached.to_dict()
-            service.catch_up("p1")
-        finally:
-            service.store.release_lease("p1", root_lease.lease_id, fencing_token=root_lease.fencing_token)
 
         from alignment.llm_client import MockLLMClient
         from omegaclaw.intake_runtime import IntakeConfig, IntakeWorkflow
@@ -324,8 +311,10 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
         monkeypatch.setattr(IntakeConfig, "llm", lambda _config: intake_llm)
         service.intake = IntakeWorkflow(service, IntakeConfig("DeepSeek", "fixture-lean"))
         lemma_client = AsyncClient(LocalReceiverAdapter(receiver))
+        spec_ref = await lemma_client.put_artifact(canonical_json(parent_spec), workspace_id="reference",
+            media_type="application/json")
         formalize_request = lemma_client.prepare(
-            HypothesisFormalize("p1", bridge["hypothesis_ids"][0]),
+            HypothesisRevise("p1", bridge["hypothesis_ids"][0], spec_ref),
             workspace_id="reference", request_id="formalize-bridge-candidate",
             preconditions=Preconditions(expected_revision=service.store.head("p1")[0]),
         )

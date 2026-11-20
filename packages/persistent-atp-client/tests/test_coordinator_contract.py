@@ -9,7 +9,7 @@ import pytest
 
 from persistent_atp_client import (
     AsyncClient, CapabilitySet, CoordinatorEscalation, Preconditions,
-    HypothesisFormalize, QueueCoordinatorEscalations, SelectedProofCycle,
+    HypothesisFormalize, HypothesisRevise, ArtifactRef, QueueCoordinatorEscalations, SelectedProofCycle,
 )
 from persistent_atp_client.codecs import canonical_json, request_from_json, to_dict
 from persistent_atp_client.errors import UnsupportedCapability, UnsupportedContract
@@ -133,8 +133,10 @@ def test_new_version_is_negotiated_without_a_silent_downgrade():
     asyncio.run(scenario())
 
 
-def test_hypothesis_formalization_is_revision_bound_and_contract_22_typed():
-    action = HypothesisFormalize("p1", "p1/hyp-" + "a" * 32)
+@pytest.mark.parametrize('action', [HypothesisFormalize("p1", "p1/hyp-" + "a" * 32),
+    HypothesisRevise("p1", "p1/hyp-" + "a" * 32, ArtifactRef("sha256:" + "b" * 64)),
+    HypothesisRevise("p1", "p1/hyp-" + "a" * 32, ArtifactRef("sha256:" + "b" * 64), "p1/c-2")])
+def test_hypothesis_formalization_is_revision_bound_and_contract_22_typed(action):
     request = AsyncClient(None).prepare(action, workspace_id="lab",
         preconditions=Preconditions(expected_revision=9))
     assert request.contract_version == "2.2"

@@ -23,7 +23,7 @@ from persistent_atp_client.errors import (
 from persistent_atp_client.models import (
     action_types_for_contract, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, CapabilitySet, DecisionResponse, Event, FormalResume,
-    FormalSearch, HypothesisFormalize, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
+    FormalSearch, HypothesisFormalize, HypothesisRevise, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, ProofStatus, ProjectDigest,
     StatementAlign, TERMINAL_LIFECYCLES, SelectedProofCycle, QueueResearchMoves,
     CoordinationPage, CoordinationItem,
@@ -110,12 +110,13 @@ class ReferenceReceiver:
                 "proof-create", "proof-status", "proof-audit", "proof-export",
                 *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if available else set()),
                 *({'lemma-bridge'} if self.service.research is not None else set()),
-                *({'hypothesis-formalize'} if self.service.intake is not None else set())}}
+                *({'hypothesis-formalize', 'hypothesis-revise'} if self.service.intake is not None else set())}}
         elif self.service.formal is not None:
             actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
                        and (kind != 'formal-search' or available)}
         if self.service.intake is None:
             actions.pop('hypothesis-formalize', None)
+            actions.pop('hypothesis-revise', None)
         controls = {'coordination-read'} if contract_version == '2.1' else set()
         if available:
             controls.add('cancel')
@@ -175,7 +176,7 @@ class ReferenceReceiver:
             raise UnsupportedCapability("historical proof-status action is unavailable")
         # Verify the exact uploaded bytes before reserving execution responsibility.
         refs = []
-        if isinstance(request.action, ProofCreate):
+        if isinstance(request.action, (ProofCreate, HypothesisRevise)):
             refs.append(request.action.spec_artifact)
         elif isinstance(request.action, StatementAlign):
             refs.append(request.action.lean_source_artifact)
@@ -237,6 +238,10 @@ class ReferenceReceiver:
         elif isinstance(action, LemmaBridge): args = {"proof": action.proof_id, "obstruction": action.obstruction_id}
         elif isinstance(action, HypothesisFormalize):
             args = {"proof": action.proof_id, "hypothesis": action.hypothesis_id,
+                    "expected_revision": str(request.preconditions.expected_revision)}
+        elif isinstance(action, HypothesisRevise):
+            args = {"proof": action.proof_id, "hypothesis": action.hypothesis_id,
+                    "spec_artifact": action.spec_artifact.hash, "previous_claim": action.previous_claim_id or "",
                     "expected_revision": str(request.preconditions.expected_revision)}
         else: raise TypeError("unknown action")
         return {"schema_version": 1, "request_id": request.request_id,

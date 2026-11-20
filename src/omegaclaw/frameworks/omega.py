@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from persistent_atp_client import (
     AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,
     Preconditions, ProofAudit, ProofCreate, ProofCycle, ProofExport, StatementAlign,
-    SyncClient, HypothesisFormalize,
+    SyncClient, HypothesisFormalize, HypothesisRevise,
 )
 from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
@@ -32,6 +32,7 @@ SKILLS = {
     "formal-search": ("proof", "claim", "budget"), "formal-resume": ("proof", "run", "budget"),
     "statement-align": ("proof", "claim", "lean_source"), "lemma-bridge": ("proof", "obstruction"),
     "hypothesis-formalize": ("proof", "hypothesis", "expected_revision"),
+    "hypothesis-revise": ("proof", "hypothesis", "spec", "previous_claim", "expected_revision"),
 }
 
 
@@ -81,7 +82,7 @@ class OmegaAdapter:
         if not all(isinstance(value, str) for value in arguments.values()):
             raise ValueError("tool arguments must be strings")
         parsed = dict(arguments)
-        if kind == "proof-create":
+        if kind in {"proof-create", "hypothesis-revise"}:
             parsed["spec"] = validate_spec(parse_json(arguments["spec"]))
         if "budget" in arguments:
             value = parse_json(arguments["budget"])
@@ -90,7 +91,7 @@ class OmegaAdapter:
             parsed["budget"] = to_dict(Budget(**value))
         if kind == "statement-align":
             ArtifactRef(arguments["lean_source"])
-        if kind == "hypothesis-formalize":
+        if kind in {"hypothesis-formalize", "hypothesis-revise"}:
             HypothesisFormalize(arguments['proof'], arguments['hypothesis'])
             if not arguments['hypothesis'].startswith(arguments['proof'] + '/'):
                 raise ValueError('hypothesis is outside the requested proof')
@@ -98,6 +99,9 @@ class OmegaAdapter:
             if not revision.isascii() or not revision.isdecimal():
                 raise ValueError('expected_revision must be a nonnegative decimal revision')
             parsed['expected_revision'] = str(int(revision))
+            if kind == 'hypothesis-revise' and arguments['previous_claim']:
+                if not arguments['previous_claim'].startswith(arguments['proof'] + '/'):
+                    raise ValueError('previous claim is outside the requested proof')
         # SDK-generated DTO identifiers also constrain proof/destination inputs.
         if "proof" in arguments:
             ProofCycle(arguments["proof"])
@@ -246,7 +250,7 @@ class OmegaAdapter:
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
         proof = args["proof"]
-        if kind == 'hypothesis-formalize':
+        if kind in {'hypothesis-formalize', 'hypothesis-revise'}:
             expected = int(args['expected_revision'])
             if digest.revision != expected:
                 raise StalePrecondition('selected hypothesis revision changed; review before starting a new intent')
@@ -254,7 +258,14 @@ class OmegaAdapter:
             if kind not in caps.actions:
                 raise UnsupportedCapability('hypothesis formalization is unavailable')
             self._check_identity(proof, args['hypothesis'], 'SpeculativeHypothesis')
-            return HypothesisFormalize(proof, args['hypothesis']), Preconditions(
+            action = HypothesisFormalize(proof, args['hypothesis'])
+            if kind == 'hypothesis-revise':
+                if args['previous_claim']:
+                    self._check_identity(proof, args['previous_claim'], 'Claim')
+                ref = self.client.put_artifact(self._spec_bytes(row), workspace_id=self.workspace,
+                    media_type='application/json')
+                action = HypothesisRevise(proof, args['hypothesis'], ref, args['previous_claim'] or None)
+            return action, Preconditions(
                 expected_revision=expected, expected_theorem_hash=digest.target_artifact.hash)
         if kind in {"formal-search", "formal-resume"}:
             if self.caps.backend_mode != "real":
@@ -325,7 +336,7 @@ class OmegaAdapter:
             row = self.state.intent(identity)
             code = self._error_code(exc)
             retryable = code in {"SUBMISSION_UNCERTAIN", "TRANSIENT_UNAVAILABLE", "RATE_LIMITED"}
-            repair = code == "HASH_MISMATCH" and row["kind"] == "proof-create"
+            repair = code == "HASH_MISMATCH" and row["kind"] in {"proof-create", "hypothesis-revise"}
             report = self.error(exc, identity, row.get("ref"))
             if code == "STALE_PRECONDITION" and (row.get("arguments") or {}).get("proof"):
                 try:

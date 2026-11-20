@@ -211,3 +211,7 @@ def statement_align(proof, claim, lean_source, workspace): return _invoke("state
 def lemma_bridge(proof, obstruction, workspace): return _invoke("lemma-bridge", workspace, proof=proof, obstruction=obstruction)
 def hypothesis_formalize(proof, hypothesis, expected_revision, workspace):
     return _invoke("hypothesis-formalize", workspace, proof=proof, hypothesis=hypothesis, expected_revision=expected_revision)
+
+def hypothesis_revise(proof, hypothesis, spec, previous_claim, expected_revision, workspace):
+    return _invoke("hypothesis-revise", workspace, proof=proof, hypothesis=hypothesis, spec=spec,
+        previous_claim=previous_claim, expected_revision=expected_revision)

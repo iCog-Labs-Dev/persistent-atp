@@ -289,11 +289,30 @@ class HypothesisFormalize:
         _identifier(self.hypothesis_id, "hypothesis_id")
 
 
+@dataclass(frozen=True, slots=True)
+class HypothesisRevise:
+    """Explicit specification for a new attempt; prior claims remain immutable."""
+
+    kind: ClassVar[str] = "hypothesis-revise"
+    proof_id: str
+    hypothesis_id: str
+    spec_artifact: ArtifactRef
+    previous_claim_id: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.hypothesis_id, "hypothesis_id")
+        if not isinstance(self.spec_artifact, ArtifactRef):
+            raise TypeError("spec_artifact must be ArtifactRef")
+        if self.previous_claim_id is not None:
+            _identifier(self.previous_claim_id, "previous_claim_id")
+
+
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
-COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize)}
+COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise)}
 ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise
 
 
 def action_types_for_contract(version: str):
@@ -327,7 +346,7 @@ class ActionRequest:
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
         if (self.contract_version == "2.2" and isinstance(self.action,
-                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize))
+                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise))
                 and self.preconditions.expected_revision is None):
             raise ValueError("coordinator mutations require expected_revision")
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):

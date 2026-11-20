@@ -115,6 +115,31 @@ def research(tmp_path):
         case.service.close()
 
 
+def test_legacy_saved_response_recovers_without_reclassification(research, monkeypatch):
+    legacy = {key: value for key, value in candidate('Legacy suggestion').items()
+              if key not in {'candidate_kind', 'formalization_spec'}}
+    research.llm.responses = [{'candidates': [legacy]}]
+    validate, save = ResearchWorkflow._validate_response, research.workflow._save
+    def crash(operation, state):
+        save(operation, state)
+        if state.get('phase') == 'candidate-saved':
+            raise SystemExit('old worker interrupted after saving an unclassified response')
+    # Produce the saved state accepted by the earlier worker, then recover it
+    # with today's strict fresh-response validation and unchanged identities.
+    with monkeypatch.context() as patch:
+        patch.setattr(ResearchWorkflow, '_validate_response', staticmethod(
+            lambda response, **kwargs: validate(response, allow_legacy=True)))
+        patch.setattr(research.workflow, '_save', crash)
+        with pytest.raises(SystemExit): research.run()
+    research.restart()
+    outcome = research.run()
+    node = research.service.view.node(outcome['hypothesis_ids'][0])
+    assert node.fields['statement'] == legacy['statement']
+    assert 'candidate_kind' not in node.fields and 'formalization_spec' not in node.fields
+    assert len(research.llm.history) == 1
+    assert research.service.store.verify_chain('p1') == research.revision + 1
+
+
 def interrupt_before_commit(case, monkeypatch, *, phase="proposal-ready"):
     save = case.workflow._save
     def crash(operation, state):

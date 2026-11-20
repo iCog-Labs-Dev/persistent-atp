@@ -149,15 +149,61 @@ class IntakeWorkflow:
         state[key] = self._lease(saved['proof_id'], saved['selected_move_id'], saved['worker_class'], conflicts=conflicts)
         self._save(operation, state)
 
-    def _stage_lease(self, operation, state, key, worker):
-        if not self._owned_hypothesis(operation, state):
-            return self._lease(state['proof_id'], state['declaration_id'], worker)
+    def _stage_lease(self, operation, state, key, worker, *, selected=None):
+        if not self._owned_hypothesis(operation, state) and key != 'clarification_lease':
+            return self._lease(state['proof_id'], selected or state['declaration_id'], worker)
         if key in state:
             self._resume_lease(operation, state, key)
         else:
-            state[key] = self._lease(state['proof_id'], state['declaration_id'], worker)
+            state[key] = self._lease(state['proof_id'], selected or state['declaration_id'], worker)
             self._save(operation, state)
         return state[key]
+
+    def _clarification(self, operation, state, reason=None):
+        """Persist refusal evidence without creating or weakening a declaration."""
+        with self.service.lock:
+            self._validate_inputs(state)
+            if 'clarification' not in state:
+                candidate = state.get('candidate')
+                notes = candidate.get('notes') if isinstance(candidate, dict) else None
+                reasons = ([notes[:4096]] if isinstance(notes, str) and notes.strip() else [])
+                reasons.append(str(reason or 'The candidate is not a valid Lean proposition.')[:2048])
+                report = {'format': 'omega-formalization-clarification-v1', 'operation_id': operation,
+                    'proof_id': state['proof_id'], 'claim_id': state['claim_id'],
+                    'spec_hash': content_hash(state['spec']), 'environment_hash': state['environment_hash'],
+                    'candidate': candidate, 'clarification_reasons': reasons}
+                state['clarification'] = {'report_artifact': self.service.artifacts.put(canonical_json(report)),
+                    'clarification_reasons': reasons}
+                self._save(operation, state)
+            details = state['clarification']
+            ref = details['report_artifact']
+            expected_report = {'format': 'omega-formalization-clarification-v1', 'operation_id': operation,
+                'proof_id': state['proof_id'], 'claim_id': state['claim_id'],
+                'spec_hash': content_hash(state['spec']), 'environment_hash': state['environment_hash'],
+                'candidate': state.get('candidate'), 'clarification_reasons': details['clarification_reasons']}
+            if (ref != content_hash(expected_report)
+                    or self.service.artifacts.get(ref) != canonical_json(expected_report)):
+                raise ValueError('saved clarification report differs from its original inputs')
+            edge_id = state['proof_id'] + '/clarification-' + content_hash(operation)[7:39]
+            fields = {'artifact_hash': ref, 'media_type': 'application/json',
+                'format': 'omega-formalization-clarification-v1'}
+            node = self.service.view.node(ref)
+            if node is None:
+                self._release(state['draft_lease'])
+                lease = self._stage_lease(operation, state, 'clarification_lease', 'coordinator',
+                    selected=state['claim_id'])
+                self._commit(lease, (UpsertNode('Artifact', ref, fields),
+                    AddEdge('HAS_ARTIFACT', state['claim_id'], ref, edge_id)), operation=operation, state=state)
+            elif (node.label != 'Artifact' or dict(node.fields) != fields
+                    or not any(e.edge_id == edge_id and e.dst_id == ref
+                        for e in self.service.view.edges_from(state['claim_id'], 'HAS_ARTIFACT'))):
+                raise ValueError('committed clarification evidence differs from the saved refusal')
+            outcome = {'ready': False, 'formalization_disposition': 'needs-clarification',
+                'error_code': 'FORMALIZATION_NEEDS_CLARIFICATION', **details,
+                'revision': self.service.store.head(state['proof_id'])[0]}
+            state.update(phase='finished', outcome=outcome)
+            self._save(operation, state)
+            return outcome
 
     def _validate_inputs(self, state):
         for record in [state['claim'], *state['dependencies']]:
@@ -236,6 +282,8 @@ class IntakeWorkflow:
                 return {'ready': False, 'cancelled': True}
             if state.get('phase') == 'finished':
                 return state['outcome']
+            if 'clarification' in state:
+                return self._clarification(operation, state)
             with service.lock:
                 if self._owned_hypothesis(operation, state):
                     self.validate_hypothesis_history(operation, proof, service.view.node(target_claim_id))
@@ -246,14 +294,20 @@ class IntakeWorkflow:
                 PacketKind.FORMALIZATION, WorkerClass.FORMALIZER, text_budget=TextBudget(self.config.text_tokens)),
                 claim=state['claim'], dependencies=state['dependencies'], theorem=state['spec'])
             if 'candidate' not in state:
-                candidate = LLMFormalizerBackend(self.config.llm()).formalize(compilation)
+                try:
+                    candidate = LLMFormalizerBackend(self.config.llm()).formalize(compilation)
+                except ValueError as exc:
+                    return self._clarification(operation, state, exc)
                 state['candidate'] = dict(candidate)
                 self._save(operation, state)
-            result = FormalizerWorker(_SavedCandidate(state['candidate']), actor=state['draft_lease']['actor']).run(
-                compilation, declaration_id=state['declaration_id'], claim_id=state['claim_id'],
-                base_revision=state['draft_lease']['base_revision'], lease_id=state['draft_lease']['lease_id'],
-                fencing_token=state['draft_lease']['fencing_token'])
-            source_bytes = self._source(result)
+            try:
+                result = FormalizerWorker(_SavedCandidate(state['candidate']), actor=state['draft_lease']['actor']).run(
+                    compilation, declaration_id=state['declaration_id'], claim_id=state['claim_id'],
+                    base_revision=state['draft_lease']['base_revision'], lease_id=state['draft_lease']['lease_id'],
+                    fencing_token=state['draft_lease']['fencing_token'])
+                source_bytes = self._source(result)
+            except ValueError as exc:
+                return self._clarification(operation, state, exc)
             if cancelled():
                 return {'ready': False, 'cancelled': True}
             with service.lock:
@@ -345,6 +399,6 @@ class IntakeWorkflow:
             import sys
             if sys.exc_info()[0] is None or issubclass(sys.exc_info()[0], Exception):
                 with service.lock:
-                    for key in ('draft_lease', 'review_lease', 'source_lease', 'promotion_lease'):
+                    for key in ('draft_lease', 'review_lease', 'source_lease', 'promotion_lease', 'clarification_lease'):
                         if key in state:
                             self._release(state[key])

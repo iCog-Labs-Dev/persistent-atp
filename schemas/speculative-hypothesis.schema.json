@@ -8,6 +8,8 @@
   "properties": {
     "schema_version": {"const": 1},
     "hypothesis_id": {"type": "string", "pattern": "^[^/]+/hyp-[a-f0-9]{32}$"},
+    "candidate_kind": {"enum": ["mathematical-claim", "research-move"]},
+    "formalization_spec": {"type": ["object", "null"]},
     "statement": {"type": "string", "minLength": 1},
     "source_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
     "prerequisites": {"type": "array", "items": {"type": "string"}},

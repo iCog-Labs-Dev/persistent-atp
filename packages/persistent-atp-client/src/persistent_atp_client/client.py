@@ -24,7 +24,7 @@ from .models import (
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
     CoordinationPage, ProjectDigest, QueueCoordinatorEscalations, CoordinatorEscalation,
-    HypothesisFormalize,
+    HypothesisFormalize, HypothesisRevise,
 )
 from .ports import ReceiverPort
 
@@ -219,6 +219,12 @@ class AsyncClient:
     async def formalize_hypothesis(self, proof_id: str, hypothesis_id: str, *, workspace_id: str,
                                    preconditions: Preconditions, **request_options):
         return await self.submit_action(HypothesisFormalize(proof_id, hypothesis_id),
+            workspace_id=workspace_id, preconditions=preconditions, **request_options)
+
+    async def revise_hypothesis(self, proof_id: str, hypothesis_id: str, spec_artifact: ArtifactRef, *,
+                                workspace_id: str, preconditions: Preconditions,
+                                previous_claim_id: str | None = None, **request_options):
+        return await self.submit_action(HypothesisRevise(proof_id, hypothesis_id, spec_artifact, previous_claim_id),
             workspace_id=workspace_id, preconditions=preconditions, **request_options)
 
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:
