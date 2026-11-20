@@ -7,8 +7,8 @@ import re
 from typing import Any, ClassVar, TypeAlias
 
 
-def _identifier(value: str, field_name: str) -> None:
-    if not isinstance(value, str) or not 1 <= len(value) <= 128 or any(ord(c) < 32 for c in value):
+def _identifier(value: str, field_name: str, *, max_length: int = 128) -> None:
+    if not isinstance(value, str) or not 1 <= len(value) <= max_length or any(ord(c) < 32 for c in value):
         raise ValueError(f"{field_name} must be a bounded nonempty identifier")
 
 
@@ -482,7 +482,9 @@ class CoordinationItem:
     def __post_init__(self):
         if self.item_type not in {"node", "edge", "frontier"}:
             raise ValueError("unknown coordination item type")
-        _identifier(self.record_id, "record_id")
+        # Graph records include composite edge IDs containing both endpoint IDs
+        # and a relation. Preserve their journal identity on coordination reads.
+        _identifier(self.record_id, "record_id", max_length=4096)
         _identifier(self.label, "label")
         if not isinstance(self.fields, dict) or not all(isinstance(key, str) for key in self.fields):
             raise ValueError("coordination fields must be a string-keyed mapping")

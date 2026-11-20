@@ -82,7 +82,7 @@
       "required": ["item_type", "record_id", "label", "fields"],
       "properties": {
         "item_type": {"enum": ["node", "edge", "frontier"]},
-        "record_id": {"$ref": "#/$defs/id"},
+        "record_id": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f]+$"},
         "label": {"$ref": "#/$defs/id"},
         "fields": {"type": "object"}
       }

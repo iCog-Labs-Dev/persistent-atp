@@ -77,6 +77,13 @@ def check_formalization(case, tmp_path, transport):
         assert row["request"]["preconditions"]["expected_revision"] == revision
         assert row["arguments"]["expected_revision"] == str(revision)
         case.assert_complete(result)
+        # Intake binds two full content-derived node identities in this edge ID.
+        # A coordinator must still be able to read the whole graph afterwards.
+        page = adapter.client.coordination_page(case.proof, workspace_id="reference")
+        alignment_edges = [item for item in page.items
+                           if item.item_type == "edge" and item.label == "ALIGNS_DECLARATION"]
+        assert len(alignment_edges) == 1
+        assert len(alignment_edges[0].record_id) > 128
         assert adapter.artifact_excerpt(ArtifactRef(result["report_artifact"]))["text"]
         assert not adapter.status(case.proof)["formal_verified"]
         assert "independent replay" in bridge.reporting_policy()
