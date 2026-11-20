@@ -358,8 +358,7 @@ class OperationService:
             raise ContractError("hypothesis is outside the requested proof")
 
         with self.lock:
-            if self.store.head(proof_id)[0] != expected:
-                raise ContractError("proof changed before hypothesis admission; review the current candidate")
+            self.catch_up(proof_id)
             hypothesis = self.view.node(hypothesis_id)
             if hypothesis is None or hypothesis.label != "SpeculativeHypothesis":
                 raise ContractError("unknown speculative hypothesis")
@@ -384,6 +383,10 @@ class OperationService:
                         for edge in self.view.edges_from(obstruction.fields["formal_run_id"], "RAISED_OBSTRUCTION"))):
                 raise ContractError("hypothesis obstruction provenance is no longer committed")
 
+            input_digest = content_hash({"hypothesis_id": hypothesis_id, "hypothesis": dict(hypothesis.fields),
+                "parent_claim_id": parent_claim_id, "parent_claim": dict(parent_claim.fields),
+                "obstruction_id": obstruction_id, "obstruction": dict(obstruction.fields)})
+
             promotions = self.view.edges_from(hypothesis_id, "PROMOTED_TO")
             if len(promotions) > 1:
                 raise ContractError("hypothesis has conflicting promotion links")
@@ -394,7 +397,16 @@ class OperationService:
                         or claim.fields.get("source_hypothesis_id") != hypothesis_id
                         or claim.fields.get("parent_claim_id") != parent_claim_id):
                     raise ContractError("existing hypothesis promotion differs from its source")
+                if (claim.fields.get("hypothesis_operation_id") != operation_id
+                        or claim.fields.get("hypothesis_admission_revision") != expected):
+                    raise ContractError("hypothesis admission belongs to another operation or requires legacy reconciliation")
+                if claim.fields.get("hypothesis_input_digest") != input_digest:
+                    raise ContractError("hypothesis admission inputs changed; reconcile the original operation")
+                admission = self.intake.validate_hypothesis_history(operation_id, proof_id, claim)
+                self.store.release_lease(proof_id, admission['lease_id'], fencing_token=admission['fencing_token'])
             else:
+                if self.store.head(proof_id)[0] != expected:
+                    raise ContractError("proof changed before hypothesis admission; review the current candidate")
                 statement = hypothesis.fields["statement"].strip()
                 parent_spec_ref = parent_claim.fields.get("theorem_spec_artifact")
                 if not parent_spec_ref or not self.artifacts.exists(parent_spec_ref):
@@ -423,6 +435,9 @@ class OperationService:
                     "obstruction_id": obstruction_id,
                     "research_context_artifact": hypothesis.fields["packet_artifact"],
                     "research_result_artifact": hypothesis.fields["result_artifact"],
+                    "hypothesis_operation_id": operation_id,
+                    "hypothesis_admission_revision": expected,
+                    "hypothesis_input_digest": input_digest,
                 }
                 lease = self.store.claim_next(proof_id,
                     [LeaseCandidate(hypothesis_id, {}, (parent_claim_id, obstruction_id))],
@@ -444,12 +459,13 @@ class OperationService:
                     self.store.release_lease(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
 
         intake = self.intake.run(operation_id, proof_id, claim_id=claim_id)
-        return {**self._status(proof_id), "claim_id": claim_id,
-            "parent_claim_id": parent_claim_id, "hypothesis_id": hypothesis_id,
-            "formalization_ready": intake.get("ready", False),
-            "declaration_id": intake.get("declaration_id"), "alignment_id": intake.get("alignment_id"),
-            "report_artifact": intake.get("report_artifact"),
-            "error_code": intake.get("error_code"), "component_mode": "hypothesis-formalization"}
+        with self.lock:
+            return {**self._status(proof_id), "claim_id": claim_id,
+                "parent_claim_id": parent_claim_id, "hypothesis_id": hypothesis_id,
+                "formalization_ready": intake.get("ready", False),
+                "declaration_id": intake.get("declaration_id"), "alignment_id": intake.get("alignment_id"),
+                "report_artifact": intake.get("report_artifact"),
+                "error_code": intake.get("error_code"), "component_mode": "hypothesis-formalization"}
 
     def _create(self, raw_spec: str, operation_id: str) -> dict:
         try:

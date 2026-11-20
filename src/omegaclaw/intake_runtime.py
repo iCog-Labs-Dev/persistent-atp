@@ -92,13 +92,72 @@ class IntakeWorkflow:
             raise ValueError('intake work is already leased; reconcile its owner')
         return lease.to_dict()
 
-    def _commit(self, lease, ops):
-        result = self.service.gate.commit(Proposal(lease['proof_id'], lease['actor'], lease['worker_class'],
+    def _commit(self, lease, ops, *, operation=None, state=None):
+        proposal = Proposal(lease['proof_id'], lease['actor'], lease['worker_class'],
             ops=tuple(ops), base_revision=lease['base_revision'], lease_id=lease['lease_id'],
-            fencing_token=lease['fencing_token'], selected_move_id=lease['selected_move_id']))
+            fencing_token=lease['fencing_token'], selected_move_id=lease['selected_move_id'])
+        if state is not None and self._owned_hypothesis(operation, state):
+            self.validate_hypothesis_history(operation, lease['proof_id'], self.service.view.node(state['claim_id']))
+            prepared = state.setdefault('commit_proposals', [])
+            if proposal.to_dict() not in prepared:
+                prepared.append(proposal.to_dict())
+                self._save(operation, state)  # BEFORE the journal append.
+        result = self.service.gate.commit(proposal)
         if not result.accepted:
             raise ValueError('gate rejected intake: ' + ', '.join(r.reason.value for r in result.rejections))
         self.service.catch_up(lease['proof_id'])
+
+    @staticmethod
+    def _owned_hypothesis(operation, state):
+        return state['claim']['fields'].get('hypothesis_operation_id') == operation
+
+    def validate_hypothesis_history(self, operation, proof, claim):
+        """Only this operation's admission and prepared intake writes may advance its revision."""
+        fields = claim.fields
+        if fields.get('hypothesis_operation_id') != operation:
+            raise ValueError('hypothesis admission ownership changed')
+        expected = fields.get('hypothesis_admission_revision')
+        if type(expected) is not int or expected < 0:
+            raise ValueError('hypothesis admission revision is invalid')
+        hypothesis = fields['source_hypothesis_id']
+        edge_id = f"{proof}/promote-{content_hash([hypothesis, claim.node_id])[7:]}"
+        events = self.service.store.read_events_after(proof, expected)
+        admission_ops = [UpsertNode('Claim', claim.node_id, dict(fields)).to_dict(),
+            AddEdge('PROMOTED_TO', hypothesis, claim.node_id, edge_id).to_dict()]
+        if (not events or events[0][0] != expected + 1
+                or events[0][1].get('base_revision') != expected
+                or events[0][1].get('worker_class') != 'coordinator'
+                or events[0][1].get('selected_move_id') != hypothesis
+                or events[0][1].get('ops') != admission_ops):
+            raise ValueError('committed hypothesis admission differs from the original operation')
+        state = self.service.jobs.intake_state(operation)
+        prepared = state.get('commit_proposals', [])
+        if any(event not in prepared for _, event in events[1:]):
+            raise ValueError('proof changed outside the hypothesis formalization operation')
+        return events[0][1]
+
+    def _resume_lease(self, operation, state, key, *, conflicts=()):
+        """Reacquire an expired intake lease only at the same validated revision."""
+        saved = state[key]
+        for row in self.service.store.active_leases(saved['proof_id']):
+            if row.lease_id == saved['lease_id'] and row.fencing_token == saved['fencing_token']:
+                if row.to_dict() != saved:
+                    raise ValueError('saved intake lease identity changed')
+                return
+        if self.service.store.head(saved['proof_id'])[0] != saved['base_revision']:
+            raise ValueError('proof changed before intake lease recovery')
+        state[key] = self._lease(saved['proof_id'], saved['selected_move_id'], saved['worker_class'], conflicts=conflicts)
+        self._save(operation, state)
+
+    def _stage_lease(self, operation, state, key, worker):
+        if not self._owned_hypothesis(operation, state):
+            return self._lease(state['proof_id'], state['declaration_id'], worker)
+        if key in state:
+            self._resume_lease(operation, state, key)
+        else:
+            state[key] = self._lease(state['proof_id'], state['declaration_id'], worker)
+            self._save(operation, state)
+        return state[key]
 
     def _validate_inputs(self, state):
         for record in [state['claim'], *state['dependencies']]:
@@ -125,6 +184,7 @@ class IntakeWorkflow:
         if not isinstance(target_claim_id, str) or not target_claim_id.startswith(proof + '/'):
             raise ValueError('formalization claim is outside the requested proof')
         with service.lock:
+            service.catch_up(proof)
             state = service.jobs.intake_state(operation)
         if state and (state.get('contract_manifest') != MANIFEST_HASH or state['proof_id'] != proof
                 or state.get('claim_id') != target_claim_id
@@ -137,6 +197,8 @@ class IntakeWorkflow:
                 claim = service.view.node(target_claim_id)
                 if not claim or not claim.fields.get('theorem_spec_artifact'):
                     raise ValueError('automated intake requires the complete committed theorem specification')
+                if claim.fields.get('hypothesis_operation_id') == operation:
+                    self.validate_hypothesis_history(operation, proof, claim)
                 if (service.view.edges_to(target_claim_id, 'DRAFTS_CLAIM') or service.view.edges_to(target_claim_id, 'ALIGNS_CLAIM')
                         or service.view.edges_from(target_claim_id, 'FORMALIZES') or service.view.edges_to(target_claim_id, 'FORMALIZES')):
                     return {'ready': False, 'error_code': 'EXISTING_FORMALIZATION_REQUIRES_REVIEW'}
@@ -174,6 +236,12 @@ class IntakeWorkflow:
                 return {'ready': False, 'cancelled': True}
             if state.get('phase') == 'finished':
                 return state['outcome']
+            with service.lock:
+                if self._owned_hypothesis(operation, state):
+                    self.validate_hypothesis_history(operation, proof, service.view.node(target_claim_id))
+                    self._validate_inputs(state)
+                    if service.view.node(state['declaration_id']) is None:
+                        self._resume_lease(operation, state, 'draft_lease')
             compilation = compile_formalization(CompileRequest(operation, proof, state['draft_lease']['base_revision'],
                 PacketKind.FORMALIZATION, WorkerClass.FORMALIZER, text_budget=TextBudget(self.config.text_tokens)),
                 claim=state['claim'], dependencies=state['dependencies'], theorem=state['spec'])
@@ -191,14 +259,14 @@ class IntakeWorkflow:
             with service.lock:
                 self._validate_inputs(state)
                 if service.view.node(state['declaration_id']) is None:
-                    self._commit(state['draft_lease'], result.proposal.ops)
+                    self._commit(state['draft_lease'], result.proposal.ops, operation=operation, state=state)
                 self._release(state['draft_lease'])
                 declaration = service.view.node(state['declaration_id'])
                 if any(declaration.fields.get(k) != v for k, v in (('lean_name', result.lean_name), ('lean_type', result.lean_type))):
                     raise ValueError('committed draft differs from saved formalizer output')
                 source = service.artifacts.put(source_bytes)
                 if not declaration.fields.get('lean_source_artifact'):
-                    lease = self._lease(proof, state['declaration_id'], 'coordinator')
+                    lease = self._stage_lease(operation, state, 'source_lease', 'coordinator')
                     try:
                         ops = [SetField('FormalDeclaration', state['declaration_id'], key, value, prior=None)
                             for key, value in {'lean_source_artifact': source, 'source_hash': source,
@@ -206,16 +274,20 @@ class IntakeWorkflow:
                         ops += [UpsertNode('Environment', state['environment_id'], {'toolchain': self.config.toolchain,
                             'environment_hash': state['environment_hash'], 'provider_environment_id': state['provider_environment_id']}),
                             AddEdge('PINNED_ENVIRONMENT', state['declaration_id'], state['environment_id'], state['environment_id'] + '-pin')]
-                        self._commit(lease, ops)
+                        self._commit(lease, ops, operation=operation, state=state)
                     finally:
                         self._release(lease)
                 declaration = service.view.node(state['declaration_id'])
                 if declaration.fields.get('lean_source_artifact') != source or declaration.fields.get('intake_operation_id') != operation:
                     raise ValueError('source-backed declaration ownership changed')
+                if 'source_lease' in state:
+                    self._release(state['source_lease'])
                 state['source_hash'] = source
                 state['packet_artifact'] = service.artifacts.put(compilation.context_text.encode())
                 if 'review_lease' not in state:
                     state['review_lease'] = self._lease(proof, state['declaration_id'], 'alignment-reviewer', conflicts=(state['claim_id'],))
+                elif self._owned_hypothesis(operation, state) and service.view.node(state['alignment_id']) is None:
+                    self._resume_lease(operation, state, 'review_lease', conflicts=(state['claim_id'],))
                 self._save(operation, state)
             if on_progress:
                 on_progress({'proof_id': proof, 'phase': 'alignment-review', 'lifecycle': 'running'})
@@ -248,15 +320,17 @@ class IntakeWorkflow:
                         result=review, actor=lease['actor'], base_revision=lease['base_revision'], lease_id=lease['lease_id'],
                         fencing_token=lease['fencing_token'], selected_move_id=lease['selected_move_id'])
                     first = proposal.ops[0]
-                    self._commit(lease, (UpsertNode(first.label, first.node_id, {**first.fields, 'report_artifact': report}), *proposal.ops[1:]))
+                    self._commit(lease, (UpsertNode(first.label, first.node_id, {**first.fields, 'report_artifact': report}), *proposal.ops[1:]),
+                        operation=operation, state=state)
                 elif alignment.fields.get('report_artifact') != report:
                     raise ValueError('committed alignment differs from saved review')
                 self._release(lease)
                 declaration = service.view.node(state['declaration_id'])
                 if accepted and declaration.fields['status'] == 'draft':
-                    authority = self._lease(proof, state['declaration_id'], 'coordinator')
+                    authority = self._stage_lease(operation, state, 'promotion_lease', 'coordinator')
                     try:
-                        self._commit(authority, [SetField('FormalDeclaration', state['declaration_id'], 'status', 'aligned', prior='draft')])
+                        self._commit(authority, [SetField('FormalDeclaration', state['declaration_id'], 'status', 'aligned', prior='draft')],
+                            operation=operation, state=state)
                     finally:
                         self._release(authority)
                 outcome = {'ready': accepted, 'declaration_id': state['declaration_id'], 'alignment_id': state['alignment_id'],
@@ -271,6 +345,6 @@ class IntakeWorkflow:
             import sys
             if sys.exc_info()[0] is None or issubclass(sys.exc_info()[0], Exception):
                 with service.lock:
-                    for key in ('draft_lease', 'review_lease'):
+                    for key in ('draft_lease', 'review_lease', 'source_lease', 'promotion_lease'):
                         if key in state:
                             self._release(state[key])
