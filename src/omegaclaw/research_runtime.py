@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Mapping
 
+from artifacts.errors import ArtifactIntegrityError, ArtifactNotFoundError
 from artifacts.hashing import hash_content
 from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import UpsertNode
@@ -164,26 +165,113 @@ class ResearchWorkflow:
             raise ContractError("research worker returned duplicate candidate statements")
         return candidates
 
+    @staticmethod
+    def _hypothesis_ids(proof_id, operation_id, candidates):
+        return [f"{proof_id}/hyp-{content_hash([operation_id, index, candidate['statement']])[7:39]}"
+                for index, candidate in enumerate(candidates, start=1)]
+
+    @staticmethod
+    def _result(proof_id, obstruction_id, operation_id, identity, candidates, provider):
+        return {
+            "format": "omega-lemma-bridge-result-v1",
+            "proof_id": proof_id,
+            "operation_id": operation_id,
+            "obstruction_id": obstruction_id,
+            "claim_id": identity["claim_id"],
+            "formal_run_id": identity["formal_run_id"],
+            "packet_artifact": identity["packet_artifact"],
+            "packet_digest": identity["packet_digest"],
+            "provider": provider,
+            "candidates": candidates,
+            "status": "speculative",
+        }
+
+    def _saved_proposal(self, proof_id, obstruction_id, operation_id, state):
+        """Rebuild immutable ops from the saved response and exact result bytes."""
+        candidates = self._validate_response({"candidates": state.get("response")})
+        hypothesis_ids = self._hypothesis_ids(proof_id, operation_id, candidates)
+        if state.get("hypothesis_ids") != hypothesis_ids:
+            raise ContractError("saved research candidate identities differ from their response")
+        result_ref = state.get("result_artifact")
+        try:
+            result_bytes = self.service.artifacts.get(result_ref)
+            if hash_content(result_bytes) != result_ref:
+                raise ValueError("content address mismatch")
+            result = json.loads(result_bytes)
+        except (KeyError, ValueError, TypeError, OSError, ArtifactNotFoundError, ArtifactIntegrityError) as exc:
+            raise ContractError("saved research result artifact is missing or corrupt") from exc
+        provider = result.get("provider") if isinstance(result, dict) else None
+        if (not isinstance(provider, str) or not provider
+                or state.get("provider", provider) != provider
+                or result != self._result(proof_id, obstruction_id, operation_id,
+                    state["identity"], candidates, provider)):
+            raise ContractError("saved research result differs from its operation and candidates")
+
+        identity = state["identity"]
+        ops = []
+        for hypothesis_id, candidate in zip(hypothesis_ids, candidates, strict=True):
+            payload = {
+                "schema_version": 1,
+                "hypothesis_id": hypothesis_id,
+                "statement": candidate["statement"].strip(),
+                "source_ids": [obstruction_id, identity["claim_id"], *identity["formal_state_ids"]],
+                "prerequisites": list(identity["formal_state_ids"]),
+                "consequences": candidate["consequences"],
+                "novelty": candidate["novelty"],
+                "support": "LLM-generated research suggestion; no proof or verification is asserted.",
+                "cost": candidate["cost"],
+                "risk": candidate["risk"],
+                "falsification_test": candidate["falsification_test"],
+                "expiry_review": candidate["expiry_review"],
+                "packet_artifact": identity["packet_artifact"],
+                "result_artifact": result_ref,
+            }
+            errors = validate_schema("speculative-hypothesis", payload)
+            if errors:
+                raise ContractError("research candidate failed speculative schema: " + "; ".join(errors))
+            ops.append(UpsertNode("SpeculativeHypothesis", hypothesis_id, payload))
+        return tuple(ops)
+
+    def _reconcile(self, proof_id, obstruction_id, operation_id, state):
+        """Return a completed result only when every saved node matches in full."""
+        ops = self._saved_proposal(proof_id, obstruction_id, operation_id, state)
+        existing = [self.service.view.node(op.node_id) for op in ops]
+        if any(node is not None for node in existing):
+            if not all(node is not None for node in existing):
+                raise ContractError("only some hypotheses from the saved research proposal are committed")
+            if any(node.label != op.label or dict(node.fields) != dict(op.fields)
+                   for node, op in zip(existing, ops, strict=True)):
+                raise ContractError("previous research result conflicts with committed hypotheses")
+            outcome = self._outcome(proof_id, obstruction_id, state["hypothesis_ids"], state)
+            state.update(phase="committed", outcome=outcome)
+            self.service.jobs.save_research(operation_id, state)
+            lease = state.get("lease")
+            if lease:
+                self.service.store.release_lease(proof_id, lease["lease_id"], fencing_token=lease["fencing_token"])
+            return outcome
+        if state.get("phase") == "committed":
+            raise ContractError("completed research operation has no committed hypotheses")
+        return None
+
     def run(self, proof_id: str, obstruction_id: str, operation_id: str) -> dict[str, Any]:
         service = self.service
         with service.lock:
+            # A journal append may have succeeded before projection or the
+            # operational completion record. Reconcile that commit first.
+            service.catch_up(proof_id)
             state = service.jobs.research_state(operation_id)
-            hypothesis_ids = state.get("hypothesis_ids", [])
-            existing = [service.view.node(node_id) for node_id in hypothesis_ids]
-            if existing and all(node is not None for node in existing):
-                if not all(node.label == "SpeculativeHypothesis"
-                           and node.fields.get("result_artifact") == state.get("result_artifact")
-                           for node in existing):
-                    raise ContractError("previous research result conflicts with committed hypotheses")
-                outcome = self._outcome(proof_id, obstruction_id, hypothesis_ids, state)
-                state.update(phase="committed", outcome=outcome)
-                service.jobs.save_research(operation_id, state)
-                lease = state.get("lease")
-                if lease:
-                    service.store.release_lease(proof_id, lease["lease_id"], fencing_token=lease["fencing_token"])
-                return outcome
-            if existing:
-                raise ContractError("only some hypotheses from the saved research proposal are committed")
+            if state:
+                saved_identity = state.get("identity", {})
+                if (saved_identity.get("proof_id") != proof_id
+                        or saved_identity.get("obstruction_id") != obstruction_id
+                        or state.get("identity_digest") != content_hash(saved_identity)):
+                    raise ContractError("saved research identity differs from the requested obstruction")
+                if "result_artifact" in state or "hypothesis_ids" in state:
+                    outcome = self._reconcile(proof_id, obstruction_id, operation_id, state)
+                    if outcome is not None:
+                        return outcome
+                elif state.get("phase") in {"proposal-ready", "committed"}:
+                    raise ContractError("saved research proposal is incomplete")
 
             context = self._context(proof_id, obstruction_id)
             identity = {key: context[key] for key in (
@@ -195,22 +283,9 @@ class ResearchWorkflow:
             if state:
                 if state.get("identity_digest") != identity_digest or state.get("identity") != identity:
                     raise ContractError("research inputs changed; start a new operation against the current obstruction")
-                if state.get("phase") == "committed":
-                    return state["outcome"]
             else:
-                state = {"phase": "prepared", "identity": identity, "identity_digest": identity_digest}
-
-            hypothesis_ids = state.get("hypothesis_ids")
-            existing = [service.view.node(node_id) for node_id in hypothesis_ids or ()]
-            if existing and all(node is not None for node in existing):
-                if not all(node.label == "SpeculativeHypothesis"
-                           and node.fields.get("result_artifact") == state.get("result_artifact")
-                           for node in existing):
-                    raise ContractError("previous research result conflicts with committed hypotheses")
-                outcome = self._outcome(proof_id, obstruction_id, hypothesis_ids, state)
-                state.update(phase="committed", outcome=outcome)
-                service.jobs.save_research(operation_id, state)
-                return outcome
+                state = {"phase": "prepared", "identity": identity, "identity_digest": identity_digest,
+                         "provider": self.config.provider}
 
             active_leases = service.store.active_leases(proof_id)
             current_lease = state.get("lease")
@@ -218,6 +293,9 @@ class ResearchWorkflow:
                 row.lease_id == current_lease["lease_id"]
                 and row.fencing_token == current_lease["fencing_token"]
                 and row.selected_move_id == obstruction_id
+                and row.base_revision == identity["revision"]
+                and row.actor == current_lease["actor"]
+                and row.worker_class == WorkerClass.LLM_RESEARCH.value
                 for row in active_leases
             )
             if not lease_is_active:
@@ -239,6 +317,8 @@ class ResearchWorkflow:
 
         try:
             if "response" not in state:
+                if state.get("provider", self.config.provider) != self.config.provider:
+                    raise ContractError("research provider changed before generation; reconcile the saved operation")
                 try:
                     llm = self._llm_factory()
                     response = llm.generate_json(
@@ -254,57 +334,20 @@ class ResearchWorkflow:
             else:
                 candidates = self._validate_response({"candidates": state["response"]})
 
-            result = {
-                "format": "omega-lemma-bridge-result-v1",
-                "proof_id": proof_id,
-                "operation_id": operation_id,
-                "obstruction_id": obstruction_id,
-                "claim_id": context["claim_id"],
-                "formal_run_id": context["formal_run_id"],
-                "packet_artifact": context["packet_artifact"],
-                "packet_digest": context["packet_digest"],
-                "provider": self.config.provider,
-                "candidates": candidates,
-                "status": "speculative",
-            }
-            result_bytes = canonical_json(result)
             with service.lock:
-                result_ref = service.artifacts.put(result_bytes)
-            if hash_content(result_bytes) != result_ref:
-                raise ContractError("research result artifact store changed its content address")
-            state["result_artifact"] = result_ref
-            state["hypothesis_ids"] = [
-                f"{proof_id}/hyp-{content_hash([operation_id, index, candidate['statement']])[7:39]}"
-                for index, candidate in enumerate(candidates, start=1)
-            ]
-            state["phase"] = "proposal-ready"
-            self._save(operation_id, state)
+                if "result_artifact" not in state:
+                    result = self._result(proof_id, obstruction_id, operation_id, identity,
+                        candidates, state.get("provider", self.config.provider))
+                    result_bytes = canonical_json(result)
+                    result_ref = service.artifacts.put(result_bytes)
+                    if hash_content(result_bytes) != result_ref:
+                        raise ContractError("research result artifact store changed its content address")
+                    state.update(result_artifact=result_ref,
+                        hypothesis_ids=self._hypothesis_ids(proof_id, operation_id, candidates), phase="proposal-ready")
+                    self._save(operation_id, state)
+                ops = self._saved_proposal(proof_id, obstruction_id, operation_id, state)
 
-            lease = state["lease"]
-            ops = []
-            for hypothesis_id, candidate in zip(state["hypothesis_ids"], candidates, strict=True):
-                payload = {
-                    "schema_version": 1,
-                    "hypothesis_id": hypothesis_id,
-                    "statement": candidate["statement"].strip(),
-                    "source_ids": [obstruction_id, context["claim_id"], *context["formal_state_ids"]],
-                    "prerequisites": list(context["formal_state_ids"]),
-                    "consequences": candidate["consequences"],
-                    "novelty": candidate["novelty"],
-                    "support": "LLM-generated research suggestion; no proof or verification is asserted.",
-                    "cost": candidate["cost"],
-                    "risk": candidate["risk"],
-                    "falsification_test": candidate["falsification_test"],
-                    "expiry_review": candidate["expiry_review"],
-                    "packet_artifact": context["packet_artifact"],
-                    "result_artifact": result_ref,
-                }
-                errors = validate_schema("speculative-hypothesis", payload)
-                if errors:
-                    raise ContractError("research candidate failed speculative schema: " + "; ".join(errors))
-                ops.append(UpsertNode("SpeculativeHypothesis", hypothesis_id, payload))
-
-            with service.lock:
+                lease = state["lease"]
                 if service.store.head(proof_id)[0] != lease["base_revision"]:
                     raise ContractError("proof changed during research; do not rebase the saved suggestion")
                 commit = service.gate.commit(Proposal(

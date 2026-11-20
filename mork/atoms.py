@@ -28,7 +28,10 @@ def encode(value: Any) -> str:
     safely-sized string chunks. It remains a single matchable atom slot.
     """
     serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) <= _MAX_TOKEN_BYTES:
+    # JSON arrays/objects are not quoted MeTTa atom slots. Even short values
+    # containing spaces or delimiters can be split or dropped by the native
+    # parser, so use the same lossless container as long values.
+    if not isinstance(value, (list, tuple, dict)) and len(serialized.encode("utf-8")) <= _MAX_TOKEN_BYTES:
         return serialized
 
     chunks: list[str] = []
