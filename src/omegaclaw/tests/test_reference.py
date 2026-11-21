@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 
@@ -94,6 +95,28 @@ def test_o02_o06_gate_cycle_audit_restart(tmp_path):
     assert not waiting["formal_verified"]
     assert reopened.store.head("p1")[0] == 2
     assert reopened.submit(request("proof-audit", "audit-1", proof="p1"))["chain_events"] == 2
+
+
+def test_reference_critic_runs_without_installed_source_package(tmp_path, monkeypatch):
+    # CI may import the service through pytest's pythonpath while the worker's
+    # interpreter has no project installation. The worker receives no PYTHONPATH.
+    worker_env = tmp_path / "worker-env"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(worker_env)],
+        check=True, capture_output=True, text=True, timeout=30)
+    monkeypatch.setattr("omegaclaw.service.sys", SimpleNamespace(
+        executable=str(worker_env / "bin" / "python")))
+    monkeypatch.chdir(tmp_path)
+    service = OperationService(tmp_path / "service")
+    try:
+        service.submit(request("proof-create", "create-1", spec=spec()))
+        cycle = service.submit(request("proof-cycle", "cycle-1", proof="p1"))
+        diagnostic = service.artifacts.get(cycle["diagnostic_ref"]) if "diagnostic_ref" in cycle else b""
+        assert cycle["cycle_disposition"] == "pending-review", (cycle, diagnostic)
+        assert service.store.verify_chain("p1") == 2
+        assert service.view.edges_to("p1/c-1", "REVIEWS_CLAIM")[0].src_id == cycle["attempt_id"]
+        assert not cycle["formal_verified"]
+    finally:
+        service.close()
 
 
 def test_o06_busy_frontier_waits_without_claiming_completion(tmp_path):

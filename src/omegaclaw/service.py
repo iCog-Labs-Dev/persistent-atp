@@ -75,7 +75,10 @@ class OperationService:
         self.jobs = JobLedger(self.root / "operations.sqlite3")
         if critic_timeout_s <= 0 or critic_timeout_s > 10:
             raise ValueError("reference critic timeout must be within (0, 10] seconds")
-        self.critic_command = critic_command or (sys.executable, "-m", "omegaclaw.reference_critic")
+        # The child gets a minimal environment, without pytest's source path.
+        # This stdlib-only script must also run from an uninstalled checkout.
+        self.critic_command = critic_command or (sys.executable,
+            str(Path(__file__).resolve().with_name("reference_critic.py")))
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
