@@ -6,3 +6,6 @@
 build/
 *.png
 *.dot
+.runs/
+/tmp/
+/build/

@@ -20,6 +20,191 @@ packets for formal ATP, research, and obstruction-analysis tasks. See the
 end-to-end usage, selection behavior, outputs, and current integration
 boundaries.
 
+## Omega integration
+
+The Omega plugin exposes nine proof tools through the standalone
+`persistent-atp-client` SDK. `OmegaAdapter` owns SDK calls and request recovery;
+`OmegaState` stores serializable workflow checkpoints. The bridge parks network
+work on worker threads and delivers results to Omega history on heartbeat.
+Dispatch receipts and receiver admission are separate from execution results
+and mathematical verification.
+
+Use Python 3.11 or later, SWI-Prolog with `janus_swi`, and these exact runtimes:
+
+- Omega: `ba185cd359d9fe231b904110b988af39fafa5014`.
+- PeTTa: `7037f4c2ad378c52fc328004fe216d5118b674f0`.
+
+Install the project and its editable SDK with `uv sync --extra dev`. Copy the
+trusted receiver settings from `.env.example` into your environment, then run:
+
+```bash
+uv run persistent-atp-omega serve --config reference
+```
+
+Install the plugin into a derived Omega checkout under your PeTTa runtime's
+`repos/Omega` directory:
+
+```bash
+uv run python scripts/omegaclaw-install-omega.py --omega-root /path/to/PeTTa/repos/Omega
+```
+
+The installer preserves the plugin catalogue and patches the launcher's import.
+For bare PeTTa, run that generated launcher from the PeTTa directory. The added
+import shim checks the provisioned checkout's exact Git revision and never
+fetches another runtime. The installer checks the Git revision and unchanged
+core sources, then writes a SHA-256 build manifest covering the runtime and
+installed overlay. The launcher validates those bytes even when `.git` is
+removed. The immutable image/build remains the trust anchor; the manifest is
+not a signature.
+
+To export a container overlay, supply `--bundle-dir /path/to/context` and
+`--base-image registry/omega@sha256:<digest>` to the installer. The generated
+Dockerfile uses the verified upstream entrypoint with a narrow bridge-variable
+allowlist and quoted environment forwarding. It checks the base's PeTTa
+revision and Python dependencies, relocates plugin registrations to the image's
+paths, and verifies the sealed overlay and patched launcher. Use an approved
+Omega base image pinned by its full digest. The cache defaults to
+`/PeTTa/repos/Omega/memory/persistent_atp/workflow.json` inside Omega's persistent
+memory volume, which its sandbox permits the `nobody` agent account to write.
+The sealed proxy assets are installed into `/opt/nginx/`; provider keys stay
+with that proxy. Only the providers and channels you select need credentials.
+Configure a receiver URL reachable from the container. A custom cache path
+must also be writable under the configured filesystem policy.
+
+The plugin is disabled by default. Set `OMEGA_persistentAtpEnabled=enabled`
+and configure the same workspace alias in `OMEGA_persistentAtpWorkspace` and
+`PERSISTENT_ATP_OMEGA_WORKSPACE`. Receiver credentials belong only in the trusted
+environment. The reporting policy remains loaded while workflows are disabled.
+
+`proof-create` accepts JSON containing `theorem`, `definitions`, `assumptions`,
+`quantifier_domains`, `allowed_background`, `targets`, and `verification_policy`.
+The complete specification is retained as a hashed artifact and included in
+worker context. Lean source arguments are authorized artifact hashes;
+export destinations are registered aliases.
+
+Keep `PERSISTENT_ATP_OMEGA_STATE` across agent restarts. Prepared requests,
+operation references, event cursors, and unacknowledged notifications are
+reconciled with the receiver. This cache grants no proof or admission authority.
+Heartbeat resumes waiting work after capacity returns and drains remaining
+event pages after execution finishes. Uncertain delivery uses SDK request
+lookup before any resubmission. `PERSISTENT_ATP_OMEGA_RETRY_LIMIT` bounds attempts;
+`PERSISTENT_ATP_OMEGA_RETRY_BASE_SECONDS` sets exponential backoff, capped at
+30 seconds. Exhausted or permanent errors stop automatic dispatch and preserve
+the request for review. Stale-state errors include refreshed authoritative
+status; they do not silently change a prepared request or theorem semantics.
+`PERSISTENT_ATP_OMEGA_MAX_CYCLES` bounds coordinator cycle attempts per proof;
+the receiver remains responsible for execution budgets and leases.
+
+Run the reference and pinned-runtime checks without paid model calls:
+
+```bash
+bash scripts/omegaclaw-test.sh --tier reference
+bash scripts/omegaclaw-test.sh --tier omega
+```
+
+For standalone Omega capability tests with a real model, configure its provider
+key in `.env` and run the playground. It starts an isolated container with the
+ATP plugin disabled, retains a dedicated memory volume, and recreates the
+container to check persistence:
+
+```bash
+uv run --extra omega-playground persistent-atp-omega-playground --list
+uv run --extra omega-playground persistent-atp-omega-playground --build-image
+```
+
+`--cases shell,file_append,query` selects cases and their prerequisites;
+`--provider ASIOne` uses `ASIONE_API_KEY`, `ASIONE_MODEL`, and
+`ASIONE_BASE_URL` from `.env`; `--model` overrides the configured model.
+The playground exercises WebSocket only and excludes other communication-channel cases.
+Each run writes `.runs/omega-capabilities/<run>/pairs.json` as
+`{"query": "actual response"}` and a `report.json` with tool, filesystem,
+memory, and recovery checks. Unavailable or unexecuted cases have null responses
+and explicit reasons. Logs and reports remain outside Git. Live model calls
+use the configured provider; passing generation checks do not establish
+mathematical verification.
+
+For model-driven ATP acceptance, use a production receiver configuration with
+`formal_provider: true`, a compatible formal provider, PostgreSQL artifacts, and
+preloaded native MORK. The runner owns the receiver HTTP service and recreates
+it in the host process against the same durable storage during recovery checks:
+
+```bash
+scripts/with-mork.sh .venv/bin/python -m omegaclaw.playground \
+  --atp --atp-config formal --atp-input /absolute/path/to/reviewed-input.json \
+  --build-image --provider DeepSeek --output .runs/omega-atp
+```
+
+The trusted host input contains `spec` (the complete theorem specification),
+`declaration` (`source`, `lean_name`, `lean_type`, `toolchain`), and `review`.
+The source path is relative to the input file. The review must include
+`reviewer`, `rationale`, `verdict: "aligned"`, `claim_text`, `lean_name`,
+`lean_type`, `toolchain`, `source_hash`, `spec_hash`, and `environment_hash`.
+Hashes use `sha256:<hex>`; `spec_hash` binds the canonical JSON specification.
+The review must match every supplied value and the actual provider environment.
+This file authorizes host-side declaration intake; it is never a model tool.
+
+Omega calls creation, formal search, status, audit, and export through its real
+tools. Acceptance independently checks native replay receipts, journal hashes,
+artifact bytes, MORK projection, and recovery after Omega container and receiver
+service recreation. Each run saves actual query/response pairs and the verified export.
+This mode tests a prepared declaration.
+
+Add `--atp-cycle` to exercise Omega's `proof-cycle` tool instead of explicit
+`formal-search`. The receiver scheduler selects an aligned declaration and
+uses the same provider, independent replay, and commit-gate admission path.
+Cycle execution bounds come from the trusted `PERSISTENT_ATP_FORMAL_*`
+configuration. An unformalized theorem reports blocked; unavailable research
+and critic workers do not trigger scripted fallback. Existing provider runs
+remain associated with their original operation and require reconciliation
+rather than an implicit new search.
+
+For automatic intake, set `PERSISTENT_ATP_INTAKE_PROVIDER` to `DeepSeek` or
+`ASIOne`, and set `PERSISTENT_ATP_INTAKE_TOOLCHAIN` and
+`PERSISTENT_ATP_INTAKE_IMPORTS` to match the configured formal deployment.
+The receiver uses the corresponding provider credentials from `.env`.
+On an unformalized proof, `proof-cycle` compiles the complete committed theorem
+context, runs the existing formalizer, commits a draft, and separately reviews
+exact statement alignment. Only an accepted review makes the declaration
+available to formal search. Ambiguous reviews remain pending; alignment alone
+does not verify a proof.
+
+Add `--atp-intake` alongside `--atp --atp-cycle` to test this path. Its input
+file contains only `{"spec": <complete theorem specification>}`. The runner
+supplies no declaration or host alignment review. Initial intake supports one
+proposition with trusted imports; custom universe declarations and additional
+source commands require explicit preparation. Saved draft/review output is
+reused after interruption; expired leases require reconciliation.
+
+The full container test builds from a locally pulled official image and uses a
+local model stub, an isolated proxy port, a reference receiver, and an Omega
+restart. It makes no paid provider calls:
+
+```bash
+export OMEGA_CONTAINER_BASE_IMAGE=singularitynet/omega@sha256:<digest>
+bash scripts/omegaclaw-test.sh --tier container
+```
+
+Receiver configuration accepts `profile: reference`, `persistence`, or
+`production`. Persistent profiles require the PostgreSQL artifact schema and
+the native MORK library loaded with `scripts/with-mork.sh`. The persistence
+profile retains explicitly labeled scripted research. Production allows
+creation, status, audit, and export, and enables formal search and formal cycles when its
+configured formal provider passes capability checks. Unavailable worker
+actions are rejected. Both recover the MORK projection from the journal at startup.
+
+```bash
+scripts/with-mork.sh --install bash scripts/omegaclaw-test.sh --tier persistence
+```
+
+Set `ARTIFACT_TEST_DB_URL` to a dedicated test database for that check.
+`OMEGA_JANUS_MODE=swipl` checks the official container's SWI-to-Python bridge;
+`python` selects the host `janus_swi` arrangement. The default is `auto`.
+
+HTTP forwards the shared cancellation, budget, and decision DTOs only when
+the receiver advertises support. The formal provider integration supports
+cancellation; budget amendment, decision responses, and frontier continuation
+remain unsupported.
+
 ## Formal prover integration
 
 The [formal v2 worked example](examples/formal_v2/README.md) connects trained
@@ -27,3 +212,34 @@ GNN/MCTS search to independently authorized replay and claim admission through
 the existing journal and commit gate. It includes the lease-bound integration
 pattern, native acceptance commands and links to independently checkable
 mathematical proofs in the paired provider repository.
+
+The Omega receiver uses that client with the paired provider revision pinned
+in `pyproject.toml`. Configure `PERSISTENT_ATP_FORMAL_*` from `.env.example`,
+`ARTIFACT_DB_URL`, and the native MORK library, then run:
+
+```bash
+uv run persistent-atp-omega doctor --profile formal-v2 --require
+scripts/with-mork.sh uv run persistent-atp-omega serve --config formal
+```
+
+Formal search requires a committed Lean declaration with its original name,
+type, source artifact, accepted alignment, and matching provider environment.
+Trusted formalization and review must supply these; Omega cannot grant itself
+alignment authority. The receiver compiles the leased context, uploads exact
+source bytes, and persists the original request before search admission. It
+imports settled evidence through the commit gate, requests independent replay
+under a separate actor, and promotes the claim only after the gate accepts
+replay and alignment evidence. Cancellation stays pending until backend work
+stops. Restart reuses saved requests and receipts; an uncertain replay response
+stops for reconciliation rather than issuing another replay automatically.
+
+With the paired provider installed or checked out at
+`PERSISTENT_ATP_FORMAL_SOURCE`, run the contract and recovery checks:
+
+```bash
+bash scripts/omegaclaw-test.sh --tier formal-contract
+```
+
+These checks use scripted search and, when installed, a fresh Lean process for
+the controlled replay fixture. They do not establish trained GNN/MCTS readiness;
+that requires the provider's pinned native environment and model assets.

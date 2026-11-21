@@ -108,5 +108,3 @@ class LeaseSnapshotProvider:
                 f"lease expects revision {lease.base_revision}, journal head is "
                 f"{head_revision}"
             )
-
-

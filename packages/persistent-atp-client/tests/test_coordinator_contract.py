@@ -9,7 +9,7 @@ import pytest
 
 from persistent_atp_client import (
     AsyncClient, CapabilitySet, CoordinatorEscalation, Preconditions,
-    QueueCoordinatorEscalations, SelectedProofCycle,
+    HypothesisFormalize, HypothesisRevise, ArtifactRef, QueueCoordinatorEscalations, SelectedProofCycle,
 )
 from persistent_atp_client.codecs import canonical_json, request_from_json, to_dict
 from persistent_atp_client.errors import UnsupportedCapability, UnsupportedContract
@@ -131,6 +131,25 @@ def test_new_version_is_negotiated_without_a_silent_downgrade():
         with pytest.raises(UnsupportedContract):
             await client.submit(request)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('action', [HypothesisFormalize("p1", "p1/hyp-" + "a" * 32),
+    HypothesisRevise("p1", "p1/hyp-" + "a" * 32, ArtifactRef("sha256:" + "b" * 64)),
+    HypothesisRevise("p1", "p1/hyp-" + "a" * 32, ArtifactRef("sha256:" + "b" * 64), "p1/c-2")])
+def test_hypothesis_formalization_is_revision_bound_and_contract_22_typed(action):
+    request = AsyncClient(None).prepare(action, workspace_id="lab",
+        preconditions=Preconditions(expected_revision=9))
+    assert request.contract_version == "2.2"
+    assert request_from_json(canonical_json(request)) == request
+    schema = json.loads(files("persistent_atp_client").joinpath(
+        "schemas/coordinator-request.schema.json").read_text())
+    jsonschema.validate(to_dict(request), schema)
+
+    with pytest.raises(ValueError, match="expected_revision"):
+        AsyncClient(None).prepare(action, workspace_id="lab")
+    with pytest.raises(ValueError, match="unsupported contract"):
+        AsyncClient(None).prepare(action, workspace_id="lab",
+            preconditions=Preconditions(expected_revision=9), contract_version="2.1")
 
 
 def test_named_method_requires_the_advertised_atomic_contract():

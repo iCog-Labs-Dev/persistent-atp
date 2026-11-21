@@ -63,6 +63,12 @@
         },
         {
           "$ref": "#/$defs/queueCoordinatorEscalations"
+        },
+        {
+          "$ref": "#/$defs/hypothesisFormalize"
+        },
+        {
+          "$ref": "#/$defs/hypothesisRevise"
         }
       ]
     },
@@ -595,6 +601,61 @@
           }
         }
       }
+    },
+    "hypothesisFormalize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "hypothesis_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "hypothesis-formalize"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "hypothesis_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "hypothesisRevise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "proof_id",
+        "hypothesis_id",
+        "spec_artifact",
+        "previous_claim_id"
+      ],
+      "properties": {
+        "kind": {
+          "const": "hypothesis-revise"
+        },
+        "proof_id": {
+          "$ref": "#/$defs/id"
+        },
+        "hypothesis_id": {
+          "$ref": "#/$defs/id"
+        },
+        "spec_artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "previous_claim_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        }
+      }
     }
   },
   "allOf": [
@@ -606,7 +667,9 @@
               "kind": {
                 "enum": [
                   "proof-cycle-selected",
-                  "queue-coordinator-escalations"
+                  "queue-coordinator-escalations",
+                  "hypothesis-formalize",
+                  "hypothesis-revise"
                 ]
               }
             },

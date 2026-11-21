@@ -63,7 +63,7 @@ def request_from_dict(raw: object) -> ActionRequest:
     if cls is None:
         raise ValueError("unknown action kind")
     data = {name: value for name, value in action.items() if name != "kind"}
-    if cls.kind in {"proof-create", "statement-align", "formal-resume"}:
+    if cls.kind in {"proof-create", "statement-align", "formal-resume", "hypothesis-revise"}:
         for name in ("spec_artifact", "lean_source_artifact", "checkpoint_artifact"):
             if name in data and data[name] is not None:
                 data[name] = _strict(ArtifactRef, data[name])

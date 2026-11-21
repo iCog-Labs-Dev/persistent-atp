@@ -1299,7 +1299,7 @@ def compile_obstruction(
         tactic_families_considered=families,
         repeated_failure_family=repeated_family,
         suggested_escalation=_escalation(records, kind),
-        minimal_state_artifact=selected[0].exact_state_hash,
+        minimal_state_artifact=(records.obstruction or {}).get('minimal_state_artifact') or selected[0].exact_state_hash,
         diagnostic_artifacts=diagnostic_hashes,
         source_artifacts=bundle.sources,
     )

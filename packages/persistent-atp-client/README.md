@@ -50,6 +50,13 @@ Operation completion remains distinct from formal verification. The reference
 receiver uses the existing proof-wide escalation lease, which may supersede
 active dispatch leases; this action does not introduce a non-preempting queue.
 
+Checkpointed coordinators can call `reconcile(prepared_request)` for one recovery
+pass. It validates an existing admission, or submits the unchanged prepared
+request only after an authoritative lookup reports absence. An unavailable
+lookup does not authorize resubmission. Both clients expose reconciliation;
+the synchronous client also exposes operation listing, snapshot reads, bounded
+event pages, and control forwarding. Hosts schedule bounded recovery passes.
+
 The receiver and Omega commands below require `feat/omegaclaw-integration`; this branch supplies the standalone library and its contract tests.
 
 ## Install and start the reference receiver
@@ -240,7 +247,7 @@ Read responses are validated for DTO type, requested workspace/proof identity, a
 
 Event streams deduplicate notifications, verify sequence/scope, wait between empty or duplicate-only pages, and finish after observing a terminal operation with no new events. Retaining a cursor on an empty page no longer causes a busy loop. Cancelling a consumer leaves receiver execution untouched.
 
-Artifact transfer remains whole-byte and is limited to 16 MiB before base64 encoding. HTTP responses have a 24 MiB decoded-envelope limit, accommodating a maximum-size artifact's JSON/base64 representation. The receiver can impose a smaller request limit; negotiated limits, byte streaming and server retention guarantees are not implemented here. HTTP controls remain explicitly unsupported. This release changes client behavior and installation requirements, not the mathematical authority of the receiver.
+Artifact transfer remains whole-byte and is limited to 16 MiB before base64 encoding. HTTP responses have a 24 MiB decoded-envelope limit, accommodating a maximum-size artifact's JSON/base64 representation. The receiver can impose a smaller request limit; negotiated limits, byte streaming and server retention guarantees are not implemented here. HTTP forwards cancellation, budget amendment, and decision responses to compatible receiver control endpoints. Receivers must advertise and enforce those capabilities; the companion reference receiver continues to reject unsupported controls. This release changes client behavior and installation requirements, not the mathematical authority of the receiver.
 
 ## SDK-only verification
 

@@ -438,3 +438,43 @@ def test_restoring_run_after_replay_preserves_certificate_binding_hash():
     assert restored['certificate']['artifact_hash'] == original['certificate']['artifact_hash']
     assert restored['certificate']['binding_artifact_hash'] == original['certificate']['binding_artifact_hash']
     assert restarted._snapshots[request['run_id']]['replays'] == run['replays']
+
+
+def test_prepared_identity_can_be_restored_before_any_network_delivery():
+    atp, request, admission, run, remote, call, transport = setup_adapter('source')
+    with patch.object(atp, '_transport', side_effect=AssertionError('preparation must be offline')):
+        prepared = atp.prepare(request)
+        atp.restore_prepared(prepared)
+        prepared['budget']['max_steps'] += 1
+        assert atp.request_for(request['run_id']) == request
+        with pytest.raises(MathsAIAPIError, match='different request'):
+            atp.restore_prepared(prepared)
+    with patch.object(atp, '_call', return_value=run), patch.object(atp, '_transport', side_effect=transport):
+        assert atp.formal_search_status(request['run_id'])['disposition'] == 'proved-pending-replay'
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_offline_restore_validates_durable_bytes_without_provider_access(corrupt):
+    atp, request, original, run, remote = proved('source')
+    binding = atp.binding(request['run_id'])
+    if corrupt:
+        atp.artifacts.blobs[run['result']['certificate']['artifact_hash']] = b'changed'
+    restarted = MathsAIHTTPFormalATP('http://offline', artifacts=atp.artifacts)
+    with patch.object(restarted, '_transport', side_effect=AssertionError('provider must remain offline')):
+        if corrupt:
+            with pytest.raises(MathsAIAPIError, match='hash mismatch'):
+                restarted.restore(binding, refresh=False)
+        else:
+            restored = restarted.restore(binding, refresh=False)
+            assert restored == original
+            assert restarted.cached_evidence(request['run_id']) == (run, original)
+
+
+def test_offline_restore_accepts_an_unsettled_admission_binding():
+    atp, request, admission, run, remote, call, transport = setup_adapter('source')
+    with patch.object(atp, '_call', side_effect=call):
+        atp.formal_search_start(request)
+    restarted = MathsAIHTTPFormalATP('http://offline', artifacts=atp.artifacts)
+    with patch.object(restarted, '_transport', side_effect=AssertionError('provider must remain offline')):
+        assert restarted.restore(atp.binding(request['run_id']), refresh=False)['disposition'] == 'searching'
+        assert restarted.request_for(request['run_id']) == request

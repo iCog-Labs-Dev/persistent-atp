@@ -69,6 +69,14 @@ class TestCodec(unittest.TestCase):
     def test_unparseable_token_falls_back_to_itself(self):
         self.assertEqual(decode("bare-symbol"), "bare-symbol")
 
+    def test_structured_json_is_one_lossless_atom_slot(self):
+        for value in [[], {}, ["A short consequence."], {"target": "P n"}, [1, True, None],
+                      {"locals": [{"name": "h", "type": "P n"}]}]:
+            with self.subTest(value=value):
+                encoded = encode(value)
+                self.assertEqual(tokens(f"(value {encoded})"), ["value", encoded])
+                self.assertEqual(decode(encoded), value)
+
 
 class TestTokens(unittest.TestCase):
     def test_splits_top_level_slots(self):
@@ -131,6 +139,16 @@ class TestMorkViewNodes(unittest.TestCase):
         fields = self.view.node(self.id_for("s1")).fields
         self.assertIs(fields["depth"], 0)
         self.assertIs(fields["done"], False)
+
+    def test_structured_fields_survive_native_projection_and_update(self):
+        fields = {"consequences": ["Could reduce the original target."],
+                  "locals": {"h": "P n"}, "empty": [], "nested": [{"target": "P (n + 1)"}]}
+        self.view.add_node(self.id_for("hyp1"), "SpeculativeHypothesis", fields)
+        self.assertEqual(dict(self.view.node(self.id_for("hyp1")).fields), fields)
+        fields["consequences"] = ["Replacement consequence."]
+        self.view.set_field(self.id_for("hyp1"), "consequences", fields["consequences"])
+        self.assertEqual(dict(self.view.node(self.id_for("hyp1")).fields), fields)
+        self.assertEqual(dict(self.view.snapshot(self.proof)[1].node(self.id_for("hyp1")).fields), fields)
 
     def test_set_field_replaces_rather_than_accumulates(self):
         self.view.add_node(self.id_for("s1"), "FormalState", {"status": "open"})

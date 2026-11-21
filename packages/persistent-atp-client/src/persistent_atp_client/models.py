@@ -7,8 +7,8 @@ import re
 from typing import Any, ClassVar, TypeAlias
 
 
-def _identifier(value: str, field_name: str) -> None:
-    if not isinstance(value, str) or not 1 <= len(value) <= 128 or any(ord(c) < 32 for c in value):
+def _identifier(value: str, field_name: str, *, max_length: int = 128) -> None:
+    if not isinstance(value, str) or not 1 <= len(value) <= max_length or any(ord(c) < 32 for c in value):
         raise ValueError(f"{field_name} must be a bounded nonempty identifier")
 
 
@@ -276,11 +276,43 @@ class LemmaBridge:
         _identifier(self.obstruction_id, "obstruction_id")
 
 
+@dataclass(frozen=True, slots=True)
+class HypothesisFormalize:
+    """Explicitly admit one speculative hypothesis for formalization."""
+
+    kind: ClassVar[str] = "hypothesis-formalize"
+    proof_id: str
+    hypothesis_id: str
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.hypothesis_id, "hypothesis_id")
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisRevise:
+    """Explicit specification for a new attempt; prior claims remain immutable."""
+
+    kind: ClassVar[str] = "hypothesis-revise"
+    proof_id: str
+    hypothesis_id: str
+    spec_artifact: ArtifactRef
+    previous_claim_id: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.proof_id, "proof_id")
+        _identifier(self.hypothesis_id, "hypothesis_id")
+        if not isinstance(self.spec_artifact, ArtifactRef):
+            raise TypeError("spec_artifact must be ArtifactRef")
+        if self.previous_claim_id is not None:
+            _identifier(self.previous_claim_id, "previous_claim_id")
+
+
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
-COORDINATOR_ACTION_TYPES = {QueueCoordinatorEscalations.kind: QueueCoordinatorEscalations}
+COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise)}
 ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise
 
 
 def action_types_for_contract(version: str):
@@ -313,7 +345,8 @@ class ActionRequest:
         if (self.action.kind not in action_types_for_contract(self.contract_version)
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
-        if (self.contract_version == "2.2" and isinstance(self.action, (SelectedProofCycle, QueueCoordinatorEscalations))
+        if (self.contract_version == "2.2" and isinstance(self.action,
+                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise))
                 and self.preconditions.expected_revision is None):
             raise ValueError("coordinator mutations require expected_revision")
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):
@@ -468,7 +501,9 @@ class CoordinationItem:
     def __post_init__(self):
         if self.item_type not in {"node", "edge", "frontier"}:
             raise ValueError("unknown coordination item type")
-        _identifier(self.record_id, "record_id")
+        # Graph records include composite edge IDs containing both endpoint IDs
+        # and a relation. Preserve their journal identity on coordination reads.
+        _identifier(self.record_id, "record_id", max_length=4096)
         _identifier(self.label, "label")
         if not isinstance(self.fields, dict) or not all(isinstance(key, str) for key in self.fields):
             raise ValueError("coordination fields must be a string-keyed mapping")

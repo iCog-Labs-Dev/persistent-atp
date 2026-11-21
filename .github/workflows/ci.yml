@@ -42,14 +42,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system pytest jsonschema
+        run: uv sync --locked --extra dev
 
       - name: Apply artifact store schema
-        run: uv run python -c "from artifacts.schema import apply_schema; apply_schema()"
+        run: uv run --locked --extra dev python -c "from artifacts.schema import apply_schema; apply_schema()"
         env:
           ARTIFACT_DB_URL: postgresql://postgres:postgres@localhost:5432/test_db
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run --locked --extra dev python -m pytest -q

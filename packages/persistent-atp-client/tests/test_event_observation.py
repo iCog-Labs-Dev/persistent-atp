@@ -1,12 +1,39 @@
 """Event observation must terminate, yield fairly and leave execution alone."""
 import asyncio
 import math
+from dataclasses import replace
 
 import pytest
 
 from persistent_atp_client import AsyncClient
+from persistent_atp_client.models import OperationRef
 from persistent_atp_client.errors import ReceiverProtocolError
 from persistent_atp_client.testing import ScriptedReceiverPort
+
+
+@pytest.mark.parametrize("invalid", ["scope", "order", "version", "changed-duplicate", "cursor"])
+def test_checkpointed_event_page_rejects_invalid_receiver_data(invalid):
+    async def scenario():
+        port = ScriptedReceiverPort()
+        client = AsyncClient(port)
+        handle = await client.proof_cycle("p1", workspace_id="lab")
+        port.finish(handle.ref)
+        page, cursor = await port.read_events(handle.ref)
+        if invalid == "scope":
+            page = (replace(page[0], operation_ref=OperationRef("other", "op")),)
+        elif invalid == "order":
+            page = tuple(reversed(page))
+        elif invalid == "version":
+            page = (replace(page[0], observation_version=2), page[1])
+        elif invalid == "changed-duplicate":
+            page = (page[0], replace(page[0], event_type="changed"))
+        else:
+            cursor = "bad\nvalue"
+        async def read_events(*args): return page, cursor
+        port.read_events = read_events
+        with pytest.raises(ReceiverProtocolError):
+            await client.events_page(handle.ref)
+    asyncio.run(scenario())
 
 
 def test_terminal_stream_finishes_even_when_empty_page_retains_its_cursor():
