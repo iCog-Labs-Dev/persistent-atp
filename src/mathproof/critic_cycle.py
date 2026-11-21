@@ -81,6 +81,8 @@ def _context(view: ReadView, lease: Lease, artifacts: ArtifactReader | None) -> 
             content = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("critic evidence artifact must be UTF-8 text") from exc
+        if not content.strip():
+            raise ValueError("critic evidence artifact is empty")
         evidence.append({"id": digest, "text": content})
     dependencies = related("DEPENDS_ON")
     established = {"critic-accepted", "formally-closed", "lean-verified"}

@@ -163,6 +163,7 @@ def test_wrong_artifact_bytes_stop_review_before_model_call():
         )
     assert llm.history == []
     assert store.head("p1")[0] == 0
+    assert store.active_leases("p1") == []
 
 
 def test_model_cannot_cite_evidence_outside_packet():
@@ -175,3 +176,46 @@ def test_model_cannot_cite_evidence_outside_packet():
             "p1", actor="critic-1", scheduler=scheduler, worker=CriticWorker(llm), gate=gate
         )
     assert store.head("p1")[0] == 0
+
+
+@pytest.mark.parametrize("response, expected", [
+    ({"verdict": "supported", "counterexample": "n=1 fails"}, "complete evidence"),
+    ({"verdict": "refuted", "repair": "check the first step"}, "earliest_gap"),
+    ({"verdict": "pending", "missing_context": []}, "missing_context"),
+    ({"verdict": "supported", "evidence_ids": ["p1/c-1#proof_sketch"]}, "complete evidence"),
+])
+def test_conflicting_or_incomplete_model_reviews_are_not_journalled(response, expected):
+    base = {
+        "verdict": "supported", "reasoning": "checked the argument",
+        "evidence_ids": ["p1/c-1#proof_sketch", "p1/c-1#argument"],
+        "earliest_gap": None, "counterexample": None, "repair": None,
+        "missing_context": [],
+    }
+    base.update(response)
+    view, store, llm, scheduler, gate = _setup(base)
+    view.set_field("p1/c-1", "argument", "A second independent step.")
+    with pytest.raises(ValueError, match=expected):
+        run_critic_cycle(
+            "p1", actor="critic-1", scheduler=scheduler, worker=CriticWorker(llm), gate=gate
+        )
+    assert store.head("p1")[0] == 0
+    assert store.active_leases("p1") == []
+
+
+def test_blank_artifact_cannot_be_used_as_evidence():
+    view, store, llm, scheduler, gate = _setup({"verdict": "supported"})
+    view.nodes["p1/c-1"].fields.pop("proof_sketch")
+    raw = b"   "
+    digest = hash_content(raw)
+    view.add_node(digest, "Artifact", {"artifact_hash": digest})
+    view.add_edge("HAS_ARTIFACT", "p1/c-1", digest, "p1/e-artifact")
+    class Reader:
+        def get(self, key): return raw
+    with pytest.raises(ValueError, match="artifact is empty"):
+        run_critic_cycle(
+            "p1", actor="critic-1", scheduler=scheduler, worker=CriticWorker(llm),
+            gate=gate, artifacts=Reader(),
+        )
+    assert llm.history == []
+    assert store.head("p1")[0] == 0
+    assert store.active_leases("p1") == []

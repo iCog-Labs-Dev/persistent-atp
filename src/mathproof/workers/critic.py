@@ -88,7 +88,7 @@ class CriticWorker:
         ):
             raise ValueError("critic missing_context must be a list of nonempty strings")
         if verdict == AttemptStatus.SUPPORTED.value:
-            if gap or missing or set(ids) != known_ids or not context.get("dependencies_established", False):
+            if gap or counterexample or repair or missing or set(ids) != known_ids or not context.get("dependencies_established", False):
                 raise ValueError("supported critique requires complete evidence and established dependencies")
         if verdict == AttemptStatus.REFUTED.value and (not gap or not repair):
             raise ValueError("refuted critique requires earliest_gap and repair")
