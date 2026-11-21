@@ -19,3 +19,11 @@ packets for formal ATP, research, and obstruction-analysis tasks. See the
 [context compiler guide](src/context_compiler/README.md) for its architecture,
 end-to-end usage, selection behavior, outputs, and current integration
 boundaries.
+
+## Formal prover integration
+
+The [formal v2 worked example](examples/formal_v2/README.md) connects trained
+GNN/MCTS search to independently authorized replay and claim admission through
+the existing journal and commit gate. It includes the lease-bound integration
+pattern, native acceptance commands and links to independently checkable
+mathematical proofs in the paired provider repository.

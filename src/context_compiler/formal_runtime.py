@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from typing import Any, Mapping
 
 from commit_gate.state import ReadView
 from shared.vocab import WorkerClass
@@ -19,6 +21,7 @@ from .formal import (
     CheckpointPolicy,
     CorpusManifest,
     FormalTask,
+    FormalV2Selection,
     ModelBundle,
     PremiseAccessibility,
     compile_formal,
@@ -52,8 +55,24 @@ class FormalRuntimeConfig:
     max_depth: int = 4
     max_nodes: int = 300
     require_complete_retrieval: bool = True
+    protocol_version: int = 1
+    backend: Mapping[str, Any] | None = None
+    deployment_id: str | None = None
+    v2_selection: FormalV2Selection | None = None
 
     def __post_init__(self) -> None:
+        if type(self.protocol_version) is not int or self.protocol_version not in (1, 2):
+            raise ContextValidationError("formal protocol_version must be 1 or 2")
+        if self.backend is not None and not isinstance(self.backend, Mapping):
+            raise ContextValidationError("backend must be a selection mapping")
+        if self.deployment_id is not None and (not isinstance(self.deployment_id, str) or not self.deployment_id):
+            raise ContextValidationError("deployment_id must be a non-empty string")
+        if self.protocol_version == 1 and (self.backend is not None or self.deployment_id is not None):
+            raise ContextValidationError("backend and deployment selection require formal v2")
+        if self.v2_selection is not None and not isinstance(self.v2_selection, FormalV2Selection):
+            raise ContextValidationError("v2_selection must be FormalV2Selection")
+        if self.v2_selection is not None and (self.backend is not None or self.deployment_id is not None):
+            raise ContextValidationError("select the v2 deployment once")
         if not isinstance(self.execution_limits, FormalExecutionLimits):
             raise ContextValidationError(
                 "execution_limits must be FormalExecutionLimits"
@@ -234,9 +253,13 @@ def compile_formal_for_lease(
         task,
         config.accessibility,
         context_limits=config.context_limits,
+        protocol_version=config.protocol_version,
+        backend=config.backend,
+        deployment_id=config.deployment_id,
+        v2_selection=config.v2_selection,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,
         compilation=compilation,
-        worker_input=compilation.payload.to_schema_dict(),
+        worker_input=json.loads(compilation.packet.content)["request"],
     )

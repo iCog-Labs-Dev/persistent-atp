@@ -390,8 +390,10 @@ class JournalOverlayView:
     def node(self, node_id: str) -> NodeRecord | None:
         record = self._base.node(node_id)
         for op in self._node_ops.get(node_id, ()):
-            if isinstance(op, UpsertNode) and record is None:
-                record = NodeRecord(node_id, op.label, dict(op.fields))
+            if isinstance(op, UpsertNode):
+                if record is not None and record.label != op.label:
+                    raise ValueError(f"journal changes node label for {node_id!r}")
+                record = NodeRecord(node_id, op.label, {**(dict(record.fields) if record else {}), **dict(op.fields)})
             elif isinstance(op, SetField):
                 if record is None:
                     raise ValueError(f"journal sets a field on unknown node {node_id!r}")

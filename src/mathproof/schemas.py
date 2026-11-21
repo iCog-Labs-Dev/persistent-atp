@@ -9,6 +9,7 @@ works offline in tests and tooling.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ from referencing.jsonschema import DRAFT202012
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMAS_DIR = REPO_ROOT / "schemas"
+if not SCHEMAS_DIR.is_dir():
+    SCHEMAS_DIR = Path(sys.prefix) / "share/persistent-atp/schemas"
 
 __all__ = ["SCHEMAS_DIR", "load_schema", "validator_for", "validate"]
 
@@ -50,6 +53,9 @@ def validator_for(name: str) -> Draft202012Validator:
 
 def validate(name: str, payload: Any) -> list[str]:
     """Human-readable error strings for every violation of `name` by `payload`."""
+    if name == "formal-search-request" and isinstance(payload, dict) and "protocol_version" in payload:
+        from .formal_v2 import validate as validate_v2
+        return validate_v2(name, payload)
     return [
         f"{'/'.join(str(p) for p in err.absolute_path)}: {err.message}"
         for err in validator_for(name).iter_errors(payload)

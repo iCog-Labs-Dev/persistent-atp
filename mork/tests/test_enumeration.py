@@ -90,6 +90,46 @@ class TestBackendsReturnEquivalentRecords(unittest.TestCase):
         self.assertEqual(self.memory.list_nodes("nobody"), self.mork.list_nodes("nobody"))
         self.assertEqual(self.memory.list_edges("nobody"), self.mork.list_edges("nobody"))
 
+    def test_artifact_endpoints_preserve_global_content_addresses(self):
+        artifact = "sha256:" + uuid.uuid4().hex * 2
+        for view in (self.memory, self.mork):
+            for proof in (self.pa, self.pb):
+                view.add_edge("HAS_ARTIFACT", proof + "/c1", artifact, proof + "/artifact")
+                view.add_edge("EVIDENCE_FOR", artifact, proof + "/c1", proof + "/evidence")
+
+        for proof in (self.pa, self.pb):
+            for suffix in ("artifact", "evidence"):
+                with self.subTest(proof=proof, edge=suffix):
+                    self.assertEqual(
+                        self.memory.edge(proof + "/" + suffix),
+                        self.mork.edge(proof + "/" + suffix),
+                    )
+            self.assertEqual(
+                edge_rows(self.memory.list_edges(proof)),
+                edge_rows(self.mork.list_edges(proof)),
+            )
+            self.assertEqual(
+                edge_rows(self.memory.edges_from(proof + "/c1", "HAS_ARTIFACT")),
+                edge_rows(self.mork.edges_from(proof + "/c1", "HAS_ARTIFACT")),
+            )
+            self.assertEqual(
+                edge_rows(self.memory.edges_to(proof + "/c1", "EVIDENCE_FOR")),
+                edge_rows(self.mork.edges_to(proof + "/c1", "EVIDENCE_FOR")),
+            )
+            _, snapshot = self.mork.snapshot(proof)
+            self.assertEqual(
+                self.memory.edge(proof + "/artifact"), snapshot.edge(proof + "/artifact")
+            )
+
+        self.assertEqual(
+            edge_rows(self.memory.edges_to(artifact, "HAS_ARTIFACT")),
+            edge_rows(self.mork.edges_to(artifact, "HAS_ARTIFACT")),
+        )
+        self.assertEqual(
+            edge_rows(self.memory.edges_from(artifact, "EVIDENCE_FOR")),
+            edge_rows(self.mork.edges_from(artifact, "EVIDENCE_FOR")),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
