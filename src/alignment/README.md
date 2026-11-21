@@ -66,7 +66,7 @@ Without statement alignment, an ATP system could prove a false informal claim by
 |---|---|
 | **[`models.py`](models.py)** | Defines `AlignmentCriteria` (the 8 §7.6 dimensions), `AlignmentReviewRequest` (with automatic SHA-256 hashing), `AlignmentReviewResult`, and schema-compliant `AlignmentRecord`. |
 | **[`reviewer.py`](reviewer.py)** | Contains `LLMAlignmentReviewer` (real reasoning auditor) and `RuleBasedAlignmentReviewer` (fast deterministic baseline). |
-| **[`llm_client.py`](llm_client.py)** | Out-of-the-box LLM clients: **`GeminiLLMClient`** (native Google Generative Language API via `.env`), **`HTTPLLMClient`** (OpenAI / DeepSeek / vLLM compatible), **`CallableLLMClient`**, and **`MockLLMClient`**. |
+| **[`llm_client.py`](llm_client.py)** | Compatibility imports for the clients in `shared.llm_client`: **`GeminiLLMClient`**, **`HTTPLLMClient`**, **`CallableLLMClient`**, and **`MockLLMClient`**. |
 | **[`prompts.py`](prompts.py)** | System prompt and formatted prompt envelopes enforcing structured JSON output across all 8 §7.6 audit criteria. |
 | **[`worker.py`](worker.py)** | `AlignmentWorker` implementing `WorkerClass.ALIGNMENT_REVIEWER`. Provides `build_alignment_proposal()` for `CommitGate` and `build_worker_result()` for scheduler integration. |
 
