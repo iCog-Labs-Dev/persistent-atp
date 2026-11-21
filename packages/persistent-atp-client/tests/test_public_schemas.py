@@ -35,6 +35,8 @@ def test_public_models_have_packaged_strict_schemas():
                       frozenset(("atomic-coordinator-escalations", "cycle-execution-revision")),
                       backend_mode="unavailable", receiver_mode="reference-scripted"),
         CoordinationItem("node", "p1/c-1", "Claim", {"status": "provisional"}),
+        CoordinationItem("edge", "p1/al-" + "9" * 78 + "->fd-" + "9" * 78 + ":ALIGNS_DECLARATION",
+                         "ALIGNS_DECLARATION", {"src_id": "p1/al-1", "dst_id": "p1/fd-1"}),
         CoordinationPage("lab", "p1", 1, digest, 1,
                          (CoordinationItem("node", "p1/c-1", "Claim", {}),), 1,
                          None, "reference-scripted"),
@@ -48,6 +50,16 @@ def test_public_models_have_packaged_strict_schemas():
         jsonschema.validate(to_dict(model), selected)
         with_extra = {**to_dict(model), "actor": "forged"}
         assert not jsonschema.Draft202012Validator(selected).is_valid(with_extra)
+
+
+@pytest.mark.parametrize("record_id", ["", "x" * 4097, "edge\nforged"])
+def test_coordination_record_ids_remain_bounded_and_control_free(record_id):
+    schema = json.loads(files("persistent_atp_client").joinpath("schemas/public-models.schema.json").read_text())
+    selected = {"$defs": schema["$defs"], "$ref": "#/$defs/CoordinationItem"}
+    assert not jsonschema.Draft202012Validator(selected).is_valid(
+        {"item_type": "edge", "record_id": record_id, "label": "ALIGNS_DECLARATION", "fields": {}})
+    with pytest.raises(ValueError, match="record_id"):
+        CoordinationItem("edge", record_id, "ALIGNS_DECLARATION", {})
 
 
 def test_schema_manifest_uses_packaged_bytes_and_stable_ids():

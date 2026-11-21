@@ -1,0 +1,1 @@
+{"root":"tmp/runs/omega-production-service","profile":"production","workspace":"reference","host":"127.0.0.1","port":8765,"token_env":"PERSISTENT_ATP_OMEGA_TOKEN"}

@@ -25,11 +25,15 @@ prove raises            internal-error
 missing request fields  invalid-request
 ======================  =============================================
 
-``formal_search_resume`` hands the same goal back to the reasoner -- its
-Thompson-sampler state persists across calls, so a resumed run continues the
-search rather than restarting it blind. ``formal_replay`` delegates to an
-injected independent verifier. Without one, replay rejects the candidate
-instead of claiming verification.
+``formal_search_resume`` reports unsupported checkpoint continuation rather
+than restarting the initial search. ``formal_replay`` delegates to an injected
+runner; without independent replay the default rejects verification, and
+production mode rejects explicit stubs as well.
+
+Production search additionally requires a trusted request compiler and a
+backend implementing ``prove_bounded(goal, budget=...)``. The compiler must
+derive the request from authoritative context; ordinary wire input alone
+cannot select a goal or authorize a production run.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from copy import deepcopy
 from typing import Any, Callable, Mapping
 
 from commit_gate.vocab import ExecutorResult, NON_KERNEL_TACTICS, RunDisposition
@@ -312,15 +317,22 @@ class MathsAIFormalATP(FormalATPAdapter):
         reasoner: Any | None = None,
         reasoner_factory: Callable[[], Any] | None = None,
         replay_fn: ReplayFn | None = None,
+        production: bool = False,
+        request_compiler: Callable[[Mapping[str, Any]], Any] | None = None,
     ):
         if reasoner is None and reasoner_factory is None:
             reasoner_factory = default_reasoner_factory
         self._reasoner = reasoner
         self._factory = reasoner_factory
+        # A missing replay implementation is never positive evidence. The
+        # reference fake remains available only by explicit injection.
         self._replay = replay_fn or stub_replay("rejected")
+        self._production = production
+        # Trusted host callback: recompile from the pinned graph/artifacts, never
+        # from model-selected source text. It may return FormalRequestPayload.
+        self._request_compiler = request_compiler
         self._latest: dict[str, Mapping[str, Any]] = {}
         self._requests: dict[str, Mapping[str, Any]] = {}
-        self._cancelled: set[str] = set()
 
     def _get_reasoner(self) -> Any:
         if self._reasoner is None:
@@ -330,12 +342,14 @@ class MathsAIFormalATP(FormalATPAdapter):
     def _run_search(self, run_id: str, request: Mapping[str, Any]) -> Mapping[str, Any]:
         started = time.monotonic()
         try:
-            graph = asyncio.run(
-                self._get_reasoner().prove(
-                    str(request["goal_text"]),
-                    hypotheses=list(request.get("hypotheses") or []),
-                )
-            )
+            async def search():
+                if self._production:
+                    return await asyncio.wait_for(self._get_reasoner().prove_bounded(
+                        str(request["goal_text"]), budget=deepcopy(request["budget"])),
+                        timeout=request["budget"]["wall_clock_ms"] / 1000)
+                return await self._get_reasoner().prove(str(request["goal_text"]),
+                    hypotheses=list(request.get("hypotheses") or []))
+            graph = asyncio.run(search())
             wall_ms = int((time.monotonic() - started) * 1000)
             result = _convert_graph(graph, request, wall_ms)
             schema_errors = validate_schema("formal-search-result", result)
@@ -371,6 +385,30 @@ class MathsAIFormalATP(FormalATPAdapter):
         return result
 
     def formal_search_start(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = deepcopy(dict(request))
+        if self._production:
+            error = None
+            if validate_schema("formal-search-request", request):
+                error = "production request must match the strict public schema"
+            elif self._request_compiler is None:
+                error = "trusted-context-compiler-required"
+            else:
+                try:
+                    compiled = self._request_compiler(deepcopy(request))
+                    expected = compiled.to_schema_dict() if hasattr(compiled, "to_schema_dict") else dict(compiled)
+                    if expected != request or validate_schema("formal-search-request", expected):
+                        error = "request-does-not-match-authoritative-context"
+                    elif (not isinstance(request.get("budget"), dict)
+                          or set(request["budget"]) != {"max_steps", "wall_clock_ms"}):
+                        error = "finite-execution-budget-required"
+                    elif not callable(getattr(self._get_reasoner(), "prove_bounded", None)):
+                        error = "backend-does-not-support-bounded-execution"
+                except Exception:
+                    error = "trusted-context-compilation-failed"
+            if error:
+                result = build_result(RunDisposition.INVALID_REQUEST.value, request)
+                result["artifacts"][0]["note"] = error
+                return result
         missing = missing_request_fields(request)
         if not missing and not request.get("goal_text"):
             missing = ["goal_text"]
@@ -383,12 +421,11 @@ class MathsAIFormalATP(FormalATPAdapter):
     def formal_search_resume(
         self, run_id: str, budget: Mapping[str, Any] | None = None
     ) -> Mapping[str, Any]:
-        if run_id in self._cancelled:
-            return {"run_id": run_id, "disposition": "cancelled"}
-        request = self._requests.get(run_id)
-        if request is None:
-            return build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
-        return self._run_search(run_id, request)
+        # The backend exposes no checkpoint continuation. Re-running prove()
+        # from the original goal would misrepresent a fresh search as resume.
+        result = build_result(RunDisposition.INVALID_REQUEST.value, {"run_id": run_id})
+        result["artifacts"][0]["note"] = "unsupported-checkpoint-resume; start an explicit new run"
+        return result
 
     def formal_search_status(self, run_id: str) -> Mapping[str, Any]:
         latest = self._latest.get(run_id)
@@ -397,10 +434,16 @@ class MathsAIFormalATP(FormalATPAdapter):
         return latest
 
     def formal_search_cancel(self, run_id: str) -> Mapping[str, Any]:
-        self._cancelled.add(run_id)
-        return {"run_id": run_id, "disposition": "cancelled"}
+        # Marking a local set cannot interrupt prove() or fence a remote worker.
+        # Keep this unavailable until the service has an acknowledged executor
+        # cancellation/fencing path; never report an unconfirmed stop.
+        return {"run_id": run_id, "control_status": "unsupported",
+                "error_code": "UNSUPPORTED_CANCELLATION"}
 
     def formal_replay(
         self, certificate: Mapping[str, Any], environment_hash: str
     ) -> Mapping[str, Any]:
+        if self._production and not getattr(self._replay, "_independent_lean_replay", False):
+            return {"status": "rejected", "environment_hash": environment_hash,
+                    "rejection_reason": "independent-replay-required"}
         return self._replay(certificate, environment_hash)
