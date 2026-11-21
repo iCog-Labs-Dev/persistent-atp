@@ -218,4 +218,6 @@ def _optional_text(value: object, field: str) -> str | None:
 
 def _draft_edge_id(declaration_id: str, claim_id: str) -> str:
     seed = f"drafts-claim\0{declaration_id}\0{claim_id}".encode("utf-8")
-    return "sha256:" + hashlib.sha256(seed).hexdigest()
+    # Graph edges belong to their proof namespace. A bare content address is
+    # stored under a different proof by native MORK and disappears from reads.
+    return declaration_id.split('/', 1)[0] + '/drafts-' + hashlib.sha256(seed).hexdigest()

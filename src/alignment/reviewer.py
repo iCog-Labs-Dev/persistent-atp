@@ -97,9 +97,11 @@ class LLMAlignmentReviewer:
         self,
         llm_client: LLMClientProtocol | None = None,
         reviewer_id: str = "llm-alignment-reviewer-1",
+        *, strict: bool = False,
     ) -> None:
         self.llm_client = llm_client or HTTPLLMClient()
         self.reviewer_id = reviewer_id
+        self.strict = strict
 
     def review(self, request: AlignmentReviewRequest) -> AlignmentReviewResult:
         """Audit the alignment using the LLM intelligence engine."""
@@ -115,17 +117,30 @@ class LLMAlignmentReviewer:
                 system_prompt=ALIGNMENT_REVIEWER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
             )
+            if self.strict:
+                if not isinstance(data, dict):
+                    raise ValueError('review must be a JSON object')
+                for name in ('quantifier_correspondence', 'domain_correspondence', 'reasoning', 'verdict', 'relation'):
+                    if not isinstance(data.get(name), str) or not data[name].strip():
+                        raise ValueError('review is missing an explicit explanation or verdict')
+                for name in ('selected_definitions_match', 'implication_to_target_explicit'):
+                    if type(data.get(name)) is not bool:
+                        raise ValueError('review criteria must be explicit JSON booleans')
+                for name in ('universe_assumptions', 'typeclass_assumptions', 'classical_assumptions', 'constructive_assumptions'):
+                    if not isinstance(data.get(name), list) or any(not isinstance(x, str) or not x.strip() for x in data[name]):
+                        raise ValueError('review assumptions must be explicit arrays of strings')
         except Exception as exc:
             # If the LLM call fails, return ambiguous outcome needing human review
+            failure = 'LLM review failed or returned incomplete criteria.' if self.strict else f'LLM review failed: {exc}'
             return AlignmentReviewResult(
                 verdict=AlignmentVerdict.AMBIGUOUS,
                 lifecycle=AlignmentLifecycle.REVIEW_NEEDED,
                 criteria=AlignmentCriteria(
                     relation="reformulation",
-                    notes=f"LLM review failed with error: {exc}",
+                    notes=failure,
                 ),
                 reviewer=self.reviewer_id,
-                reasoning=f"LLM review failed: {exc}",
+                reasoning=failure,
             )
 
         raw_verdict = str(data.get("verdict", "ambiguous")).lower()

@@ -131,6 +131,30 @@ class AsyncClient:
                                request_id=request_id, deadline=deadline, contract_version=contract_version)
         return await self.submit(request)
 
+    async def reconcile(self, request: ActionRequest, *, timeout: float = 30.0) -> "OperationHandle":
+        """One recovery pass: lookup first, resubmit only on authoritative absence.
+
+        Hosts checkpoint the prepared request and schedule bounded passes. This
+        method owns admission validation and never generates a replacement ID.
+        A failed lookup must not be treated as absence.
+        """
+        if self._closed:
+            raise RuntimeError("client is closed")
+        if not isinstance(request, ActionRequest):
+            raise TypeError("reconcile requires a prepared ActionRequest")
+        _duration(timeout, "timeout")
+        end = time.monotonic() + timeout
+        try:
+            receipt = await _before(self.lookup_request(workspace_id=request.workspace_id, request_id=request.request_id), end)
+            if receipt is None:
+                return await _before(self.submit(request), end)
+        except TimeoutError as exc:
+            raise SubmissionUncertain("reconciliation timed out; retain the original request", request=request) from exc
+        _admission(receipt, request.workspace_id, request.request_id, fingerprint(request))
+        if not receipt.accepted:
+            raise AdmissionRejected(receipt)
+        return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
+
     async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
         return await self.submit_action(ProofCreate(spec_artifact), workspace_id=workspace_id, **request_options)
 
@@ -225,6 +249,35 @@ class AsyncClient:
                 raise ReceiverProtocolError("operation list contains duplicate references")
             seen.add(result.ref)
         return results
+
+    async def events_page(self, ref: OperationRef, *, cursor: str | None = None):
+        """Read one bounded page for checkpointed framework observation."""
+        if not isinstance(ref, OperationRef):
+            raise TypeError("events require OperationRef")
+        response = await self._port.read_events(ref, cursor)
+        if not isinstance(response, tuple) or len(response) != 2:
+            raise ReceiverProtocolError("invalid event page")
+        page, next_cursor = response
+        if not isinstance(page, tuple) or (next_cursor is not None and (
+                not isinstance(next_cursor, str) or not 1 <= len(next_cursor) <= 128
+                or any(ord(c) < 32 for c in next_cursor))):
+            raise ReceiverProtocolError("invalid event page shape")
+        previous = -1
+        previous_version = -1
+        seen = {}
+        for event in page:
+            if not isinstance(event, Event) or event.operation_ref != ref:
+                raise ReceiverProtocolError("out-of-scope event")
+            if event.event_id in seen:
+                if seen[event.event_id] != event:
+                    raise ReceiverProtocolError("event identity changed within a page")
+                continue
+            seen[event.event_id] = event
+            if event.sequence <= previous or event.observation_version < previous_version:
+                raise ReceiverProtocolError("event page sequence or observation regressed")
+            previous = event.sequence
+            previous_version = event.observation_version
+        return page, next_cursor
 
     async def put_artifact(self, source: bytes, *, workspace_id: str, media_type: str,
                            expected_hash: str | None = None) -> ArtifactRef:
@@ -369,6 +422,9 @@ class SyncClient:
     def submit(self, request):
         return self._run(self._client.submit(request))
 
+    def reconcile(self, request, **kwargs):
+        return self._run(self._client.reconcile(request, **kwargs))
+
     def status(self, **kwargs):
         return self._run(self._client.status(**kwargs))
 
@@ -392,6 +448,24 @@ class SyncClient:
 
     def coordination_page(self, proof_id: str, **kwargs):
         return self._run(self._client.coordination_page(proof_id, **kwargs))
+
+    def list_operations(self, **kwargs):
+        return self._run(self._client.list_operations(**kwargs))
+
+    def snapshot(self, handle):
+        return self._run(handle.snapshot())
+
+    def events_page(self, ref, **kwargs):
+        return self._run(self._client.events_page(ref, **kwargs))
+
+    def cancel(self, control):
+        return self._run(self.attach(control.operation_ref).cancel(control))
+
+    def amend_budget(self, control):
+        return self._run(self.attach(control.operation_ref).amend_budget(control))
+
+    def answer_decision(self, control):
+        return self._run(self.attach(control.operation_ref).answer_decision(control))
 
     def close(self):
         return self._run(self._client.aclose())

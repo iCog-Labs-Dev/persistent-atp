@@ -1,0 +1,159 @@
+"""Install OmegaClaw plugins and the DeepSeek gateway route into an Omega copy.
+
+Run against an isolated derived checkout, never the pinned source checkout.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from importlib.resources import files
+from pathlib import Path
+import re
+import shutil
+from .runtime import OMEGA_REVISION, PETTA_REVISION, MANIFEST, seal_runtime, verify_checkout, verify_manifest
+from .container_entrypoint import patch_entrypoint
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parent
+CLIENT_ROOT = Path(str(files("persistent_atp_client")))
+PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
+                "deepseek_provider.py", "coordinator-policy.txt")
+# Omega's core registry is named providers.py. Install the package module under
+# a unique plugin name so the Omega registry cannot be shadowed.
+PROVIDER_PLUGIN = "persistent_atp_providers.py"
+ROUTE_MARKER = "location = /deepseek/chat/completions {"
+
+
+def install(omega_root: Path) -> dict:
+    omega_root = omega_root.resolve()
+    verify_checkout(omega_root)
+    catalogue = omega_root / "config" / "plugins.yaml"
+    proxy = omega_root / "proxy" / "nginx.conf.template"
+    if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
+        raise ValueError("--omega-root must be a full derived Omega checkout")
+    entrypoint = omega_root / "entrypoint.sh"
+    original_entrypoint = entrypoint.read_text()
+    updated_entrypoint = patch_entrypoint(original_entrypoint)
+    launcher = omega_root / "run.metta"
+    unpinned = '!(git-import! "https://github.com/singnet/Omega.git")'
+    pinned = f'!(git-import! "https://github.com/singnet/Omega.git" "" "./repos" {OMEGA_REVISION})'
+    shim_import = '!(import_prolog_functions_from_file "./repos/Omega/persistent_atp_pinned_import.pl" (quote (git-import!)))'
+    original_launcher = launcher.read_text()
+    if unpinned in original_launcher:
+        updated_launcher = original_launcher.replace(unpinned, shim_import + "\n" + pinned)
+    elif pinned in original_launcher and shim_import in original_launcher:
+        updated_launcher = original_launcher
+    else:
+        raise ValueError("derived Omega launcher has an unexpected runtime import")
+    if not CLIENT_ROOT.is_dir():
+        raise ValueError("installed persistent-atp-client package files are required for Omega installation")
+    plugin_dir = omega_root / "plugins" / "persistent_atp"
+    source = PACKAGE_ROOT / "omega_plugin"
+    files = {name: source / name for name in PLUGIN_FILES}
+    files[PROVIDER_PLUGIN] = PACKAGE_ROOT / "providers.py"
+    for name, origin in files.items():
+        target = plugin_dir / name
+        if target.exists() and target.read_bytes() != origin.read_bytes():
+            raise ValueError(f"derived Omega plugin file differs: {target}")
+
+    original_catalogue = catalogue.read_text()
+    overlay = (PACKAGE_ROOT / "config" / "omega-plugins.overlay.yaml").read_text()
+    overlay = overlay.replace("/opt/persistent-atp/omega-plugin", str(plugin_dir))
+    plugin_names = ("persistent_atp", "deepseek_provider", "persistent_atp_providers")
+    if all(f"- name: {name}" in original_catalogue for name in plugin_names):
+        if overlay.strip() not in original_catalogue:
+            raise ValueError("existing Omega plugin catalogue entries differ from OmegaClaw overlay")
+        updated_catalogue = original_catalogue
+    else:
+        for name in plugin_names:
+            if re.search(rf"(?m)^- name:\s*['\"]?{name}\b", original_catalogue):
+                raise ValueError(f"Omega plugin name already exists: {name}")
+        updated_catalogue = original_catalogue.rstrip() + "\n\n" + overlay.rstrip() + "\n"
+
+    original_proxy = proxy.read_text()
+    route = (PACKAGE_ROOT / "config" / "deepseek-nginx-location.conf").read_text().rstrip()
+    if ROUTE_MARKER in original_proxy:
+        if route not in original_proxy:
+            raise ValueError("existing DeepSeek proxy route differs from OmegaClaw route")
+        updated_proxy = original_proxy
+    else:
+        anchor = "        location /openrouter/ {"
+        if original_proxy.count(anchor) != 1:
+            raise ValueError("pinned Omega proxy template anchor is absent or ambiguous")
+        updated_proxy = original_proxy.replace(anchor, route + "\n\n" + anchor, 1)
+
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    for name, origin in files.items():
+        shutil.copy2(origin, plugin_dir / name)
+    shutil.copytree(CLIENT_ROOT, plugin_dir / "persistent_atp_client", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # Only the framework package is installed on the agent side. Receiver,
+    # journal and executor implementations stay on the trusted host.
+    adapter_package = plugin_dir / "omegaclaw"
+    adapter_package.mkdir(exist_ok=True)
+    for name in ("__init__.py", "specification.py", "runtime.py"):
+        shutil.copy2(PACKAGE_ROOT / name, adapter_package / name)
+    shutil.copytree(PACKAGE_ROOT / "frameworks", adapter_package / "frameworks", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if updated_catalogue != original_catalogue:
+        catalogue.write_text(updated_catalogue)
+    if updated_proxy != original_proxy:
+        proxy.write_text(updated_proxy)
+    shutil.copy2(source / "persistent_atp_pinned_import.pl", omega_root / "persistent_atp_pinned_import.pl")
+    if updated_launcher != original_launcher:
+        launcher.write_text(updated_launcher)
+    if updated_entrypoint != original_entrypoint:
+        entrypoint.write_text(updated_entrypoint)
+    seal_runtime(omega_root)
+    return {"omega_root": str(omega_root), "required_omega_revision": OMEGA_REVISION, "plugin_location": str(plugin_dir),
+            "catalogue": str(catalogue), "proxy_template": str(proxy)}
+
+
+def bundle_runtime(omega_root: Path, destination: Path, base_image: str) -> dict:
+    """Export a sealed overlay for an explicitly digest-pinned Omega image."""
+    if not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", base_image):
+        raise ValueError("base image must be pinned as image@sha256:<64 hex digits>")
+    verify_manifest(omega_root)
+    manifest = json.loads((omega_root / MANIFEST).read_text())
+    for name in ("proxy/nginx.conf.template", "proxy/nginx.sh"):
+        if name not in manifest["files"]:
+            raise ValueError("container runtime lacks verified proxy assets")
+    # Refuse to overwrite an existing context, or to copy one into its source.
+    if destination.resolve().is_relative_to(omega_root.resolve()):
+        raise ValueError("container context must be outside the Omega source")
+    destination.mkdir(parents=True, exist_ok=False)
+    for name in [*manifest["files"], MANIFEST]:
+        target = destination / "omega" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(omega_root / name, target)
+    # The installer records host paths. Container assets must use the image's
+    # canonical plugin location rather than the builder's absolute directory.
+    catalogue = destination / "omega/config/plugins.yaml"
+    if catalogue.is_file():
+        catalogue.write_text(catalogue.read_text().replace(
+            str(omega_root / "plugins/persistent_atp"), "/PeTTa/repos/Omega/plugins/persistent_atp"))
+    # The core overlay can be newer than the official base image release.
+    (destination / "omega/version").write_text(OMEGA_REVISION + "\n")
+    seal_runtime(destination / "omega")
+    template = (PACKAGE_ROOT / "config" / "omega.Dockerfile").read_text()
+    (destination / "Dockerfile").write_text(template.replace("@@BASE_IMAGE@@", base_image).replace("@@PETTA_REVISION@@", PETTA_REVISION))
+    return {"container_context": str(destination), "base_image": base_image}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--omega-root", type=Path, required=True)
+    parser.add_argument("--bundle-dir", type=Path)
+    parser.add_argument("--base-image")
+    args = parser.parse_args(argv)
+    if bool(args.bundle_dir) != bool(args.base_image):
+        parser.error("--bundle-dir and --base-image must be supplied together")
+    result = install(args.omega_root)
+    if args.bundle_dir:
+        result.update(bundle_runtime(args.omega_root.resolve(), args.bundle_dir, args.base_image))
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
