@@ -7,11 +7,38 @@ import shutil
 import subprocess
 import sys
 import os
+import re
 import time
 
 import pytest
 
 REQUIRED = os.environ.get('OMEGA_FORMAL_CONTRACT_REQUIRED') == '1'
+
+
+def _installed_lean():
+    """Find a local Lean executable without invoking elan's auto-download path."""
+    configured = os.environ.get('OMEGA_TEST_LEAN')
+    if configured:
+        candidate = Path(configured).expanduser()
+        return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+    elan_home = Path(os.environ.get('ELAN_HOME', str(Path.home() / '.elan')))
+    toolchains = list((elan_home / 'toolchains').glob('leanprover--lean4---*/bin/lean'))
+
+    def version_key(binary):
+        match = re.search(r'v(\d+(?:\.\d+)*)$', binary.parent.parent.name)
+        return tuple(int(part) for part in match.group(1).split('.')) if match else ()
+
+    if toolchains:
+        return max(toolchains, key=version_key)
+    discovered = shutil.which('lean')
+    if discovered and '.elan/bin/' not in discovered:
+        return Path(discovered)
+    return None
+
+
+_TEST_LEAN = _installed_lean()
+
 try:
     import fastapi
 except ImportError:
@@ -90,7 +117,9 @@ def provider(tmp_path, monkeypatch):
             assert statement['expression'] == '@True'
             path = tmp_path / 'Replay.lean'
             path.write_text('theorem replay_target : True := by trivial\n#print axioms replay_target\n')
-            result = subprocess.run(['lean', '-DwarningAsError=true', str(path)], capture_output=True, text=True, timeout=15)
+            if _TEST_LEAN is None:
+                raise RuntimeError('the test requires an installed Lean toolchain')
+            result = subprocess.run([str(_TEST_LEAN), '-DwarningAsError=true', str(path)], capture_output=True, text=True, timeout=15)
             verified = result.returncode == 0 and 'sorryAx' not in result.stdout + result.stderr
             return VerifyOutcome('verified' if verified else 'rejected', None, 1, self.environment_manifest(),
                 {'sorry_detected': not verified})
@@ -783,7 +812,7 @@ def test_stagnated_search_is_bound_and_compiled_as_obstruction_research_context(
 @pytest.mark.parametrize('boundary', ['preparation', 'before-delivery', 'cancellation', 'search-commit', 'replay-receipt', 'cached-replay-receipt', 'replay-commit', 'promotion'])
 def test_receiver_restart_preserves_run_and_committed_evidence(provider, tmp_path, monkeypatch, boundary):
     if 'replay' in boundary or boundary == 'promotion':
-        if shutil.which('lean') is None:
+        if _TEST_LEAN is None:
             pytest.skip('real Lean is required for replay recovery')
         mode = 'real'
     else:
@@ -886,7 +915,7 @@ def test_receiver_restart_preserves_run_and_committed_evidence(provider, tmp_pat
         service.close()
 
 
-@pytest.mark.skipif(shutil.which('lean') is None, reason='real Lean is required for replay delivery test')
+@pytest.mark.skipif(_TEST_LEAN is None, reason='an installed Lean toolchain is required for replay delivery test')
 @pytest.mark.parametrize('lifecycle', ['failed', 'succeeded', 'cancelled'])
 def test_lost_replay_receipt_requires_reconciliation_without_second_replay(provider, tmp_path, monkeypatch, lifecycle):
     deployment, backend, calls, *_ = provider
@@ -928,7 +957,7 @@ def test_lost_replay_receipt_requires_reconciliation_without_second_replay(provi
         service.close()
 
 
-@pytest.mark.skipif(shutil.which('lean') is None, reason='real Lean is required for native replay')
+@pytest.mark.skipif(_TEST_LEAN is None, reason='an installed Lean toolchain is required for native replay')
 def test_separate_native_replay_and_gate_promotion(provider, tmp_path):
     deployment, backend, *_ = provider
     service, receiver = configured(tmp_path / 'receiver', deployment, mode='real')
@@ -998,7 +1027,7 @@ def test_cancel_remains_pending_until_provider_stops(provider, tmp_path, monkeyp
         service.close()
 
 
-@pytest.mark.skipif(shutil.which('lean') is None, reason='real Lean is required for persisted replay')
+@pytest.mark.skipif(_TEST_LEAN is None, reason='an installed Lean toolchain is required for persisted replay')
 @pytest.mark.parametrize('operation', ['formal-search', 'proof-cycle', 'selected-cycle'])
 def test_production_formal_result_survives_postgres_mork_receiver_restart(provider, tmp_path, operation):
     if not os.environ.get('MORK_LIBRARY') or not os.environ.get('ARTIFACT_TEST_DB_URL'):
