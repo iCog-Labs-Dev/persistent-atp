@@ -57,6 +57,11 @@ installed overlay. The launcher validates those bytes even when `.git` is
 removed. The immutable image/build remains the trust anchor; the manifest is
 not a signature.
 
+The loop overlay initializes its wake timer during startup, including when a
+restored managed task suppresses the first model turn. Reinstallation upgrades
+the exact previous coordinator overlay; unrelated source edits still fail
+digest validation.
+
 To export a container overlay, supply `--bundle-dir /path/to/context` and
 `--base-image registry/omega@sha256:<digest>` to the installer. The generated
 Dockerfile uses the verified upstream entrypoint with a narrow bridge-variable
@@ -167,6 +172,14 @@ context, runs the existing formalizer, commits a draft, and separately reviews
 exact statement alignment. Only an accepted review makes the declaration
 available to formal search. Ambiguous reviews remain pending; alignment alone
 does not verify a proof.
+
+When a candidate supplies a nonempty proposition but omits its declaration
+name, or returns a null or blank name, intake assigns a stable name derived
+from the declaration ID. It saves the effective candidate and naming origin
+before generating source or requesting alignment review, and retains the raw
+model response. Supplied names still undergo strict validation. Missing
+propositions and explicit refusals continue to require clarification; completed
+clarification outcomes are preserved when an operation is retried.
 
 Add `--atp-intake` alongside `--atp --atp-cycle` to test this path. Its input
 file contains only `{"spec": <complete theorem specification>}`. The runner
@@ -464,6 +477,8 @@ bash scripts/omegaclaw-test.sh --tier coordinator
 Missing runtime prerequisites fail this tier. CI runs the same task and actual
 MeTTa-loop checks inside a digest-pinned official Omega image, with scripted
 receiver/model fixtures and no paid inference. The tests include zero-turn
-completion, restart, lost admission replies and real WebSocket reconnection
+completion, fresh-process recovery of active, delivery-pending and completed
+managed tasks without model calls, intake metadata and recovery checks without
+the optional formal provider, lost admission replies and real WebSocket reconnection
 after a lost final acknowledgment. Live trained-search acceptance remains a
 separate check.

@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -81,6 +82,55 @@ def test_fresh_claim_cycle_generates_reviews_then_dispatches_once(provider, tmp_
     finally: receiver.close(); service.close()
 
 
+@pytest.mark.parametrize('metadata', [{}, {'lean_name': None}, {'lean_name': ''}, {'lean_name': '  '}])
+def test_missing_declaration_name_is_bound_before_source_and_review(provider, tmp_path, monkeypatch, metadata):
+    raw = {k: v for k, v in CANDIDATE.items() if k != 'lean_name'} | metadata
+    service, proof, llm = setup(tmp_path, monkeypatch, responses=[raw, REVIEW])
+    operation = admit(service, proof)
+    commit = service.gate.commit
+    def checked_commit(proposal):
+        if proposal.worker_class == 'formalizer':
+            saved = service.jobs.intake_state(operation)
+            assert saved['candidate'] == raw
+            assert saved['lean_name_origin'] == 'host-generated'
+            assert saved['effective_candidate']['lean_name'] == proposal.ops[0].fields['lean_name']
+        return commit(proposal)
+    monkeypatch.setattr(service.gate, 'commit', checked_commit)
+    try:
+        result = service.cycles.run(operation, proof)
+        assert result['cycle_disposition'] == 'formal-executed', result
+        declaration = service.view.list_nodes(proof, 'FormalDeclaration')[0]
+        name = declaration.fields['lean_name']
+        assert re.fullmatch(r'persistent_atp_[0-9a-f]{64}', name)
+        assert declaration.fields['lean_type'] == 'True'
+        source = service.artifacts.get(declaration.fields['lean_source_artifact'])
+        assert f'theorem {name} : True'.encode() in source
+        assert name in llm.history[1][1]
+        assert len(llm.history) == 2
+        assert service.jobs.intake_state(operation)['candidate'] == raw
+        assert not service._status(proof)['formal_verified']
+    finally: service.close()
+
+
+def test_finalized_legacy_missing_name_clarification_is_not_rewritten(provider, tmp_path, monkeypatch):
+    service, proof, _ = setup(tmp_path, monkeypatch, responses=[CANDIDATE | {'lean_name': None}])
+    operation = admit(service, proof)
+    with monkeypatch.context() as patch:
+        # Reproduce the former strict-name behavior with the real worker/gate.
+        patch.setattr(IntakeWorkflow, '_candidate_for_source', lambda _self, _op, state: state['candidate'])
+        refused = service.intake.run(operation, proof)
+    saved = service.jobs.intake_state(operation)
+    assert refused['formalization_disposition'] == 'needs-clarification'
+    service.close()
+    service, _, llm = setup(tmp_path, monkeypatch, responses=[], create=False)
+    try:
+        assert service.intake.run(operation, proof) == refused
+        assert service.jobs.intake_state(operation) == saved
+        assert not llm.history
+        assert not service.view.list_nodes(proof, 'FormalDeclaration')
+    finally: service.close()
+
+
 @pytest.mark.parametrize('change', [
     {'verdict': 'weaker', 'relation': 'weakening'}, {'relation': 'reformulation'},
     {'selected_definitions_match': False}, {'implication_to_target_explicit': 'false'},
@@ -104,15 +154,17 @@ def test_incomplete_or_nonexact_review_blocks_without_provider_search(provider, 
     finally: service.close()
 
 
-@pytest.mark.parametrize('boundary', ['candidate', 'draft', 'source', 'review', 'alignment', 'aligned'])
-def test_intake_restart_reuses_saved_outputs_and_committed_nodes(provider, tmp_path, monkeypatch, boundary):
-    service, proof, llm = setup(tmp_path, monkeypatch)
+@pytest.mark.parametrize('missing_name', [False, True])
+@pytest.mark.parametrize('boundary', ['candidate', 'effective_candidate', 'draft', 'source', 'review', 'alignment', 'aligned'])
+def test_intake_restart_reuses_saved_outputs_and_committed_nodes(provider, tmp_path, monkeypatch, boundary, missing_name):
+    raw = CANDIDATE | {'lean_name': None} if missing_name else CANDIDATE
+    service, proof, llm = setup(tmp_path, monkeypatch, responses=[raw, REVIEW])
     operation = admit(service, proof)
     save, commit = IntakeWorkflow._save, service.gate.commit
     interrupted = []
     def crash_save(workflow, operation, state):
         save(workflow, operation, state)
-        if boundary in {'candidate', 'review'} and boundary in state and not interrupted:
+        if boundary in {'candidate', 'effective_candidate', 'review'} and boundary in state and not interrupted:
             interrupted.append(True)
             raise SystemExit('crash after durable LLM output')
     def crash_commit(proposal):
@@ -143,12 +195,19 @@ def test_intake_restart_reuses_saved_outputs_and_committed_nodes(provider, tmp_p
         assert len(service.view.list_nodes(proof, 'FormalRun')) == 1
         assert len(llm.history) + len(resumed.history) == 2
         assert service.jobs.intake_state(operation)['candidate'] == saved['candidate']
+        recovered = service.jobs.intake_state(operation)
+        for key in ('effective_candidate', 'lean_name_origin', 'source_hash'):
+            if key in saved:
+                assert recovered[key] == saved[key]
+        assert service.view.list_nodes(proof, 'FormalDeclaration')[0].fields['lean_name'] == recovered['effective_candidate']['lean_name']
         assert not service.store.active_leases(proof)
     finally: service.close()
 
 
 @pytest.mark.parametrize('candidate', [CANDIDATE | {'lean_type': 'True\naxiom bad : False'},
-    CANDIDATE | {'lean_type': 'True -- ignore remainder'}, CANDIDATE | {'lean_type': 'True := by sorry'}])
+    CANDIDATE | {'lean_type': 'True -- ignore remainder'}, CANDIDATE | {'lean_type': 'True := by sorry'},
+    CANDIDATE | {'lean_name': 'bad; axiom injected : False'}, CANDIDATE | {'lean_name': 42},
+    CANDIDATE | {'lean_name': None, 'lean_type': ''}])
 def test_source_cannot_include_model_commands_or_proof(provider, tmp_path, monkeypatch, candidate):
     service, proof, _ = setup(tmp_path, monkeypatch, responses=[candidate])
     try:
@@ -240,21 +299,23 @@ def test_unverified_dependency_is_never_omitted_from_formalization(provider, tmp
     finally: service.close()
 
 
-def test_production_intake_projects_draft_edge_and_preserves_review(provider, tmp_path, monkeypatch):
+@pytest.mark.parametrize('missing_name', [False, True])
+def test_production_intake_projects_draft_edge_and_preserves_review(provider, tmp_path, monkeypatch, missing_name):
     if not os.environ.get('MORK_LIBRARY') or not os.environ.get('ARTIFACT_TEST_DB_URL'):
         if os.environ.get('OMEGA_PERSISTENCE_REQUIRED') == '1':
             pytest.fail('production intake requires native MORK and a dedicated PostgreSQL artifact database')
         pytest.skip('native MORK and a dedicated PostgreSQL artifact database are required')
     if os.environ.get('OMEGA_NATIVE_INTAKE_CASE') != '1':
         result = subprocess.run([sys.executable, '-m', 'pytest', '-q',
-            __file__ + '::test_production_intake_projects_draft_edge_and_preserves_review',
+            __file__ + '::test_production_intake_projects_draft_edge_and_preserves_review[' + str(missing_name) + ']',
             '--basetemp', str(tmp_path / 'native-intake')], env={**os.environ, 'OMEGA_NATIVE_INTAKE_CASE': '1'},
             capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         return
     from artifacts.schema import apply_schema
     apply_schema(os.environ['ARTIFACT_TEST_DB_URL'])
-    service, proof, _ = setup(tmp_path / 'receiver', monkeypatch, profile='production')
+    candidate = CANDIDATE | {'lean_name': None} if missing_name else CANDIDATE
+    service, proof, _ = setup(tmp_path / 'receiver', monkeypatch, profile='production', responses=[candidate, REVIEW])
     operation = admit(service, proof)
     try:
         outcome = service.intake.run(operation, proof)

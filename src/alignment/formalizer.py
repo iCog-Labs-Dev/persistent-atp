@@ -30,11 +30,12 @@ __all__ = [
 
 FORMALIZER_SYSTEM_PROMPT = """You translate an informal mathematical claim into a Lean 4 proposition.
 Return exactly one JSON object with fields lean_name, lean_type, module_path,
-universe_level, and notes. Use null for module_path or universe_level when
+universe_level, and notes. lean_name must be a nonempty, simple Lean declaration
+identifier; you may choose this administrative identifier. Use null for module_path or universe_level when
 unknown. lean_type is the proposition only; do not provide a
 proof, tactic script, sorry, axiom, theorem body, or claim that Lean accepted
 it. Preserve the claim's quantifiers, domains, assumptions, and strength. Use
-only names and assumptions present in the supplied context. If the claim is
+only mathematical names and assumptions present in the supplied context. If the claim is
 ambiguous or the context is insufficient, set lean_type to an empty string and
 explain the issue in notes. Do not invent missing assumptions.
 """

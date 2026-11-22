@@ -28,7 +28,8 @@ if [[ "$tier" == coordinator ]]; then
   export OMEGA_RUNTIME_REQUIRED=1
   uv run persistent-atp-omega doctor --profile omega --require > "$run_dir/doctor.json" 2>&1 || status=$?
   if ((status == 0)); then
-    uv run pytest src/omegaclaw/tests/test_task_workflow.py src/omegaclaw/tests/test_receiver_v2.py \
+    uv run pytest src/omegaclaw/tests/test_task_workflow.py src/omegaclaw/tests/test_runtime_overlay.py \
+      src/omegaclaw/tests/test_intake_metadata.py src/omegaclaw/tests/test_receiver_v2.py \
       tests/omegaclaw_runtime/test_omega_process.py \
       -q > "$run_dir/pytest.log" 2>&1 || status=$?
     cat "$run_dir/pytest.log"

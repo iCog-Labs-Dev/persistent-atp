@@ -115,13 +115,15 @@ def test_clarification_recovers_without_new_llm_call(hypothesis, monkeypatch, bo
     assert not case.service.store.active_leases(case.proof)
 
 
-def test_revision_preserves_refusal_and_can_reach_independent_replay(hypothesis, provider):
+@pytest.mark.parametrize('missing_name', [False, True])
+def test_revision_preserves_refusal_and_can_reach_independent_replay(hypothesis, provider, missing_name):
     case = hypothesis
     case.llm.responses = [REFUSAL]
     refused = case.run()
     before = dict(case.service.view.node(refused['claim_id']).fields)
     saved = deepcopy(case.service.jobs.intake_state(case.operation()))
-    case.llm.responses = [CANDIDATE, REVIEW]
+    candidate = CANDIDATE | {'lean_name': None} if missing_name else CANDIDATE
+    case.llm.responses = [candidate, REVIEW]
     request = revised_request(case, refused['claim_id'])
     corrected = case.service.submit(request)
     assert corrected['formalization_ready'], corrected
@@ -264,14 +266,15 @@ def test_revision_uses_scoped_artifact_revision_and_new_request(hypothesis, tran
         receiver.close()
 
 
-def test_native_candidate_refusal_revision_and_fresh_recovery(provider, tmp_path, monkeypatch):
+@pytest.mark.parametrize('missing_name', [False, True])
+def test_native_candidate_refusal_revision_and_fresh_recovery(provider, tmp_path, monkeypatch, missing_name):
     if not os.environ.get('MORK_LIBRARY') or not os.environ.get('ARTIFACT_TEST_DB_URL'):
         if os.environ.get('OMEGA_PERSISTENCE_REQUIRED')=='1':
             pytest.fail('native candidate checks require MORK and a dedicated PostgreSQL database')
         pytest.skip('native MORK and dedicated PostgreSQL required')
     if os.environ.get('OMEGA_CANDIDATE_NATIVE_CASE')!='1':
         result=subprocess.run([sys.executable,'-m','pytest','-q',
-            __file__+'::test_native_candidate_refusal_revision_and_fresh_recovery',
+            __file__+'::test_native_candidate_refusal_revision_and_fresh_recovery['+str(missing_name)+']',
             '--basetemp',str(tmp_path/'native-process')],capture_output=True,text=True,timeout=90,
             env={**os.environ,'OMEGA_CANDIDATE_NATIVE_CASE':'1'})
         assert result.returncode==0, result.stdout+result.stderr
@@ -281,7 +284,7 @@ def test_native_candidate_refusal_revision_and_fresh_recovery(provider, tmp_path
     case=HypothesisCase(tmp_path/'receiver',monkeypatch,profile='production')
     closed=False
     try:
-        test_revision_preserves_refusal_and_can_reach_independent_replay(case,provider)
+        test_revision_preserves_refusal_and_can_reach_independent_replay(case,provider,missing_name)
         revision=case.service.store.head(case.proof)[0]
         claims={n.node_id:dict(n.fields) for n in case.service.view.list_nodes(case.proof,'Claim')}
         # A separate interpreter has no access to the old process's MORK space.

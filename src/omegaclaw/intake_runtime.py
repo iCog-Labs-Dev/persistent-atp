@@ -224,6 +224,28 @@ class IntakeWorkflow:
         return ('\n'.join('import ' + x for x in self.config.imports)
             + f'\n\ntheorem {result.lean_name} : {result.lean_type} := by\n  exact persistent_atp_pending_proof\n').encode()
 
+    def _candidate_for_source(self, operation, state):
+        """Bind missing administrative metadata before source/review creation.
+
+        Keep the raw model response for audit and never repair a refused or
+        missing proposition. The formalizer still validates every effective
+        field, including supplied names and forbidden proof bodies.
+        """
+        candidate = dict(state['candidate'])
+        name, proposition = candidate.get('lean_name'), candidate.get('lean_type')
+        generated = (name is None or isinstance(name, str) and not name.strip()) and (
+            isinstance(proposition, str) and bool(proposition.strip()))
+        if generated:
+            candidate['lean_name'] = 'persistent_atp_' + content_hash(state['declaration_id'])[7:]
+        if 'effective_candidate' in state:
+            if state['effective_candidate'] != candidate:
+                raise ValueError('saved intake naming decision differs from the original candidate')
+        else:
+            state['effective_candidate'] = candidate
+            state['lean_name_origin'] = 'host-generated' if generated else 'model'
+            self._save(operation, state)
+        return candidate
+
     def run(self, operation, proof, *, claim_id=None, cancelled=lambda: False, on_progress=None):
         service = self.service
         target_claim_id = claim_id or proof + '/c-1'
@@ -301,7 +323,8 @@ class IntakeWorkflow:
                 state['candidate'] = dict(candidate)
                 self._save(operation, state)
             try:
-                result = FormalizerWorker(_SavedCandidate(state['candidate']), actor=state['draft_lease']['actor']).run(
+                candidate = self._candidate_for_source(operation, state)
+                result = FormalizerWorker(_SavedCandidate(candidate), actor=state['draft_lease']['actor']).run(
                     compilation, declaration_id=state['declaration_id'], claim_id=state['claim_id'],
                     base_revision=state['draft_lease']['base_revision'], lease_id=state['draft_lease']['lease_id'],
                     fencing_token=state['draft_lease']['fencing_token'])
