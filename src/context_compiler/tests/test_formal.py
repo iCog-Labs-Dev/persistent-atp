@@ -17,9 +17,11 @@ from context_compiler.contracts import (
     PacketKind,
     SourceBundle,
     SourceRef,
+    TextBudget,
     TheoremKernel,
 )
 from context_compiler.errors import ContextValidationError
+from context_compiler.budgeting import CharHeuristicTokenCounter
 from context_compiler.selection import (
     REASON_OVER_PREMISE_LIMIT,
     REASON_OVER_PRIOR_RUN_LIMIT,
@@ -478,6 +480,35 @@ class FormalContextLimitTests(unittest.TestCase):
                          {"max_premises": 5, "max_prior_runs": 2, "max_transpositions": 1})
         self.assertEqual(out.manifest["budgets"]["formal_execution"],
                          {"max_steps": 500, "wall_clock_ms": 60000})
+        self.assertEqual(out.manifest["selection_policies"], ["weighted-mmr-v1"])
+        self.assertTrue(any(item.score_breakdown for item in out.result.selection_decisions))
+
+    def test_rendered_envelope_obeys_text_budget_and_audits_budget_drops(self):
+        request, bundle, reader, task, access = make()
+        full = compile_formal(request, bundle, reader, task, access)
+        counter = CharHeuristicTokenCounter()
+        budget = counter.count(full.packet.content) - 1
+
+        limited = compile_formal(
+            replace(request, text_budget=TextBudget(budget)), bundle, reader, task, access
+        )
+
+        self.assertLessEqual(counter.count(limited.packet.content), budget)
+        decisions_by_id = decisions(limited)
+        dropped = [item for item in decisions_by_id.values()
+                   if item.reason == "dropped: over text budget"]
+        self.assertTrue(dropped)
+        self.assertTrue(all(item.score_breakdown for item in dropped))
+        self.assertTrue(all(item.selection_policy == "weighted-mmr-v1" for item in dropped))
+        included_sources = {item.source_id for item in limited.payload.source_artifacts}
+        self.assertTrue(all(item.source_id not in included_sources for item in dropped))
+
+    def test_mandatory_formal_context_overflow_fails_explicitly(self):
+        request, bundle, reader, task, access = make()
+        with self.assertRaisesRegex(ContextValidationError, "mandatory formal context alone exceeds text budget"):
+            compile_formal(
+                replace(request, text_budget=TextBudget(1)), bundle, reader, task, access
+            )
 
     def test_premise_limit_keeps_verified_before_suggested(self):
         out = formal(FormalContextLimits(1, 10, 10))
@@ -517,13 +548,20 @@ class FormalContextLimitTests(unittest.TestCase):
                                extra=extra, access=access).packet_digest)
         self.assertEqual(len(digests), 1)
 
-    def test_prior_runs_keep_the_most_recent_first(self):
+    def test_prior_run_limit_uses_mmr_for_recency_and_diversity(self):
         extra, _ = many(count_runs=5)
         out = formal(FormalContextLimits(10, 2, 10), extra=extra)
         kept = [r.run_id for r in out.payload.prior_runs]
-        self.assertEqual(kept, [f"{P}/fr-23", f"{P}/fr-24"])
+        # The newest run ranks first; the older base run has a distinct summary
+        # and wins the remaining slot for diversity over near-identical runs.
+        self.assertEqual(set(kept), {f"{P}/fr-2", f"{P}/fr-24"})
         d = decisions(out)
-        for rid in (f"{P}/fr-2", f"{P}/fr-20", f"{P}/fr-21", f"{P}/fr-22"):
+        self.assertEqual(d[f"{P}/fr-24"].selection_policy, "weighted-mmr-v1")
+        self.assertGreater(d[f"{P}/fr-24"].score_breakdown["novelty"],
+                           d[f"{P}/fr-23"].score_breakdown["novelty"])
+        self.assertGreater(d[f"{P}/fr-2"].score_breakdown["mmr_score"],
+                           d[f"{P}/fr-23"].score_breakdown["mmr_score"])
+        for rid in (f"{P}/fr-20", f"{P}/fr-21", f"{P}/fr-22", f"{P}/fr-23"):
             self.assertFalse(d[rid].included)
             self.assertEqual(d[rid].reason, REASON_OVER_PRIOR_RUN_LIMIT)
 

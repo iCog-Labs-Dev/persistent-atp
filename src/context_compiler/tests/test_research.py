@@ -14,7 +14,12 @@ from context_compiler.contracts import (
 )
 from context_compiler.errors import ContextValidationError
 from context_compiler.research import ResearchTask, compile_research
-from context_compiler.selection import REASON_OVER_TEXT_BUDGET
+from context_compiler.selection import (
+    CONTEXT_FEATURES,
+    ContextSelectionPolicy,
+    DEFAULT_CONTEXT_POLICY,
+    REASON_OVER_TEXT_BUDGET,
+)
 
 CLAIM_A, CLAIM_B = "conjectural", "empirical"
 ATTEMPT = "refuted"
@@ -126,21 +131,52 @@ class ResearchCompilerTests(unittest.TestCase):
         d = decisions(compile_research(*make(extra)))
         self.assertTrue(d["m4"].included)
 
-    def test_budget_drops_lowest_priority_first_and_fits(self):
+    def test_budget_fits_and_records_weighted_selection_scores(self):
         full = compile_research(*make(budget=5000))
         tight_budget = full.token_count - 10
         out = compile_research(*make(budget=tight_budget))
         self.assertLessEqual(out.token_count, tight_budget)
         d = decisions(out)
         self.assertTrue(d["f1"].included)
-        self.assertFalse(d["m2"].included)
-        self.assertEqual(d["m2"].reason, "dropped: over text budget")
+        self.assertTrue(d["m2"].score_breakdown)
+        self.assertEqual(d["m2"].selection_policy, "weighted-mmr-v1")
+        self.assertTrue(any(not item.included and item.reason == REASON_OVER_TEXT_BUDGET
+                            for item in d.values()))
 
     def test_manifest_matches_decisions(self):
         out = compile_research(*make())
         self.assertEqual(len(out.manifest["sources"]), len(out.result.selection_decisions))
         self.assertEqual(out.manifest["packet_kind"], "research")
         self.assertEqual(out.manifest["budgets"]["text_tokens"], 2000)
+        self.assertEqual(out.manifest["selection_policies"], ["weighted-mmr-v1"])
+        self.assertTrue(any(item.score_breakdown for item in out.result.selection_decisions))
+        scored = next(item for item in out.result.selection_decisions if item.score_breakdown)
+        serialized = next(item for item in out.manifest["sources"]
+                          if item["source_id"] == scored.source_id)
+        self.assertEqual(serialized["selection_score"], scored.selection_score)
+        self.assertEqual(serialized["score_breakdown"], dict(scored.score_breakdown))
+        self.assertEqual(serialized["selection_policy"], scored.selection_policy)
+        self.assertEqual(set(out.manifest["selection_policy_configs"]["weighted-mmr-v1"]["weights"]),
+                         set(CONTEXT_FEATURES))
+
+    def test_custom_policy_configuration_is_reproducible_from_manifest(self):
+        request, bundle, reader, task = make()
+        weights = dict(DEFAULT_CONTEXT_POLICY.weights)
+        weights["dependency"] = 0.3
+        policy = ContextSelectionPolicy(
+            name="research-custom-v1",
+            weights=weights,
+            relevance_weight=0.6,
+            token_cost_weight=0.2,
+        )
+
+        out = compile_research(request, bundle, reader, task, selection_policy=policy)
+
+        config = out.manifest["selection_policy_configs"][policy.name]
+        self.assertEqual(config["weights"], weights)
+        self.assertEqual(config["relevance_weight"], 0.6)
+        self.assertEqual(config["token_cost_weight"], 0.2)
+        self.assertIn("counter.count", config["cost_normalization"])
 
     def test_wrong_packet_kind(self):
         request, bundle, reader, task = make()
@@ -314,22 +350,18 @@ class ResearchSelectionPolicyTests(unittest.TestCase):
             self.assertTrue(x.reason.strip())
         self.assertLessEqual(out.token_count, 600)
 
-    def test_budget_keeps_higher_priority_categories_first(self):
+    def test_tight_budget_keeps_relevant_items_from_multiple_categories(self):
         for budget in (400, 600, 900, 1500):
-            d = decisions(compile_research(*make(oversized(), budget=budget)))
+            out = compile_research(*make(oversized(), budget=budget))
+            d = decisions(out)
             counts = {
                 prefix: sum(1 for i, x in d.items() if i.startswith(prefix) and x.included)
                 for prefix in ("fx", "cx", "mx")
             }
-            # Failures outrank lemmas, which outrank alternative moves: a lower
-            # category appears only once every higher one is fully included.
-            if counts["cx"]:
-                self.assertEqual(counts["fx"], 40, budget)
-            if counts["mx"]:
-                self.assertEqual(counts["cx"], 40, budget)
-        tight = decisions(compile_research(*make(oversized(), budget=400)))
-        self.assertTrue(any(i.startswith("fx") and x.included for i, x in tight.items()))
-        self.assertFalse(any(i.startswith("cx") and x.included for i, x in tight.items()))
+            self.assertLessEqual(out.token_count, budget)
+            self.assertTrue(all(counts[prefix] > 0 for prefix in ("fx", "cx", "mx")), budget)
+            self.assertTrue(any(item.score_breakdown for item in d.values()), budget)
+            self.assertEqual(out.manifest["selection_policies"], ["weighted-mmr-v1"])
 
     def test_dropped_set_is_nested_as_the_budget_shrinks(self):
         previous = None

@@ -14,6 +14,7 @@ from .contracts import (
     FormalContextLimits,
     FormalExecutionLimits,
     PacketKind,
+    TextBudget,
 )
 from .dispatch import CompiledDispatch, LeaseLike
 from .errors import ContextValidationError
@@ -26,7 +27,9 @@ from .formal import (
     PremiseAccessibility,
     compile_formal,
 )
+from .budgeting import TokenCounter
 from .resolvers import resolve_formal_task
+from .selection import ContextSelectionPolicy, DEFAULT_CONTEXT_POLICY
 from .snapshot import ProofSnapshot, StaleSnapshotError
 from .snapshot_provider import JournalReader, LeaseSnapshotProvider
 from .sources import ArtifactSource, RetrievalPlan, collect_sources
@@ -59,6 +62,9 @@ class FormalRuntimeConfig:
     backend: Mapping[str, Any] | None = None
     deployment_id: str | None = None
     v2_selection: FormalV2Selection | None = None
+    selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY
+    text_budget: TextBudget | None = None
+    token_counter: TokenCounter | None = None
 
     def __post_init__(self) -> None:
         if type(self.protocol_version) is not int or self.protocol_version not in (1, 2):
@@ -93,6 +99,12 @@ class FormalRuntimeConfig:
             raise ContextValidationError(
                 "context_limits must be FormalContextLimits"
             )
+        if not isinstance(self.selection_policy, ContextSelectionPolicy):
+            raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
+        if self.text_budget is not None and not isinstance(self.text_budget, TextBudget):
+            raise ContextValidationError("text_budget must be a TextBudget")
+        if self.token_counter is not None and not callable(getattr(self.token_counter, "count", None)):
+            raise ContextValidationError("token_counter must provide count(text)")
         if not isinstance(self.premise_ids, tuple) or not all(
             isinstance(item, str) and item.strip() for item in self.premise_ids
         ):
@@ -206,6 +218,7 @@ def compile_formal_for_lease(
         packet_kind=PacketKind.FORMAL,
         worker_class=worker_class,
         formal_limits=config.execution_limits,
+        text_budget=config.text_budget,
     )
     collection = collect_sources(
         request=request,
@@ -253,6 +266,8 @@ def compile_formal_for_lease(
         task,
         config.accessibility,
         context_limits=config.context_limits,
+        selection_policy=config.selection_policy,
+        token_counter=config.token_counter,
         protocol_version=config.protocol_version,
         backend=config.backend,
         deployment_id=config.deployment_id,

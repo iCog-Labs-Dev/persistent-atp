@@ -5,6 +5,7 @@ from context_compiler.budgeting import (
     Section,
     TokenCounter,
     fit_sections,
+    render_sections,
     truncate_at_whitespace,
 )
 from context_compiler.contracts import TextBudget
@@ -63,6 +64,31 @@ class BudgetingTests(unittest.TestCase):
         second = fit_sections(sections, TextBudget(60), counter)
         self.assertEqual(first.text, second.text)
         self.assertLessEqual(first.token_count, 60)
+
+    def test_weighted_mmr_chooses_relevant_and_diverse_context(self):
+        mandatory = Section("must", "Target", "original theorem", mandatory=True,
+            similarity_text="original theorem")
+        feature_a = {"failure": 1.0, "verification": 0.9, "novelty": 0.8,
+            "semantic_similarity": 0.9, "ancestry": 1.0}
+        first = Section("first", "Failure A", "common algebra bridge", features=feature_a,
+            similarity_text="common algebra bridge")
+        duplicate = Section("duplicate", "Failure A2", "common algebra bridge", features=feature_a,
+            similarity_text="common algebra bridge")
+        diverse = Section("diverse", "Failure B", "induction boundary", features={
+            "failure": 0.8, "verification": 0.8, "novelty": 0.8,
+            "semantic_similarity": 0.7, "ancestry": 0.9,
+        }, similarity_text="induction boundary")
+        counter = CharHeuristicTokenCounter()
+        budget = counter.count(render_sections((mandatory, first, diverse)))
+
+        fit = fit_sections((mandatory, first, duplicate, diverse), TextBudget(budget), counter)
+
+        kept = {section.key for section in fit.kept}
+        assert {"must", "first", "diverse"} <= kept
+        assert "duplicate" not in kept
+        assert fit.score_breakdowns["duplicate"]["redundancy"] > 0
+        assert fit.score_breakdowns["diverse"]["mmr_score"] > 0
+        assert fit.reasons["duplicate"] == "dropped: over text budget"
 
 
 if __name__ == "__main__":

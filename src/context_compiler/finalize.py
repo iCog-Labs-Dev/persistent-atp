@@ -11,6 +11,21 @@ from .errors import ContextValidationError
 def _json_value(value: Any) -> Any:
     if isinstance(value, StrEnum):
         return value.value
+    if isinstance(value, SelectionDecision):
+        payload = {
+            "source_id": value.source_id,
+            "source_version": value.source_version,
+            "status": value.status,
+            "included": value.included,
+            "reason": value.reason,
+        }
+        if value.selection_score is not None:
+            payload["selection_score"] = value.selection_score
+        if value.score_breakdown:
+            payload["score_breakdown"] = dict(value.score_breakdown)
+        if value.selection_policy is not None:
+            payload["selection_policy"] = value.selection_policy
+        return payload
     if is_dataclass(value):
         return {
             field.name: _json_value(getattr(value, field.name))
@@ -39,6 +54,7 @@ def finalize_packet(
     compiler_version: str,
     rendering_version: str,
     extra_budgets: Mapping[str, object] | None = None,
+    selection_policy_configs: Mapping[str, Mapping[str, object]] | None = None,
 ) -> CompiledResult:
     """Attach a deterministic digest and provenance manifest to a packet.
 
@@ -96,20 +112,30 @@ def finalize_packet(
         "base_revision": packet.base_revision,
         "packet_kind": packet.packet_kind.value,
         "sources": [
-            {
-                "source_id": decision.source_id,
-                "source_version": decision.source_version,
-                "status": decision.status,
-                "included": decision.included,
-                "reason": decision.reason,
-            }
-            for decision in selection_decisions
+            _json_value(decision) for decision in selection_decisions
         ],
         "compiler_version": compiler_version,
         "rendering_version": rendering_version,
         "budgets": budgets,
         "packet_digest": packet_digest,
     }
+    if selection_policy_configs is not None:
+        if not isinstance(selection_policy_configs, Mapping):
+            raise ContextValidationError("selection_policy_configs must be a mapping")
+        for name, config in selection_policy_configs.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(config, Mapping):
+                raise ContextValidationError("selection policy configs need names and mapping values")
+    else:
+        selection_policy_configs = {}
+    policies = sorted({
+        decision.selection_policy
+        for decision in selection_decisions
+        if decision.selection_policy is not None
+    } | set(selection_policy_configs))
+    if policies:
+        manifest["selection_policies"] = policies
+    if selection_policy_configs:
+        manifest["selection_policy_configs"] = _json_value(dict(selection_policy_configs))
     return CompiledResult(
         packet=packet,
         selection_decisions=selection_decisions,

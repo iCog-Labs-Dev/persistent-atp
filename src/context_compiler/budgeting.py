@@ -11,11 +11,19 @@ broken by original position) and are dropped, or truncated when marked
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
-from typing import Callable, Protocol, Sequence, runtime_checkable
+from dataclasses import dataclass, field, replace
+from typing import Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .contracts import TextBudget
 from .errors import ContextValidationError
+from .selection import (
+    CONTEXT_FEATURES,
+    ContextSelectionPolicy,
+    DEFAULT_CONTEXT_POLICY,
+    REASON_OVER_TEXT_BUDGET,
+    categorical_similarity,
+    text_similarity,
+)
 
 TRUNCATION_MARKER = " …[truncated]"
 
@@ -39,6 +47,10 @@ class CharHeuristicTokenCounter:
             )
         self._chars_per_token = chars_per_token
 
+    @property
+    def chars_per_token(self) -> int:
+        return self._chars_per_token
+
     def count(self, text: str) -> int:
         return math.ceil(len(text) / self._chars_per_token) if text else 0
 
@@ -52,6 +64,9 @@ class Section:
     mandatory: bool = False
     truncatable: bool = False
     source_id: str | None = None
+    features: Mapping[str, float] | None = None
+    similarity_text: str | None = None
+    diversity_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("key", "heading"):
@@ -62,6 +77,19 @@ class Section:
             raise ContextValidationError("body must be a string")
         if isinstance(self.priority, bool) or not isinstance(self.priority, int):
             raise ContextValidationError("priority must be an integer")
+        if self.features is not None:
+            if not isinstance(self.features, Mapping) or set(self.features) - set(CONTEXT_FEATURES):
+                raise ContextValidationError("section features contain an unknown context score")
+            for name, value in self.features.items():
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or not 0 <= value <= 1):
+                    raise ContextValidationError(f"section feature {name} must be within [0,1]")
+        if self.similarity_text is not None and not isinstance(self.similarity_text, str):
+            raise ContextValidationError("similarity_text must be a string")
+        if not isinstance(self.diversity_keys, tuple) or not all(
+            isinstance(item, str) and item for item in self.diversity_keys
+        ):
+            raise ContextValidationError("diversity_keys must be a tuple of non-empty strings")
 
 
 @dataclass(frozen=True)
@@ -71,6 +99,8 @@ class FitResult:
     kept: tuple[Section, ...]       # original order; bodies may be truncated
     dropped: tuple[Section, ...]    # original order
     truncated_keys: tuple[str, ...]
+    score_breakdowns: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    reasons: Mapping[str, str] = field(default_factory=dict)
 
 
 def render_sections(sections: Sequence[Section]) -> str:
@@ -134,6 +164,7 @@ def fit_sections(
     budget: TextBudget,
     counter: TokenCounter,
     render: Renderer = render_sections,
+    policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY,
 ) -> FitResult:
     """Fit ``sections`` into ``budget`` deterministically.
 
@@ -160,10 +191,112 @@ def fit_sections(
         key=lambda s: (s.priority, index[s.key]),
     )
     truncated: list[str] = []
+    score_breakdowns: dict[str, Mapping[str, float]] = {}
+    reasons: dict[str, str] = {}
+
+    # Keep the historical stable priority policy for call sites that have not
+    # supplied auditable features yet. Scored packet builders use the shared
+    # weighted-MMR path below.
+    if any(section.features is not None for section in optional):
+        remaining = {section.key: section for section in optional}
+
+        def similarity_text(section: Section) -> str:
+            return section.similarity_text if section.similarity_text is not None else section.body
+
+        def scored(section: Section) -> tuple[float, dict[str, float]]:
+            features = dict(section.features or {})
+            selected_sections = ordered()
+            lexical_redundancy = max(
+                (text_similarity(similarity_text(section), similarity_text(selected))
+                 for selected in selected_sections),
+                default=0.0,
+            )
+            mechanism_keys = lambda item: tuple(
+                key for key in item.diversity_keys
+                if key.startswith(("tactic:", "failure:", "executor:"))
+            )
+            source_keys = lambda item: tuple(
+                key for key in item.diversity_keys
+                if key.startswith(("state:", "source:"))
+            )
+            mechanism_redundancy = max((
+                categorical_similarity(mechanism_keys(section), mechanism_keys(selected))
+                for selected in selected_sections
+            ), default=0.0)
+            source_redundancy = max((
+                categorical_similarity(source_keys(section), source_keys(selected))
+                for selected in selected_sections
+            ), default=0.0)
+            redundancy = (
+                0.50 * lexical_redundancy
+                + 0.35 * mechanism_redundancy
+                + 0.15 * source_redundancy
+                if section.diversity_keys else lexical_redundancy
+            )
+            token_cost = counter.count(render([section]))
+            cost_fraction = min(1.0, token_cost / budget.max_tokens)
+            breakdown = policy.breakdown(features, redundancy=redundancy,
+                token_cost=float(token_cost), cost_fraction=cost_fraction,
+                mechanism_redundancy=mechanism_redundancy,
+                source_redundancy=source_redundancy)
+            return breakdown["mmr_score"], breakdown
+
+        while remaining:
+            ranked = []
+            for position, section in enumerate(sections):
+                if section.key not in remaining:
+                    continue
+                score, breakdown = scored(section)
+                ranked.append((score, section.priority, position, section, breakdown))
+            ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+            selected_one = False
+            for score, _priority, _position, candidate, breakdown in ranked:
+                chosen[candidate.key] = candidate
+                if _fits(ordered(), budget.max_tokens, counter, render):
+                    score_breakdowns[candidate.key] = breakdown
+                    reasons[candidate.key] = "included by weighted MMR"
+                    del remaining[candidate.key]
+                    selected_one = True
+                    break
+                del chosen[candidate.key]
+                if candidate.truncatable:
+                    before = ordered()
+                    position = sum(1 for item in before if index[item.key] < index[candidate.key])
+                    shortened = _truncate_to_fit(candidate, before, position,
+                        budget.max_tokens, counter, render)
+                    if shortened is not None:
+                        chosen[candidate.key] = shortened
+                        actual_cost = counter.count(render([shortened]))
+                        cost_fraction = min(1.0, actual_cost / budget.max_tokens)
+                        breakdown = policy.breakdown(candidate.features or {},
+                            redundancy=breakdown["redundancy"], token_cost=float(actual_cost),
+                            cost_fraction=cost_fraction,
+                            mechanism_redundancy=breakdown["mechanism_redundancy"],
+                            source_redundancy=breakdown["source_redundancy"])
+                        score_breakdowns[candidate.key] = breakdown
+                        reasons[candidate.key] = "included by weighted MMR (truncated)"
+                        truncated.append(candidate.key)
+                        del remaining[candidate.key]
+                        selected_one = True
+                        break
+                del remaining[candidate.key]
+                score_breakdowns[candidate.key] = breakdown
+                reasons[candidate.key] = REASON_OVER_TEXT_BUDGET
+            if not selected_one and not remaining:
+                break
+
+        kept = tuple(ordered())
+        text = render(kept)
+        return FitResult(text=text, token_count=counter.count(text), kept=kept,
+            dropped=tuple(section for section in sections if section.key not in chosen),
+            truncated_keys=tuple(sorted(truncated, key=index.__getitem__)),
+            score_breakdowns=score_breakdowns, reasons=reasons)
+
     for cand in optional:
         chosen[cand.key] = cand
         current = ordered()
         if _fits(current, budget.max_tokens, counter, render):
+            reasons[cand.key] = "included by fixed priority"
             continue
         del chosen[cand.key]
         if cand.truncatable:
@@ -175,6 +308,11 @@ def fit_sections(
             if shortened is not None:
                 chosen[cand.key] = shortened
                 truncated.append(cand.key)
+                reasons[cand.key] = "included by fixed priority (truncated)"
+            else:
+                reasons[cand.key] = REASON_OVER_TEXT_BUDGET
+        else:
+            reasons[cand.key] = REASON_OVER_TEXT_BUDGET
 
     kept = tuple(ordered())
     text = render(kept)
@@ -184,4 +322,5 @@ def fit_sections(
         kept=kept,
         dropped=tuple(s for s in sections if s.key not in chosen),
         truncated_keys=tuple(sorted(truncated, key=index.__getitem__)),
+        reasons=reasons,
     )

@@ -63,9 +63,12 @@ from .budgeting import Section, fit_sections
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
 from .selection import (
+    ContextSelectionPolicy,
+    DEFAULT_CONTEXT_POLICY,
     REASON_OVER_FAILED_STATE_LIMIT,
     REASON_OVER_TEXT_BUDGET,
     duplicate_reason,
+    text_similarity,
 )
 
 __all__ = [
@@ -267,10 +270,12 @@ class TokenCounter(Protocol):
 class CharHeuristicTokenCounter(TokenCounter):
     """Deterministic ~4-characters-per-token estimate with no dependencies."""
 
+    chars_per_token = 4
+
     def count(self, text: str) -> int:
         if not text:
             return 0
-        return (len(text) + 3) // 4
+        return (len(text) + self.chars_per_token - 1) // self.chars_per_token
 
 
 @dataclass(frozen=True)
@@ -511,6 +516,8 @@ class _Section:
     mandatory: bool
     source_ids: tuple[str, ...] = ()
     priority: int = 0  # optional sections only; lower = kept first
+    features: Mapping[str, float] | None = None
+    diversity_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1089,23 +1096,28 @@ def _render_states(observed: Sequence[ObservedFailure]) -> tuple[str, ...]:
 
 
 def _render_attempts(observed: Sequence[ObservedFailure]) -> tuple[str, ...]:
-    lines: list[str] = []
-    for failure in observed:
-        for attempt in failure.attempts:
-            premises = ", ".join(attempt.premises)
-            line = (
-                f"- {attempt.attempt_id} state={attempt.state_id} "
-                f"tactic={attempt.tactic_family} premises=[{premises}] "
-                f"result={attempt.executor_result.value}"
-            )
-            if attempt.diagnostic_hash:
-                line += f" diagnostic={attempt.diagnostic_hash}"
-            if attempt.failure_family:
-                line += f" failure-family={attempt.failure_family}"
-            lines.append(line)
+    lines = [
+        _render_attempt(attempt)
+        for failure in observed
+        for attempt in failure.attempts
+    ]
     if not lines:
         lines.append("- (no attempts recorded for the selected states)")
     return tuple(lines)
+
+
+def _render_attempt(attempt: AttemptEvidence) -> str:
+    premises = ", ".join(attempt.premises)
+    line = (
+        f"- {attempt.attempt_id} state={attempt.state_id} "
+        f"tactic={attempt.tactic_family} premises=[{premises}] "
+        f"result={attempt.executor_result.value}"
+    )
+    if attempt.diagnostic_hash:
+        line += f" diagnostic={attempt.diagnostic_hash}"
+    if attempt.failure_family:
+        line += f" failure-family={attempt.failure_family}"
+    return line
 
 
 def _render_diagnostics(observed: Sequence[ObservedFailure]) -> tuple[str, ...]:
@@ -1155,14 +1167,11 @@ def _render(sections: Sequence[_Section]) -> str:
 
 
 def _fit_to_budget(
-    sections: Sequence[_Section], budget: TextBudget, counter: TokenCounter
-) -> tuple[str, tuple[str, ...]]:
-    """Fit sections to ``budget`` with the shared policy.
-
-    Returns the rendered text and the titles of the optional sections that
-    were dropped.  Raises if the mandatory sections alone do not fit.
-    """
-    fit = fit_sections(
+    sections: Sequence[_Section], budget: TextBudget, counter: TokenCounter,
+    policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY,
+) -> Any:
+    """Fit sections with weighted relevance and deterministic MMR selection."""
+    return fit_sections(
         [
             Section(
                 key=section.title,
@@ -1170,14 +1179,17 @@ def _fit_to_budget(
                 body="\n".join(section.lines),
                 priority=section.priority,
                 mandatory=section.mandatory,
+                features=section.features,
+                similarity_text="\n".join(section.lines),
+                diversity_keys=section.diversity_keys,
             )
             for section in sections
         ],
         budget,
         counter,
         render=_render_fitted,
+        policy=policy,
     )
-    return fit.text, tuple(section.key for section in fit.dropped)
 
 
 def _render_fitted(sections: Sequence[Section]) -> str:
@@ -1204,7 +1216,8 @@ def compile_obstruction(
     max_failed_states: int = 3,
     formal_run_id: str | None = None,
     environment_hash: str | None = None,
-    compiler_version: str = "context/1",
+    selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY,
+    compiler_version: str = "context/2",
     rendering_version: str = "text/1",
 ) -> ObstructionCompilation:
     """Compile recorded search failures into an obstruction packet.
@@ -1224,9 +1237,13 @@ def compile_obstruction(
         raise ContextValidationError("bundle must be a SourceBundle")
     if not isinstance(task, ObstructionTask):
         raise ContextValidationError("task must be an ObstructionTask")
+    if not isinstance(selection_policy, ContextSelectionPolicy):
+        raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
     max_failed_states = _require_positive("max_failed_states", max_failed_states)
 
-    counter: TokenCounter = token_counter or CharHeuristicTokenCounter()
+    counter: TokenCounter = (
+        token_counter if token_counter is not None else CharHeuristicTokenCounter()
+    )
     if not isinstance(counter, TokenCounter):
         raise ContextValidationError("token_counter must provide count(text)")
 
@@ -1312,10 +1329,14 @@ def compile_obstruction(
         run_id=run_id,
         env_hash=env_hash,
     )
-    if request.text_budget is None:
-        content, dropped = _render(sections), ()
-    else:
-        content, dropped = _fit_to_budget(sections, request.text_budget, counter)
+    fit = _fit_to_budget(
+        sections,
+        request.text_budget or TextBudget(_UNBOUNDED),
+        counter,
+        selection_policy,
+    )
+    content = fit.text
+    dropped = tuple(section.key for section in fit.dropped)
 
     kernel = task.kernel
     decisions = (
@@ -1335,6 +1356,9 @@ def compile_obstruction(
             section_of=_section_index(sections),
             dropped=set(dropped),
             left_out=left_out,
+            score_breakdowns=fit.score_breakdowns,
+            selection_reasons=fit.reasons,
+            selection_policy=selection_policy.name,
         ),
     )
 
@@ -1352,6 +1376,13 @@ def compile_obstruction(
         decisions,
         compiler_version=compiler_version,
         rendering_version=rendering_version,
+        selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
+            cost_normalization=(
+                f"counter.count(render([section])) / text_budget.max_tokens; "
+                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
+                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
+            ),
+        )},
     )
     return ObstructionCompilation(payload=payload, packet=packet, result=result)
 
@@ -1415,13 +1446,8 @@ def _build_sections(
         if source.source_type == FORMAL_STATE_TYPE
         and source.source_id in selected_ids
     )
-    attempt_sources = tuple(
-        source.source_id
-        for source in bundle.sources
-        if source.source_type == ATTEMPT_TYPE
-        and any(
-            attempt.attempt_id == source.source_id for failure in payload.observed for attempt in failure.attempts
-        )
+    attempts = tuple(
+        attempt for failure in payload.observed for attempt in failure.attempts
     )
     diagnostic_sources = tuple(
         source.source_id
@@ -1429,8 +1455,17 @@ def _build_sections(
         if source.source_type == DIAGNOSTIC_TYPE
         and source.content_hash in set(payload.diagnostic_artifacts)
     )
+    source_type_count = len({source.source_type for source in bundle.sources})
+    source_count = max(len(bundle.sources), 1)
+    reference_text = task.kernel.statement + " " + " ".join(failure.target for failure in payload.observed)
+    diagnostic_text = " ".join(_render_diagnostics(payload.observed))
+    source_text = " ".join(_render_sources(bundle))
+    mechanism_counts: dict[tuple[str, str], int] = {}
+    for attempt in attempts:
+        mechanism = (attempt.tactic_family, attempt.failure_family or "unknown")
+        mechanism_counts[mechanism] = mechanism_counts.get(mechanism, 0) + 1
 
-    return (
+    sections = [
         _Section(
             title=_HEADER_TITLE,
             lines=_render_header(
@@ -1455,19 +1490,85 @@ def _build_sections(
             mandatory=True,
             source_ids=state_sources,
         ),
-        _Section(
-            title=_ATTEMPTS_TITLE,
-            lines=_render_attempts(payload.observed),
-            mandatory=False,
-            source_ids=attempt_sources,
-            priority=1,
-        ),
+    ]
+    for attempt in attempts:
+        failure_family = attempt.failure_family or "unknown"
+        mechanism = (attempt.tactic_family, failure_family)
+        similarity_text = _render_attempt(attempt)
+        title = (
+            f"{_ATTEMPTS_TITLE} [{attempt.attempt_id}; tactic={attempt.tactic_family}; "
+            f"failure={failure_family}]"
+        )
+        sections.append(
+            _Section(
+                title=title,
+                lines=(similarity_text,),
+                mandatory=False,
+                source_ids=(attempt.source_id,),
+                priority=1,
+                features={
+                    "dependency": 0.7,
+                    "ancestry": 1.0,
+                    "semantic_similarity": text_similarity(similarity_text, reference_text),
+                    "verification": 0.8,
+                    "failure": 1.0,
+                    "pln": 0.5,
+                    "proof_number": 0.5,
+                    "novelty": 1.0 / mechanism_counts[mechanism],
+                },
+                diversity_keys=(
+                    f"tactic:{attempt.tactic_family}",
+                    f"failure:{failure_family}",
+                    f"executor:{attempt.executor_result.value}",
+                    f"state:{attempt.state_id}",
+                    f"source:{attempt.source_id}",
+                ),
+            )
+        )
+    if not attempts:
+        sections.append(
+            _Section(
+                title=_ATTEMPTS_TITLE,
+                lines=("- (no attempts recorded for the selected states)",),
+                mandatory=False,
+                priority=1,
+                features={
+                    "dependency": 0.5, "ancestry": 0.5,
+                    "semantic_similarity": 0.0, "verification": 0.5,
+                    "failure": 0.5, "pln": 0.5, "proof_number": 0.5,
+                    "novelty": 0.5,
+                },
+            )
+        )
+    diagnostic_features = {
+        "dependency": 0.4,
+        "ancestry": 0.8,
+        "semantic_similarity": text_similarity(diagnostic_text, reference_text),
+        "verification": 0.4,
+        "failure": 0.8,
+        "pln": 0.5,
+        "proof_number": 0.5,
+        "novelty": 0.5 + 0.5 * len(set(payload.diagnostic_artifacts)) / max(len(diagnostic_sources), 1),
+    }
+    source_features = {
+        "dependency": 0.5,
+        "ancestry": 0.5,
+        "semantic_similarity": text_similarity(source_text, reference_text),
+        "verification": 0.5,
+        "failure": 0.5,
+        "pln": 0.5,
+        "proof_number": 0.5,
+        "novelty": source_type_count / source_count,
+    }
+
+    sections.extend((
         _Section(
             title=_DIAGNOSTICS_TITLE,
             lines=_render_diagnostics(payload.observed),
             mandatory=False,
             source_ids=diagnostic_sources,
             priority=2,
+            features=diagnostic_features,
         ),
         _Section(
             title=_SUSPECTED_TITLE,
@@ -1485,8 +1586,10 @@ def _build_sections(
             mandatory=False,
             source_ids=tuple(source.source_id for source in bundle.sources),
             priority=3,
+            features=source_features,
         ),
-    )
+    ))
+    return tuple(sections)
 
 
 def _identity_source_ids(bundle: SourceBundle) -> tuple[str, ...]:
@@ -1516,6 +1619,9 @@ def _decisions(
     section_of: Mapping[str, str],
     dropped: set[str],
     left_out: Mapping[str, str],
+    score_breakdowns: Mapping[str, Mapping[str, float]],
+    selection_reasons: Mapping[str, str],
+    selection_policy: str,
 ) -> tuple[SelectionDecision, ...]:
     state_status = {
         state.source_id: state.status.value for state in records.states
@@ -1586,8 +1692,12 @@ def _decisions(
             else:
                 included, reason = False, "recorded obstruction or run not used"
 
+        score_breakdown = score_breakdowns.get(section) if section is not None else None
+        selection_reason = selection_reasons.get(section) if section is not None else None
         if included and section is not None and section in dropped:
-            included, reason = False, REASON_OVER_TEXT_BUDGET
+            included, reason = False, selection_reason or REASON_OVER_TEXT_BUDGET
+        elif included and selection_reason is not None:
+            reason = selection_reason
 
         decisions.append(
             SelectionDecision(
@@ -1596,6 +1706,9 @@ def _decisions(
                 status=status,
                 included=included,
                 reason=reason,
+                selection_score=(score_breakdown.get("mmr_score") if score_breakdown else None),
+                score_breakdown=score_breakdown or {},
+                selection_policy=selection_policy if score_breakdown else None,
             )
         )
     return tuple(decisions)

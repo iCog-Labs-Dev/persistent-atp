@@ -265,8 +265,10 @@ def test_compiles_payload_packet_and_manifest():
     assert compilation.packet.packet_kind is PacketKind.OBSTRUCTION
     assert compilation.manifest["packet_digest"] == compilation.packet_digest
     assert compilation.manifest["budgets"] == {"text_tokens": 1200}
-    assert compilation.manifest["compiler_version"] == "context/1"
+    assert compilation.manifest["compiler_version"] == "context/2"
     assert compilation.manifest["rendering_version"] == "text/1"
+    assert compilation.manifest["selection_policies"] == ["weighted-mmr-v1"]
+    assert any(decision.score_breakdown for decision in compilation.result.selection_decisions)
     assert compilation.packet_digest.startswith("sha256:")
 
 
@@ -488,16 +490,18 @@ def test_manifest_records_kernel_and_every_bundle_source():
     expected_ids.add(KERNEL.kernel_id)
 
     assert {decision.source_id for decision in decisions} == expected_ids
-    assert compilation.manifest["sources"] == [
-        {
-            "source_id": decision.source_id,
-            "source_version": decision.source_version,
-            "status": decision.status,
-            "included": decision.included,
-            "reason": decision.reason,
-        }
-        for decision in decisions
-    ]
+    serialized = {entry["source_id"]: entry for entry in compilation.manifest["sources"]}
+    assert set(serialized) == {decision.source_id for decision in decisions}
+    for decision in decisions:
+        entry = serialized[decision.source_id]
+        assert entry["source_version"] == decision.source_version
+        assert entry["status"] == decision.status
+        assert entry["included"] is decision.included
+        assert entry["reason"] == decision.reason
+        if decision.score_breakdown:
+            assert entry["selection_score"] == decision.selection_score
+            assert entry["score_breakdown"] == dict(decision.score_breakdown)
+            assert entry["selection_policy"] == decision.selection_policy
 
     by_id = {decision.source_id: decision for decision in decisions}
     assert by_id["p1/fs-10"].included
@@ -518,7 +522,8 @@ def test_manifest_records_kernel_and_every_bundle_source():
 
 
 def test_payload_references_every_complete_source_artifact():
-    compilation = compile_default()
+    case = scenario(text_budget=TextBudget(10_000))
+    compilation = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     content = compilation.packet.content
 
     for source in compilation.payload.source_artifacts:
@@ -548,14 +553,14 @@ def test_to_dict_carries_the_full_payload():
     assert strict["formal_state_ids"] == list(payload.selected_state_ids)
 
 
-def test_budget_is_respected_and_cheapest_sections_drop_first():
+def test_budget_is_respected_and_attempts_are_selected_individually():
     counter = CharHeuristicTokenCounter()
     case = scenario()
     full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     assert counter.count(full.packet.content) <= 1200
 
-    # One token under the full packet: only the lowest-priority optional
-    # section (the source listing) has to go.
+    # One token under the full packet can discard a lower-value optional group
+    # while retaining individual tactic evidence.
     budget = counter.count(full.packet.content) - 1
     case = scenario(text_budget=TextBudget(budget))
     clipped = compile_obstruction(
@@ -571,11 +576,22 @@ def test_budget_is_respected_and_cheapest_sections_drop_first():
     )
     assert "OBSERVED FAILURES" in clipped.packet.content
     assert "ATTEMPTED TACTICS" in clipped.packet.content
-    assert "RECURRING DIAGNOSTICS" in clipped.packet.content
-    # The source listing only restates refs the manifest already carries, so
-    # dropping it excludes no source: every decision matches the full packet.
+    full_attempts = {d.source_id for d in full.result.selection_decisions
+                     if d.source_id.startswith("p1/ta-") and d.included}
+    clipped_attempts = {d.source_id for d in clipped.result.selection_decisions
+                        if d.source_id.startswith("p1/ta-") and d.included}
+    assert clipped_attempts and clipped_attempts <= full_attempts
+    assert any(d.reason == REASON_OVER_TEXT_BUDGET for d in clipped.result.selection_decisions)
+    # Decisions retain one row per candidate; an optional diagnostic can be
+    # excluded without changing the observed source status.
     full_decisions = {d.source_id: d for d in full.result.selection_decisions}
-    assert {d.source_id: d for d in clipped.result.selection_decisions} == full_decisions
+    clipped_decisions = {d.source_id: d for d in clipped.result.selection_decisions}
+    assert set(clipped_decisions) == set(full_decisions)
+    assert all(clipped_decisions[source_id].status == full_decisions[source_id].status
+               for source_id in full_decisions)
+    assert full_decisions["p1/dg-1"].included
+    assert not clipped_decisions["p1/dg-1"].included
+    assert any(decision.score_breakdown for decision in clipped_decisions.values())
 
 
 def test_tiny_budget_cannot_truncate_the_mandatory_kernel():
@@ -610,7 +626,7 @@ def _smallest_budget():
     return low
 
 
-def test_optional_sections_drop_in_priority_order():
+def test_optional_attempt_items_can_fit_before_diagnostics_and_sources():
     floor = _smallest_budget()
     # Exactly the mandatory sections: every optional section is dropped.
     bare = _compile_with_budget(floor)
@@ -619,22 +635,72 @@ def test_optional_sections_drop_in_priority_order():
     for title in ("OBSERVED FAILURES", "SUSPECTED CAUSES", "RESEARCH QUESTIONS"):
         assert title in bare.packet.content
 
-    # Enough room for attempts but not diagnostics: attempts win by priority.
-    attempts_only = bare.packet.content
-    full = compile_default()
-    attempts_block = full.packet.content.split("ATTEMPTED TACTICS")[1].split(
-        "RECURRING DIAGNOSTICS"
-    )[0]
-    budget = floor + _tokens("ATTEMPTED TACTICS" + attempts_block) + 2
-    clipped = _compile_with_budget(budget)
+    # Find the smallest budget that admits one per-attempt section.
+    clipped = None
+    for budget in range(floor + 1, 1201):
+        candidate = _compile_with_budget(budget)
+        if any(
+            decision.included and decision.source_id.startswith("p1/ta-")
+            for decision in candidate.result.selection_decisions
+        ):
+            clipped = candidate
+            break
+    assert clipped is not None
     assert "ATTEMPTED TACTICS" in clipped.packet.content
     assert "RECURRING DIAGNOSTICS" not in clipped.packet.content
     assert "SOURCE ARTIFACTS" not in clipped.packet.content
     by_id = {d.source_id: d for d in clipped.result.selection_decisions}
-    assert by_id["p1/ta-6"].included
+    included_attempts = [d for d in by_id.values()
+                         if d.included and d.source_id.startswith("p1/ta-")]
+    assert included_attempts
     assert not by_id["p1/dg-1"].included
     assert by_id["p1/dg-1"].reason == REASON_OVER_TEXT_BUDGET
-    assert attempts_only != clipped.packet.content
+    assert all("mechanism_redundancy" in decision.score_breakdown for decision in included_attempts)
+
+
+def test_large_attempt_history_keeps_individual_mechanism_representatives():
+    entries = default_entries()
+    tactic_families = ("simp", "rw", "aesop", "induction")
+    failure_families = ("type-mismatch", "unknown-identifier", "timeout-family", "missing-premise")
+    for index in range(43):
+        attempt_id = f"p1/ta-{100 + index}"
+        entries.append(("attempt", attempt_id, _attempt(
+            attempt_id,
+            "p1/fs-10",
+            family=tactic_families[index % len(tactic_families)],
+            premises=(f"Lemma.{index % 7}",),
+            failure_family=failure_families[(index // 2) % len(failure_families)],
+        )))
+    bundle, artifacts = make_bundle(entries)
+    request = make_request(text_budget=TextBudget(1200))
+
+    compilation = compile_obstruction(
+        request, bundle, MappingArtifactReader(artifacts), make_task()
+    )
+
+    assert _tokens(compilation.packet.content) <= 1200
+    decisions_by_id = {decision.source_id: decision
+                       for decision in compilation.result.selection_decisions}
+    selected = [source_id for source_id, decision in decisions_by_id.items()
+                if source_id.startswith("p1/ta-") and decision.included]
+    assert 0 < len(selected) < 46
+    selected_tactics = {
+        artifacts[source_id]["tactic_family"] for source_id in selected
+    }
+    selected_families = {
+        artifacts[source_id].get("failure_family") for source_id in selected
+    }
+    assert len(selected_tactics) >= 3
+    assert len(selected_families - {None}) >= 2
+    assert all(
+        "mechanism_redundancy" in decisions_by_id[source_id].score_breakdown
+        and "source_redundancy" in decisions_by_id[source_id].score_breakdown
+        for source_id in selected
+    )
+    assert any(decisions_by_id[source_id].score_breakdown["mechanism_redundancy"] > 0
+               for source_id in selected)
+    assert any(decisions_by_id[source_id].score_breakdown["source_redundancy"] > 0
+               for source_id in selected)
 
 
 def test_mandatory_sections_are_never_truncated_or_dropped():

@@ -1,5 +1,6 @@
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Mapping
 
@@ -161,12 +162,30 @@ class SelectionDecision:
     status: str
     included: bool
     reason: str
+    selection_score: float | None = None
+    score_breakdown: Mapping[str, float] = field(default_factory=dict)
+    selection_policy: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("source_id", "source_version", "status", "reason"):
             _require_non_empty_string(name, getattr(self, name))
         if not isinstance(self.included, bool):
             raise ContextValidationError("included must be a boolean")
+        if self.selection_score is not None and (
+            isinstance(self.selection_score, bool)
+            or not isinstance(self.selection_score, (int, float))
+            or not math.isfinite(self.selection_score)
+        ):
+            raise ContextValidationError("selection_score must be a finite number")
+        if not isinstance(self.score_breakdown, Mapping):
+            raise ContextValidationError("score_breakdown must be a mapping")
+        for name, score in self.score_breakdown.items():
+            _require_non_empty_string("score feature", name)
+            if (isinstance(score, bool) or not isinstance(score, (int, float))
+                    or not math.isfinite(score)):
+                raise ContextValidationError("score_breakdown values must be finite numbers")
+        if self.selection_policy is not None:
+            _require_non_empty_string("selection_policy", self.selection_policy)
         if self.status not in (
             values(ClaimStatus)
             | values(FormalStateStatus)

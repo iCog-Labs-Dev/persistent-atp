@@ -9,6 +9,7 @@ produced by ``finalize_packet``.
 from __future__ import annotations
 
 import sys
+import math
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 
@@ -38,9 +39,15 @@ from .contracts import (
 )
 from .errors import ContextValidationError
 from .finalize import finalize_packet
-from .selection import REASON_OVER_TEXT_BUDGET, duplicate_reason
+from .selection import (
+    DEFAULT_CONTEXT_POLICY,
+    ContextSelectionPolicy,
+    REASON_OVER_TEXT_BUDGET,
+    duplicate_reason,
+    text_similarity,
+)
 
-DEFAULT_COMPILER_VERSION = "context/1"
+DEFAULT_COMPILER_VERSION = "context/2"
 DEFAULT_RENDERING_VERSION = "text/1"
 _UNBOUNDED = sys.maxsize  # used when the request carries no text budget
 
@@ -233,6 +240,70 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+def _selection_features(
+    source: _Source,
+    category: str,
+    active_state: _Source,
+    selected_move: _Source,
+    *,
+    related: bool,
+) -> dict[str, float]:
+    """Normalize committed source metadata into the shared MMR feature vector."""
+    annotations = source.body.get("annotations")
+
+    def number(*names: str) -> float | None:
+        for name in names:
+            raw = source.body.get(name)
+            if raw is None and isinstance(annotations, Mapping):
+                raw = annotations.get(name)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                continue
+            return float(raw)
+        return None
+
+    def unit(value: float | None, default: float = 0.5) -> float:
+        return default if value is None else min(1.0, max(0.0, value))
+
+    similarity = max(
+        text_similarity(source.text, active_state.text),
+        text_similarity(source.text, selected_move.text),
+    )
+    status = source.status
+    verification = {
+        ClaimStatus.LEAN_VERIFIED.value: 1.0,
+        ClaimStatus.FORMALLY_CLOSED.value: 0.9,
+        ClaimStatus.CRITIC_ACCEPTED.value: 0.7,
+        ClaimStatus.PROVISIONAL.value: 0.45,
+        ClaimStatus.CONJECTURAL.value: 0.3,
+    }.get(status, 0.5)
+    dependency_count = source.body.get("dependency_count")
+    dependency = number("dependency_centrality")
+    if dependency is None and isinstance(dependency_count, int) and not isinstance(dependency_count, bool):
+        dependency = min(1.0, max(0, dependency_count) / 8.0)
+
+    pln_values = [value for value in (number("pln_strength"), number("pln_confidence")) if value is not None]
+    pln = sum(unit(value) for value in pln_values) / len(pln_values) if pln_values else 0.5
+    proof_number = number("proof_number")
+    proof_score = 1.0 / (1.0 + max(0.0, proof_number)) if proof_number is not None else 0.5
+    novelty = number("state_novelty", "novelty")
+    transpositions = number("transposition_count")
+    if novelty is None and transpositions is not None:
+        novelty = 1.0 / (1.0 + max(0.0, transpositions))
+    if novelty is None:
+        novelty = 1.0 - similarity
+    failure = 1.0 if category == "failure" else 0.75 if category == "feedback" else 0.25
+    return {
+        "dependency": unit(dependency),
+        "ancestry": 1.0 if related else 0.0,
+        "semantic_similarity": unit(similarity, 0.0),
+        "verification": verification,
+        "failure": failure,
+        "pln": pln,
+        "proof_number": unit(proof_score),
+        "novelty": unit(novelty),
+    }
+
+
 def _signature(category: str, src: _Source) -> tuple:
     # Status and proof obligations are part of identity, so two claims with the
     # same statement but different statuses, or two moves with the same text but
@@ -254,6 +325,7 @@ def compile_research(
     *,
     token_counter: TokenCounter | None = None,
     support_categories: Mapping[str, str] = DEFAULT_SUPPORT_CATEGORIES,
+    selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY,
     compiler_version: str = DEFAULT_COMPILER_VERSION,
     rendering_version: str = DEFAULT_RENDERING_VERSION,
 ) -> ResearchCompilation:
@@ -261,7 +333,9 @@ def compile_research(
         raise ContextValidationError("request packet_kind must be research")
     if not isinstance(task, ResearchTask):
         raise ContextValidationError("task must be a ResearchTask")
-    counter = token_counter or CharHeuristicTokenCounter()
+    if not isinstance(selection_policy, ContextSelectionPolicy):
+        raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
+    counter = token_counter if token_counter is not None else CharHeuristicTokenCounter()
     if not isinstance(counter, TokenCounter):
         raise ContextValidationError("token_counter must provide count(text)")
 
@@ -313,13 +387,17 @@ def compile_research(
     reserved = {task.active_state_id, task.selected_move_id, *required_ids}
     decisions: dict[str, SelectionDecision] = {}
 
-    def decide(src: _Source, included: bool, reason: str) -> None:
+    def decide(src: _Source, included: bool, reason: str,
+               score_breakdown: Mapping[str, float] | None = None) -> None:
         decisions[src.ref.source_id] = SelectionDecision(
             source_id=src.ref.source_id,
             source_version=src.ref.source_version,
             status=src.status,
             included=included,
             reason=reason,
+            selection_score=(score_breakdown.get("mmr_score") if score_breakdown else None),
+            score_breakdown=score_breakdown or {},
+            selection_policy=selection_policy.name if score_breakdown else None,
         )
 
     decide(active_state, True, "active branch state")
@@ -328,7 +406,7 @@ def compile_research(
         decide(claim, True, "required by selected move")
 
     # ---- supporting candidates --------------------------------------------
-    candidates: list[tuple[tuple[int, int, str], str, _Source]] = []
+    candidates: list[tuple[tuple[int, int, str], str, _Source, Mapping[str, float]]] = []
     for ref in refs:
         if ref.source_id in reserved:
             continue
@@ -367,18 +445,21 @@ def compile_research(
             decide(src, False, f"move status {src.status} is not on the frontier")
         else:
             relevance = 0 if related or src.state_id == task.active_state_id else 1
-            candidates.append(((CATEGORY_RANK[category], relevance, ref.source_id), category, src))
+            features = _selection_features(
+                src, category, active_state, selected_move, related=related,
+            )
+            candidates.append(((CATEGORY_RANK[category], relevance, ref.source_id), category, src, features))
 
     candidates.sort(key=lambda item: item[0])
     seen: dict[tuple, str] = {}
-    supporting: list[tuple[tuple[int, int, str], str, _Source]] = []
-    for key, category, src in candidates:
+    supporting: list[tuple[tuple[int, int, str], str, _Source, Mapping[str, float]]] = []
+    for key, category, src, features in candidates:
         signature = _signature(category, src)
         if signature in seen:
             decide(src, False, duplicate_reason(seen[signature]))
         else:
             seen[signature] = src.ref.source_id
-            supporting.append((key, category, src))
+            supporting.append((key, category, src, features))
 
     # ---- sections ----------------------------------------------------------
     kernel = task.kernel
@@ -417,7 +498,7 @@ def compile_research(
             mandatory=True,
         ),
     ]
-    for key, category, src in supporting:
+    for key, category, src, features in supporting:
         sections.append(
             Section(
                 key=f"support:{src.ref.source_id}",
@@ -425,19 +506,25 @@ def compile_research(
                 body=src.text,
                 priority=key[0] * 2 + key[1],
                 source_id=src.ref.source_id,
+                features=features,
+                similarity_text=src.text,
             )
         )
     sections.append(Section("schema", "Output schema", task.output_schema, mandatory=True))
     sections.append(Section("tools", "Tool policy", task.tool_policy, mandatory=True))
 
     budget = request.text_budget or TextBudget(_UNBOUNDED)
-    fit = fit_sections(sections, budget, counter)
+    fit = fit_sections(sections, budget, counter, policy=selection_policy)
     kept_ids = {s.source_id for s in fit.kept if s.source_id}
-    for _, category, src in supporting:
+    for _, category, src, _features in supporting:
         if src.ref.source_id in kept_ids:
-            decide(src, True, f"supporting {category}")
+            decision_key = f"support:{src.ref.source_id}"
+            breakdown = fit.score_breakdowns.get(decision_key)
+            decide(src, True, fit.reasons.get(decision_key, f"supporting {category}"), breakdown)
         else:
-            decide(src, False, REASON_OVER_TEXT_BUDGET)
+            decision_key = f"support:{src.ref.source_id}"
+            breakdown = fit.score_breakdowns.get(decision_key)
+            decide(src, False, fit.reasons.get(decision_key, REASON_OVER_TEXT_BUDGET), breakdown)
 
     # ---- finalize -----------------------------------------------------------
     ordered_decisions = (
@@ -463,6 +550,13 @@ def compile_research(
         ordered_decisions,
         compiler_version=compiler_version,
         rendering_version=rendering_version,
+        selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
+            cost_normalization=(
+                f"counter.count(render([section])) / text_budget.max_tokens; "
+                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
+                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
+            ),
+        )},
     )
     return ResearchCompilation(result=result, token_count=fit.token_count)
 

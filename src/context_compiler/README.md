@@ -418,20 +418,39 @@ then require the worker result to reference that identity.
 
 ## Current selection policy
 
-Selection is deterministic and currently uses:
+Optional formal items (premises, prior runs, transpositions), research sources,
+and obstruction evidence items use the deterministic `weighted-mmr-v1` policy.
+It computes normalized weighted relevance from dependency, ancestry, lexical
+similarity, verification, failure, PLN, proof-number, and novelty features. MMR
+subtracts maximum lexical Jaccard and categorical mechanism/source overlap,
+then a normalized cost penalty. The default relevance and cost weights are
+`0.75` and `0.10`; callers can pass another `ContextSelectionPolicy` through
+compiler or runtime configuration.
 
-- explicit graph relationships and caller-selected seeds;
-- lifecycle and verification status;
-- relationship to the active state or selected move;
-- fixed category ordering;
-- duplicate removal;
-- text and item-count limits.
+Mandatory context is rendered and checked first; compilation errors if that
+floor alone exceeds `TextBudget`. Optional items are admitted only when the
+complete rendered packet stays within budget. Formal caps use stable text-cost
+estimates and formal text budgets count the actual serialized envelope using
+the configured token counter (the default is the deterministic character
+heuristic). Verified premises retain precedence over suggestions, and resumed
+runs remain mandatory. Obstruction attempts are separate optional items, with
+tactic family, failure family, executor result, and parent-state identity in the
+diversity penalty, allowing a budget to retain representative mechanisms.
+Duplicate removal, accessibility/status checks, and lifecycle safety filters
+still run before scoring. Similarity is deterministic and lexical/categorical;
+it does not use embeddings or merge mathematical states.
 
-The architecture paper's full weighted formula—dependency, ancestry, semantic
-similarity, verification, failure, PLN, novelty, redundancy, and token cost—is
-not implemented. MMR-style diversity percentages are also not implemented.
-These should be added only when the team defines their score producers and
-auditable representation.
+Each manifest source entry serializes the complete `SelectionDecision`,
+including score, feature breakdown, policy name, and reason. The manifest also
+records policy weights, feature defaults, MMR parameters, similarity version,
+and the applicable cost normalization so custom policies can be reproduced.
+
+The scheduler derives transitive `DEPENDS_ON` fan-in, aggregates committed
+heuristic annotations from relevant formal and research states, and reads
+persisted run/attempt failure history. `SchedulerPortfolio` rotation and lease
+reservation share one SQLite write transaction over the issued-lease audit
+sequence. The issued audit row stores the selected policy identity, weights,
+and score snapshot outside the proof hash chain.
 
 ## Source files
 

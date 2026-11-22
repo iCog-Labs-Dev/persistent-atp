@@ -29,8 +29,9 @@ Two properties are load bearing:
 from __future__ import annotations
 
 import json
+import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from shared.vocab import (
@@ -56,16 +57,22 @@ from .contracts import (
     SourceRef,
     TheoremKernel,
 )
+from .budgeting import CharHeuristicTokenCounter, TokenCounter
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
 from .obstruction import ArtifactReader
 from .selection import (
+    DEFAULT_CONTEXT_POLICY,
+    ContextSelectionPolicy,
     REASON_OVER_PREMISE_LIMIT,
     REASON_OVER_PRIOR_RUN_LIMIT,
+    REASON_OVER_TEXT_BUDGET,
     REASON_OVER_TRANSPOSITION_LIMIT,
     apply_item_limit,
     duplicate_reason,
     trailing_ordinal,
+    text_similarity,
+    weighted_mmr_order,
 )
 
 __all__ = [
@@ -107,7 +114,7 @@ DECLARATION_ID_RE = re.compile(r"^[^/]+/fd-[1-9][0-9]*$")
 RUN_ID_RE = re.compile(r"^[^/]+/fr-[1-9][0-9]*$")
 CLAIM_ID_RE = re.compile(r"^[^/]+/c-[1-9][0-9]*$")
 
-DEFAULT_COMPILER_VERSION = "context/1"
+DEFAULT_COMPILER_VERSION = "context/2"
 DEFAULT_RENDERING_VERSION = "text/1"
 
 # Statuses recording Lean-checked evidence.  ``critic-accepted`` is deliberately
@@ -512,6 +519,31 @@ class _Source:
     status: str
 
 
+def _source_text(source: _Source) -> str:
+    """Stable lexical representation used only by context ranking."""
+    body = source.body
+    if source.ref.source_type == PREMISE_TYPE:
+        parts = (body.get("lean_name"), _premise_text(body))
+    elif source.ref.source_type == DECLARATION_TYPE:
+        parts = (body.get("lean_name"), body.get("lean_type"))
+    elif source.ref.source_type == STATE_TYPE:
+        hypotheses = body.get("hypotheses")
+        if isinstance(hypotheses, str):
+            hypothesis_parts = (hypotheses,)
+        elif isinstance(hypotheses, (tuple, list)):
+            hypothesis_parts = tuple(item for item in hypotheses if isinstance(item, str))
+        else:
+            hypothesis_parts = ()
+        parts = (body.get("goal_text"), *hypothesis_parts)
+    elif source.ref.source_type == RUN_TYPE:
+        parts = (body.get("disposition"), body.get("summary"), *(body.get("frontier_state_ids") or ()))
+    elif source.ref.source_type == TRANSPOSITION_TYPE:
+        parts = (body.get("from_state_id"), body.get("to_state_id"), body.get("status"))
+    else:
+        parts = (body.get("toolchain"), body.get("mathlib_commit"))
+    return " ".join(part for part in parts if isinstance(part, str))
+
+
 def _environment_hash(body: Mapping[str, Any]) -> str:
     """The pinned-environment digest: ``environment_hash``, else the lake manifest's."""
     value = body.get("environment_hash")
@@ -618,6 +650,54 @@ def _load(ref: SourceRef, reader: ArtifactReader) -> _Source:
     return _Source(ref=ref, body=body, status=status)
 
 
+def _unit_score(value: object, default: float = 0.5) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    return min(1.0, max(0.0, float(value)))
+
+
+def _selection_features(
+    source: _Source,
+    reference_text: str,
+    *,
+    ancestry: float,
+    verification: float,
+    failure: float,
+    text: str | None = None,
+) -> dict[str, float]:
+    annotations = source.body.get("annotations")
+
+    def value(name: str):
+        raw = source.body.get(name)
+        return annotations.get(name) if raw is None and isinstance(annotations, Mapping) else raw
+
+    similarity = text_similarity(text if text is not None else _source_text(source), reference_text)
+    pln_values = [value(name) for name in ("pln_strength", "pln_confidence")]
+    pln_values = [_unit_score(item) for item in pln_values if item is not None]
+    proof_number = value("proof_number")
+    if (isinstance(proof_number, bool) or not isinstance(proof_number, (int, float))
+            or not math.isfinite(proof_number) or proof_number < 0):
+        proof_priority = 0.5
+    else:
+        proof_priority = 1.0 / (1.0 + float(proof_number))
+    novelty = value("state_novelty")
+    if novelty is None:
+        transpositions = value("transposition_count")
+        novelty = (1.0 / (1.0 + float(transpositions))
+            if isinstance(transpositions, (int, float)) and not isinstance(transpositions, bool)
+            and math.isfinite(transpositions) and transpositions >= 0 else 1.0 - similarity)
+    return {
+        "dependency": _unit_score(value("dependency_centrality")),
+        "ancestry": _unit_score(ancestry),
+        "semantic_similarity": similarity,
+        "verification": _unit_score(verification),
+        "failure": _unit_score(failure),
+        "pln": sum(pln_values) / len(pln_values) if pln_values else 0.5,
+        "proof_number": _unit_score(proof_priority),
+        "novelty": _unit_score(novelty),
+    }
+
+
 # --------------------------------------------------------------------------
 # compiler
 # --------------------------------------------------------------------------
@@ -630,6 +710,7 @@ def compile_formal(
     accessibility: PremiseAccessibility,
     *,
     context_limits: FormalContextLimits | None = None,
+    selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY,
     v2_selection: FormalV2Selection | None = None,
     compiler_version: str = DEFAULT_COMPILER_VERSION,
     rendering_version: str = DEFAULT_RENDERING_VERSION,
@@ -637,14 +718,16 @@ def compile_formal(
     backend: Mapping[str, Any] | None = None,
     deployment_id: str | None = None,
     formal_input: Mapping[str, Any] | None = None,
+    token_counter: TokenCounter | None = None,
 ) -> FormalCompilation:
     """Compile a selected formal task into one formal-search packet.
 
     Mandatory context (never limited, never dropped): theorem kernel, selected
     declaration, root state, pinned environment, and the resumed run when
-    resuming.  Optional context (premises, prior runs, transpositions) is
-    ordered by the V1 policy in :mod:`context_compiler.selection` and cut to
-    ``context_limits`` when given; ``None`` keeps everything eligible.
+    resuming. Optional context (premises, prior runs, transpositions) is scored
+    and diversified by the selected weighted-MMR policy before item limits are
+    applied. Verified premises remain ahead of suggestions, and a resumed run
+    is mandatory. ``None`` keeps every eligible optional item.
     """
     if not isinstance(request, CompileRequest):
         raise ContextValidationError("request must be a CompileRequest")
@@ -658,20 +741,29 @@ def compile_formal(
         raise ContextValidationError("task must be a FormalTask")
     if not isinstance(accessibility, PremiseAccessibility):
         raise ContextValidationError("accessibility must be a PremiseAccessibility")
+    if not isinstance(selection_policy, ContextSelectionPolicy):
+        raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
     if context_limits is not None and not isinstance(context_limits, FormalContextLimits):
         raise ContextValidationError("context_limits must be FormalContextLimits")
+    if token_counter is not None and not callable(getattr(token_counter, "count", None)):
+        raise ContextValidationError("token_counter must provide count(text)")
+    counter = token_counter if token_counter is not None else CharHeuristicTokenCounter()
 
     refs = sorted(bundle.sources, key=lambda r: r.source_id)
     sources = {ref.source_id: _load(ref, reader) for ref in refs}
     decisions: dict[str, SelectionDecision] = {}
 
-    def decide(src: _Source, included: bool, reason: str) -> None:
+    def decide(src: _Source, included: bool, reason: str,
+               score_breakdown: Mapping[str, float] | None = None) -> None:
         decisions[src.ref.source_id] = SelectionDecision(
             source_id=src.ref.source_id,
             source_version=src.ref.source_version,
             status=src.status,
             included=included,
             reason=reason,
+            selection_score=(score_breakdown.get("mmr_score") if score_breakdown else None),
+            score_breakdown=score_breakdown or {},
+            selection_policy=selection_policy.name if score_breakdown else None,
         )
 
     # ---- declaration, root state, environment ------------------------------
@@ -700,6 +792,7 @@ def compile_formal(
         )
     environment = chosen[0]
     env_hash = _environment_hash(environment.body)
+    reference_text = " ".join((task.kernel.statement, goal_text, str(declaration.body["lean_type"])))
     root_env = root.body.get("environment_hash")
     if root_env is not None and root_env != env_hash:
         raise ContextValidationError(
@@ -723,9 +816,8 @@ def compile_formal(
                 "resumed run used a different environment than the pinned one"
             )
 
-    # Eligible prior runs, then the V1 limit.  The resumed run is mandatory
-    # (resuming without it is meaningless): it always comes first and uses one
-    # slot of the limit, but is never itself dropped by it.
+    # Eligible prior runs; the resumed run is mandatory (resuming without it is
+    # meaningless) and is never removed by the optional context cap.
     eligible_runs: list[tuple[_Source, PriorRun]] = []
     for src in sources.values():
         if src.ref.source_type != RUN_TYPE:
@@ -751,13 +843,7 @@ def compile_formal(
                     ),
                 )
             )
-    eligible_runs.sort(
-        key=lambda item: (
-            item[0] is not resumed,
-            -trailing_ordinal(item[0].ref.source_id),
-            item[0].ref.source_id,
-        )
-    )
+    eligible_runs.sort(key=lambda item: item[0].ref.source_id)
     mandatory_runs = [item for item in eligible_runs if item[0] is resumed]
     optional_runs = [item for item in eligible_runs if item[0] is not resumed]
     run_slots = (
@@ -765,20 +851,63 @@ def compile_formal(
         if context_limits is None
         else max(context_limits.max_prior_runs - len(mandatory_runs), 0)
     )
-    run_selection = apply_item_limit(optional_runs, run_slots)
+    run_ordinals = [trailing_ordinal(src.ref.source_id) for src, _ in optional_runs]
+    min_run_ordinal = min(run_ordinals, default=0)
+    max_run_ordinal = max(run_ordinals, default=0)
+    run_features: dict[str, Mapping[str, float]] = {}
+    run_texts: dict[str, str] = {}
+    failed_run_dispositions = {
+        RunDisposition.BUDGET_EXHAUSTED.value,
+        RunDisposition.STAGNATED.value,
+        RunDisposition.COUNTEREXAMPLE.value,
+        RunDisposition.INVALID_REQUEST.value,
+        RunDisposition.ENVIRONMENT_ERROR.value,
+        RunDisposition.INTERNAL_ERROR.value,
+    }
+    for src, prior in optional_runs:
+        frontier_ids = set(prior.frontier_state_ids)
+        run_texts[src.ref.source_id] = _source_text(src)
+        features = _selection_features(
+            src,
+            reference_text,
+            ancestry=1.0 if task.root_state_id in frontier_ids else 0.5 if not frontier_ids else 0.25,
+            verification=0.5,
+            failure=0.95 if prior.disposition in failed_run_dispositions else 0.5,
+            text=run_texts[src.ref.source_id],
+        )
+        ordinal = trailing_ordinal(src.ref.source_id)
+        features["novelty"] = (
+            (ordinal - min_run_ordinal) / (max_run_ordinal - min_run_ordinal)
+            if max_run_ordinal > min_run_ordinal else 0.5
+        )
+        run_features[src.ref.source_id] = features
+    ranked_runs = weighted_mmr_order(
+        [src for src, _ in optional_runs],
+        features=lambda src: run_features[src.ref.source_id],
+        similarity_text=lambda src: run_texts[src.ref.source_id],
+        identity=lambda src: src.ref.source_id,
+        token_cost=lambda src: len(run_texts[src.ref.source_id]),
+        policy=selection_policy,
+    )
+    run_breakdowns = {item.item.ref.source_id: item.score_breakdown for item in ranked_runs}
+    prior_by_id = {src.ref.source_id: prior for src, prior in optional_runs}
+    ranked_optional_runs = [(item.item, prior_by_id[item.item.ref.source_id]) for item in ranked_runs]
+    run_selection = apply_item_limit(ranked_optional_runs, run_slots)
     prior_runs: list[PriorRun] = []
     for src, prior in mandatory_runs:
         decide(src, True, "resumed run")
         prior_runs.append(prior)
     for src, prior in run_selection.kept:
-        decide(src, True, "prior run of this declaration")
+        decide(src, True, "prior run selected by weighted MMR",
+               run_breakdowns[src.ref.source_id])
         prior_runs.append(prior)
     for src, _ in run_selection.dropped:
-        decide(src, False, REASON_OVER_PRIOR_RUN_LIMIT)
+        decide(src, False, REASON_OVER_PRIOR_RUN_LIMIT,
+               run_breakdowns[src.ref.source_id])
 
     # ---- transpositions ------------------------------------------------------
     # Accepted transpositions: exact duplicates (same from/to pair) collapse to
-    # the lowest source_id; those touching the root state rank first.
+    # the lowest source_id before weighted relevance/diversity ranking.
     accepted: list[_Source] = []
     for src in sources.values():
         if src.ref.source_type != TRANSPOSITION_TYPE:
@@ -797,19 +926,44 @@ def compile_formal(
         else:
             first_for_pair[pair] = src.ref.source_id
             unique_transpositions.append(src)
-    unique_transpositions.sort(
-        key=lambda s_: (
-            task.root_state_id not in (s_.body["from_state_id"], s_.body["to_state_id"]),
-            s_.ref.source_id,
+    transposition_texts: dict[str, str] = {}
+    transposition_features: dict[str, Mapping[str, float]] = {}
+    for src in unique_transpositions:
+        state_texts = [
+            _source_text(sources[state_id])
+            for state_id in (src.body["from_state_id"], src.body["to_state_id"])
+            if state_id in sources and sources[state_id].ref.source_type == STATE_TYPE
+        ]
+        text = " ".join((_source_text(src), *state_texts))
+        transposition_texts[src.ref.source_id] = text
+        touches_root = task.root_state_id in (src.body["from_state_id"], src.body["to_state_id"])
+        transposition_features[src.ref.source_id] = _selection_features(
+            src,
+            reference_text,
+            ancestry=1.0 if touches_root else 0.25,
+            verification=0.65,
+            failure=0.5,
+            text=text,
         )
-    )
-    transposition_selection = apply_item_limit(
+    ranked_transpositions = weighted_mmr_order(
         unique_transpositions,
+        features=lambda src: transposition_features[src.ref.source_id],
+        similarity_text=lambda src: transposition_texts[src.ref.source_id],
+        identity=lambda src: src.ref.source_id,
+        token_cost=lambda src: len(transposition_texts[src.ref.source_id]),
+        policy=selection_policy,
+    )
+    transposition_breakdowns = {
+        item.item.ref.source_id: item.score_breakdown for item in ranked_transpositions
+    }
+    transposition_selection = apply_item_limit(
+        [item.item for item in ranked_transpositions],
         None if context_limits is None else context_limits.max_transpositions,
     )
     transpositions: list[TranspositionEntry] = []
     for src in transposition_selection.kept:
-        decide(src, True, "accepted transposition")
+        decide(src, True, "accepted transposition selected by weighted MMR",
+               transposition_breakdowns[src.ref.source_id])
         transpositions.append(
             TranspositionEntry(
                 source_id=src.ref.source_id,
@@ -818,7 +972,8 @@ def compile_formal(
             )
         )
     for src in transposition_selection.dropped:
-        decide(src, False, REASON_OVER_TRANSPOSITION_LIMIT)
+        decide(src, False, REASON_OVER_TRANSPOSITION_LIMIT,
+               transposition_breakdowns[src.ref.source_id])
 
     # ---- premises ------------------------------------------------------------
     candidates: dict[str, list[_Source]] = {}
@@ -844,9 +999,9 @@ def compile_formal(
             candidates.setdefault(name, []).append(src)
 
     # One winner per lean_name (verified beats suggested, then lowest
-    # source_id).  Winners are ordered verified-first, then by lean_name, and
-    # only then cut to the premise limit, so a limit never displaces a
-    # verified premise in favour of a suggested one.
+    # source_id).  MMR ranks verified and suggested groups independently, and
+    # the verified group fills the limit first so suggestions cannot displace
+    # verified premises.
     winners: list[tuple[_Source, PremiseEntry, bool]] = []
     for name in sorted(candidates):
         group = sorted(
@@ -873,9 +1028,44 @@ def compile_formal(
                 decide(loser, False, f"superseded by verified premise {winner.ref.source_id}")
             else:
                 decide(loser, False, duplicate_reason(winner.ref.source_id))
-    winners.sort(key=lambda item: (not item[2], item[1].lean_name))
+    premise_texts: dict[str, str] = {}
+    premise_features: dict[str, Mapping[str, float]] = {}
+    for winner, entry, is_verified in winners:
+        premise_texts[winner.ref.source_id] = f"{entry.lean_name} {entry.statement}"
+        claim_id = winner.body.get("claim_id")
+        state_id = winner.body.get("state_id")
+        if claim_id == task.claim_id or state_id == task.root_state_id:
+            ancestry = 1.0
+        elif claim_id is None and state_id is None:
+            ancestry = 0.5
+        else:
+            ancestry = 0.25
+        premise_features[winner.ref.source_id] = _selection_features(
+            winner,
+            reference_text,
+            ancestry=ancestry,
+            verification=1.0 if is_verified else 0.45,
+            failure=0.5,
+            text=premise_texts[winner.ref.source_id],
+        )
+
+    ranked_premises: list[tuple[_Source, PremiseEntry, bool]] = []
+    premise_breakdowns: dict[str, Mapping[str, float]] = {}
+    for verified_group in (True, False):
+        group = [item for item in winners if item[2] is verified_group]
+        ranked_group = weighted_mmr_order(
+            group,
+            features=lambda item: premise_features[item[0].ref.source_id],
+            similarity_text=lambda item: premise_texts[item[0].ref.source_id],
+            identity=lambda item: item[0].ref.source_id,
+            token_cost=lambda item: len(premise_texts[item[0].ref.source_id]),
+            policy=selection_policy,
+        )
+        for ranked_item in ranked_group:
+            ranked_premises.append(ranked_item.item)
+            premise_breakdowns[ranked_item.item[0].ref.source_id] = ranked_item.score_breakdown
     premise_selection = apply_item_limit(
-        winners, None if context_limits is None else context_limits.max_premises
+        ranked_premises, None if context_limits is None else context_limits.max_premises
     )
     verified: list[PremiseEntry] = []
     suggested: list[PremiseEntry] = []
@@ -884,10 +1074,13 @@ def compile_formal(
         decide(
             winner,
             True,
-            "verified premise" if is_verified else "suggested premise (unverified)",
+            "verified premise selected by weighted MMR"
+            if is_verified else "suggested premise selected by weighted MMR (unverified)",
+            premise_breakdowns[winner.ref.source_id],
         )
     for winner, _, _ in premise_selection.dropped:
-        decide(winner, False, REASON_OVER_PREMISE_LIMIT)
+        decide(winner, False, REASON_OVER_PREMISE_LIMIT,
+               premise_breakdowns[winner.ref.source_id])
 
     # ---- everything else -----------------------------------------------------
     for src in sources.values():
@@ -942,7 +1135,76 @@ def compile_formal(
         if root_body.get(optional_key) is not None:
             root_state[optional_key] = root_body[optional_key]
 
-    payload = FormalRequestPayload(
+    budget_candidates: dict[str, dict[str, Any]] = {}
+    for entry in (*verified, *suggested):
+        source = sources[entry.source_id]
+        budget_candidates[entry.source_id] = {
+            "kind": "premise",
+            "source": source,
+            "entry": entry,
+            "features": premise_features[entry.source_id],
+            "text": premise_texts[entry.source_id],
+            "verified": entry.status in _VERIFIED,
+        }
+    mandatory_run_ids = {src.ref.source_id for src, _ in mandatory_runs}
+    for prior in prior_runs:
+        if prior.run_id in mandatory_run_ids:
+            continue
+        budget_candidates[prior.run_id] = {
+            "kind": "run",
+            "source": sources[prior.run_id],
+            "entry": prior,
+            "features": run_features[prior.run_id],
+            "text": run_texts[prior.run_id],
+        }
+    for entry in transpositions:
+        source = sources[entry.source_id]
+        budget_candidates[entry.source_id] = {
+            "kind": "transposition",
+            "source": source,
+            "entry": entry,
+            "features": transposition_features[entry.source_id],
+            "text": transposition_texts[entry.source_id],
+        }
+
+    mandatory_source_ids = {declaration.ref.source_id, root.ref.source_id, environment.ref.source_id}
+    mandatory_source_ids.update(mandatory_run_ids)
+
+    def assemble_payload(selected_ids: set[str]) -> FormalRequestPayload:
+        selected_premises = [budget_candidates[source_id] for source_id in selected_ids
+                             if budget_candidates[source_id]["kind"] == "premise"]
+        selected_runs = [budget_candidates[source_id]["entry"] for source_id in selected_ids
+                         if budget_candidates[source_id]["kind"] == "run"]
+        selected_transpositions = [budget_candidates[source_id]["entry"] for source_id in selected_ids
+                                   if budget_candidates[source_id]["kind"] == "transposition"]
+        selected_verified = sorted(
+            (item["entry"] for item in selected_premises if item["verified"]),
+            key=lambda entry: entry.lean_name,
+        )
+        selected_suggested = sorted(
+            (item["entry"] for item in selected_premises if not item["verified"]),
+            key=lambda entry: entry.lean_name,
+        )
+        selected_prior_runs = [prior for _source_id, prior in mandatory_runs]
+        selected_prior_runs.extend(selected_runs)
+        selected_prior_runs.sort(key=lambda prior: prior.run_id)
+        selected_transpositions.sort(key=lambda entry: entry.source_id)
+        included_source_ids = set(mandatory_source_ids) | set(selected_ids)
+        for prior in selected_prior_runs:
+            included_source_ids.update(prior.frontier_state_ids)
+        for entry in selected_transpositions:
+            included_source_ids.update((entry.from_state_id, entry.to_state_id))
+        source_artifacts = tuple(ref for ref in refs if ref.source_id in included_source_ids)
+        return replace(
+            payload_base,
+            verified_premises=tuple(selected_verified),
+            suggested_premises=tuple(selected_suggested),
+            prior_runs=tuple(selected_prior_runs),
+            transpositions=tuple(selected_transpositions),
+            source_artifacts=source_artifacts,
+        )
+
+    payload_base = FormalRequestPayload(
         proof_id=request.proof_id,
         task_id=request.task_id,
         base_revision=request.base_revision,
@@ -971,36 +1233,104 @@ def compile_formal(
             "toolchain": environment.body["toolchain"],
             "source_hash": environment.ref.content_hash,
         },
-        verified_premises=tuple(verified),
-        suggested_premises=tuple(suggested),
+        verified_premises=(),
+        suggested_premises=(),
         corpus_manifest=task.corpus.to_schema_dict() if task.corpus else None,
         model_bundle=task.models.to_schema_dict() if task.models else None,
         search_policy=task.search_policy,
         max_tactic_steps=task.max_tactic_steps,
         limits={"max_steps": limits.max_steps, "wall_clock_ms": limits.wall_clock_ms},
         checkpoint_policy=task.checkpoint_policy,
-        prior_runs=tuple(sorted(prior_runs, key=lambda r: r.run_id)),
-        transpositions=tuple(sorted(transpositions, key=lambda t: t.source_id)),
-        source_artifacts=tuple(refs),
+        prior_runs=tuple(prior for _source, prior in mandatory_runs),
+        transpositions=(),
+        source_artifacts=tuple(ref for ref in refs if ref.source_id in mandatory_source_ids),
     )
 
     if v2_selection is not None and any(value is not None for value in (backend, deployment_id, formal_input)):
         raise ContextValidationError("select the v2 request once")
-    envelope = {
-        "request": (payload.to_v2_schema_dict(**asdict(v2_selection)) if v2_selection is not None
-                    else payload.to_schema_dict(protocol_version=protocol_version, backend=backend,
-                                                deployment_id=deployment_id, formal_input=formal_input)),
-        "context": payload.to_context_dict(),
-    }
-    packet = ContextPacket(
-        task_id=request.task_id,
-        proof_id=request.proof_id,
-        base_revision=request.base_revision,
-        packet_kind=PacketKind.FORMAL,
-        content=json.dumps(envelope, ensure_ascii=True, sort_keys=True, indent=2),
-        text_budget=request.text_budget,
-        formal_limits=request.formal_limits,
-    )
+    def make_packet(compiled_payload: FormalRequestPayload) -> ContextPacket:
+        envelope = {
+            "request": (
+                compiled_payload.to_v2_schema_dict(**asdict(v2_selection))
+                if v2_selection is not None
+                else compiled_payload.to_schema_dict(
+                    protocol_version=protocol_version,
+                    backend=backend,
+                    deployment_id=deployment_id,
+                    formal_input=formal_input,
+                )
+            ),
+            "context": compiled_payload.to_context_dict(),
+        }
+        return ContextPacket(
+            task_id=request.task_id,
+            proof_id=request.proof_id,
+            base_revision=request.base_revision,
+            packet_kind=PacketKind.FORMAL,
+            content=json.dumps(envelope, ensure_ascii=True, sort_keys=True, indent=2),
+            text_budget=request.text_budget,
+            formal_limits=request.formal_limits,
+        )
+
+    selected_ids: set[str] = set()
+    payload = assemble_payload(selected_ids)
+    packet = make_packet(payload)
+    if request.text_budget is not None:
+        mandatory_tokens = counter.count(packet.content)
+        if mandatory_tokens > request.text_budget.max_tokens:
+            raise ContextValidationError(
+                "mandatory formal context alone exceeds text budget "
+                f"({mandatory_tokens} tokens required, {request.text_budget.max_tokens} available)"
+            )
+
+        remaining = set(budget_candidates)
+        mandatory_texts = [task.kernel.statement, _source_text(declaration),
+                           _source_text(root), _source_text(environment)]
+        mandatory_texts.extend(_source_text(sources[run_id]) for run_id in mandatory_run_ids)
+        selected_texts: list[str] = []
+        current_tokens = mandatory_tokens
+        while remaining:
+            ranked_candidates: list[tuple[float, str, ContextPacket, FormalRequestPayload,
+                                         Mapping[str, float]]] = []
+            for source_id in remaining:
+                candidate = budget_candidates[source_id]
+                trial_ids = selected_ids | {source_id}
+                trial_payload = assemble_payload(trial_ids)
+                trial_packet = make_packet(trial_payload)
+                trial_tokens = counter.count(trial_packet.content)
+                marginal_cost = max(0, trial_tokens - current_tokens)
+                redundancy = max(
+                    (text_similarity(candidate["text"], text)
+                     for text in (*mandatory_texts, *selected_texts)),
+                    default=0.0,
+                )
+                breakdown = selection_policy.breakdown(
+                    candidate["features"],
+                    redundancy=redundancy,
+                    token_cost=float(marginal_cost),
+                    cost_fraction=marginal_cost / request.text_budget.max_tokens,
+                )
+                ranked_candidates.append((
+                    breakdown["mmr_score"], source_id, trial_packet, trial_payload, breakdown
+                ))
+            ranked_candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+            _score, source_id, trial_packet, trial_payload, breakdown = ranked_candidates[0]
+            remaining.remove(source_id)
+            source = budget_candidates[source_id]["source"]
+            if counter.count(trial_packet.content) <= request.text_budget.max_tokens:
+                selected_ids.add(source_id)
+                selected_texts.append(budget_candidates[source_id]["text"])
+                packet, payload = trial_packet, trial_payload
+                item_kind = budget_candidates[source_id]["kind"]
+                reason = f"{item_kind} selected by weighted MMR within text budget"
+                decide(source, True, reason, breakdown)
+                current_tokens = counter.count(packet.content)
+            else:
+                decide(source, False, REASON_OVER_TEXT_BUDGET, breakdown)
+    else:
+        selected_ids.update(budget_candidates)
+        payload = assemble_payload(selected_ids)
+        packet = make_packet(payload)
     kernel = task.kernel
     ordered: Sequence[SelectionDecision] = (
         SelectionDecision(
@@ -1028,5 +1358,13 @@ def compile_formal(
                 }
             }
         ),
+        selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
+            cost_normalization=(
+                "item caps: lexical text length / maximum candidate text length; "
+                "text budget: marginal full-envelope counter tokens / text_budget.max_tokens; "
+                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
+                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
+            ),
+        )},
     )
     return FormalCompilation(payload=payload, packet=packet, result=result)

@@ -14,6 +14,7 @@ from .obstruction import ObstructionTask, compile_obstruction
 from .resolvers import resolve_obstruction_task
 from .snapshot import ProofSnapshot, StaleSnapshotError
 from .snapshot_provider import JournalReader, LeaseSnapshotProvider
+from .selection import ContextSelectionPolicy, DEFAULT_CONTEXT_POLICY
 from .sources import ArtifactSource, RetrievalPlan, collect_sources
 
 __all__ = [
@@ -40,6 +41,7 @@ class ObstructionRuntimeConfig:
     max_nodes: int = 300
     kernel_id: str | None = None
     require_complete_retrieval: bool = True
+    selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY
 
     def __post_init__(self) -> None:
         if not isinstance(self.consumer_worker_class, WorkerClass):
@@ -86,6 +88,8 @@ class ObstructionRuntimeConfig:
             raise ContextValidationError(
                 "require_complete_retrieval must be a boolean"
             )
+        if not isinstance(self.selection_policy, ContextSelectionPolicy):
+            raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +206,7 @@ def compile_obstruction_for_lease(
         max_failed_states=config.max_failed_states,
         formal_run_id=resolved.formal_run_id,
         environment_hash=resolved.environment_hash,
+        selection_policy=config.selection_policy,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,

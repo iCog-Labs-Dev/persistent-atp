@@ -1,6 +1,7 @@
 """Tests for the shared V1 selection helpers and their integration points."""
 
 import hashlib
+import math
 import unittest
 
 from context_compiler.budgeting import (
@@ -17,6 +18,7 @@ from context_compiler.contracts import (
 from context_compiler.errors import ContextValidationError
 from context_compiler.finalize import finalize_packet
 from context_compiler.selection import (
+    DEFAULT_CONTEXT_POLICY,
     REASON_OVER_FAILED_STATE_LIMIT,
     REASON_OVER_PREMISE_LIMIT,
     REASON_OVER_PRIOR_RUN_LIMIT,
@@ -25,6 +27,7 @@ from context_compiler.selection import (
     apply_item_limit,
     duplicate_reason,
     trailing_ordinal,
+    weighted_mmr_order,
 )
 
 
@@ -67,6 +70,34 @@ class TrailingOrdinalTests(unittest.TestCase):
 
     def test_numeric_not_lexicographic(self):
         self.assertGreater(trailing_ordinal("p/fr-10"), trailing_ordinal("p/fr-9"))
+
+
+class WeightedMMRTests(unittest.TestCase):
+    def test_order_is_stable_and_prefers_lexical_diversity_after_the_first_item(self):
+        items = (
+            ("a", "alpha beta gamma"),
+            ("b", "alpha beta gamma"),
+            ("c", "delta epsilon zeta"),
+        )
+        rank = lambda: weighted_mmr_order(
+            items,
+            features=lambda _item: {},
+            similarity_text=lambda item: item[1],
+            identity=lambda item: item[0],
+        )
+
+        first, second = rank(), rank()
+
+        self.assertEqual([item.item[0] for item in first], ["a", "c", "b"])
+        self.assertEqual(first, second)
+        self.assertEqual(first[1].score_breakdown["redundancy"], 0.0)
+        self.assertEqual(first[2].score_breakdown["redundancy"], 1.0)
+
+    def test_policy_rejects_nonfinite_or_unknown_features(self):
+        with self.assertRaises(ContextValidationError):
+            DEFAULT_CONTEXT_POLICY.relevance({"novelty": math.nan})
+        with self.assertRaises(ContextValidationError):
+            DEFAULT_CONTEXT_POLICY.relevance({"not_a_feature": 1.0})
 
 
 class ReasonTests(unittest.TestCase):
