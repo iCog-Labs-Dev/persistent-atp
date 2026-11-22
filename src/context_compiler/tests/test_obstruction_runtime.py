@@ -7,6 +7,7 @@ from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from context_compiler.errors import ContextValidationError
+from context_compiler.budgeting import CharHeuristicTokenCounter
 from context_compiler.obstruction_runtime import (
     ObstructionLeaseCompiler,
     ObstructionRuntimeConfig,
@@ -184,6 +185,27 @@ def test_obstruction_runtime_is_deterministic():
     assert first.worker_input == second.worker_input
 
 
+def test_obstruction_runtime_uses_configured_token_counter():
+    class RecordingCounter(CharHeuristicTokenCounter):
+        def __init__(self):
+            super().__init__(chars_per_token=8)
+            self.calls = 0
+
+        def count(self, text):
+            self.calls += 1
+            return super().count(text)
+
+    _, _, lease, snapshot = runtime_case()
+    counter = RecordingCounter()
+    dispatch = compile_obstruction_for_lease(
+        lease, snapshot, Artifacts(), ObstructionRuntimeConfig(token_counter=counter)
+    )
+
+    policy_config = dispatch.manifest["selection_policy_configs"]["weighted-mmr-v1"]
+    assert counter.calls > 1
+    assert "chars_per_token=8" in policy_config["cost_normalization"]
+
+
 def test_obstruction_runtime_rejects_wrong_consumer_worker():
     _, _, lease, snapshot = runtime_case()
     wrong = replace(lease, worker_class=WorkerClass.LLM_RESEARCH.value)
@@ -252,6 +274,7 @@ def object_with_missing_artifacts():
         ("max_nodes", 0),
         ("kernel_id", ""),
         ("require_complete_retrieval", "yes"),
+        ("token_counter", object()),
     ],
 )
 def test_obstruction_runtime_config_rejects_invalid_values(field, value):

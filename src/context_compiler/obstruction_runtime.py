@@ -8,6 +8,7 @@ from commit_gate.state import ReadView
 from shared.vocab import RunDisposition, WorkerClass
 
 from .contracts import CompileRequest, PacketKind, TextBudget
+from .budgeting import TokenCounter
 from .dispatch import CompiledDispatch, LeaseLike
 from .errors import ContextValidationError
 from .obstruction import ObstructionTask, compile_obstruction
@@ -42,6 +43,7 @@ class ObstructionRuntimeConfig:
     kernel_id: str | None = None
     require_complete_retrieval: bool = True
     selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY
+    token_counter: TokenCounter | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.consumer_worker_class, WorkerClass):
@@ -90,6 +92,8 @@ class ObstructionRuntimeConfig:
             )
         if not isinstance(self.selection_policy, ContextSelectionPolicy):
             raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
+        if self.token_counter is not None and not callable(getattr(self.token_counter, "count", None)):
+            raise ContextValidationError("token_counter must provide count(text)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +211,7 @@ def compile_obstruction_for_lease(
         formal_run_id=resolved.formal_run_id,
         environment_hash=resolved.environment_hash,
         selection_policy=config.selection_policy,
+        token_counter=config.token_counter,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,

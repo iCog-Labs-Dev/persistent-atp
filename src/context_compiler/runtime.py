@@ -13,6 +13,7 @@ from commit_gate.state import ReadView
 from shared.vocab import WorkerClass
 
 from .contracts import CompileRequest, PacketKind, TextBudget
+from .budgeting import TokenCounter
 from .dispatch import CompiledDispatch, LeaseLike
 from .errors import ContextValidationError
 from .research import ResearchTask, compile_research
@@ -42,6 +43,7 @@ class ResearchRuntimeConfig:
     kernel_id: str | None = None
     require_complete_retrieval: bool = True
     selection_policy: ContextSelectionPolicy = DEFAULT_CONTEXT_POLICY
+    token_counter: TokenCounter | None = None
 
     def __post_init__(self) -> None:
         for name in ("instructions", "output_schema", "tool_policy"):
@@ -66,6 +68,8 @@ class ResearchRuntimeConfig:
             raise ContextValidationError("require_complete_retrieval must be a boolean")
         if not isinstance(self.selection_policy, ContextSelectionPolicy):
             raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
+        if self.token_counter is not None and not callable(getattr(self.token_counter, "count", None)):
+            raise ContextValidationError("token_counter must provide count(text)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +194,7 @@ def compile_research_for_lease(
         collection,
         task,
         selection_policy=config.selection_policy,
+        token_counter=config.token_counter,
     )
     return CompiledDispatch.from_compilation(
         lease=lease,

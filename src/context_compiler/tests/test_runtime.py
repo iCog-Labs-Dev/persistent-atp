@@ -7,6 +7,7 @@ from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
 from context_compiler.errors import ContextValidationError
+from context_compiler.budgeting import CharHeuristicTokenCounter
 from context_compiler.runtime import (
     ResearchLeaseCompiler,
     ResearchRuntimeConfig,
@@ -119,6 +120,27 @@ def test_research_runtime_compiles_a_real_scheduler_lease_from_journal_overlay()
     assert "Advance the selected proof strategy" in dispatch.packet.content
 
 
+def test_research_runtime_uses_configured_token_counter():
+    class RecordingCounter(CharHeuristicTokenCounter):
+        def __init__(self):
+            super().__init__(chars_per_token=8)
+            self.calls = 0
+
+        def count(self, text):
+            self.calls += 1
+            return super().count(text)
+
+    _, _, lease, snapshot, config = runtime_case()
+    counter = RecordingCounter()
+    dispatch = compile_research_for_lease(
+        lease, snapshot, NoArtifacts(), replace(config, token_counter=counter)
+    )
+
+    policy_config = dispatch.manifest["selection_policy_configs"]["weighted-mmr-v1"]
+    assert counter.calls > 1
+    assert "chars_per_token=8" in policy_config["cost_normalization"]
+
+
 def test_research_runtime_is_deterministic_for_the_same_lease_and_snapshot():
     _, _, lease, snapshot, config = runtime_case()
 
@@ -185,6 +207,7 @@ def test_research_runtime_fails_closed_on_truncated_retrieval():
         ("max_depth", -1),
         ("max_nodes", 0),
         ("require_complete_retrieval", "yes"),
+        ("token_counter", object()),
     ],
 )
 def test_research_runtime_config_rejects_invalid_values(field, value):

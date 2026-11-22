@@ -7,7 +7,8 @@ from commit_gate.ops import AddEdge, UpsertNode
 from commit_gate.proposal import Proposal
 from commit_gate.state import MemoryView
 from commit_gate.store import JournalStore
-from context_compiler.contracts import FormalContextLimits, FormalExecutionLimits
+from context_compiler.contracts import FormalContextLimits, FormalExecutionLimits, TextBudget
+from context_compiler.budgeting import CharHeuristicTokenCounter
 from context_compiler.errors import (
     ContextValidationError,
     FormalRunPreparationRequired,
@@ -168,6 +169,40 @@ def test_formal_runtime_compiles_real_scheduler_lease_to_atp_request():
     assert dispatch.packet_digest == dispatch.manifest["packet_digest"]
 
 
+def test_formal_runtime_threads_budget_and_token_counter_into_compilation():
+    class RecordingCounter(CharHeuristicTokenCounter):
+        def __init__(self):
+            super().__init__(chars_per_token=8)
+            self.calls = 0
+
+        def count(self, text):
+            self.calls += 1
+            return super().count(text)
+
+    _, _, lease, snapshot = runtime_case()
+    counter = RecordingCounter()
+    dispatch = compile_formal_for_lease(
+        lease,
+        snapshot,
+        NoArtifacts(),
+        config(text_budget=TextBudget(10_000), token_counter=counter),
+    )
+
+    policy_config = dispatch.manifest["selection_policy_configs"]["weighted-mmr-v1"]
+    assert counter.calls >= 1
+    assert "chars_per_token=8" in policy_config["cost_normalization"]
+    assert dispatch.manifest["budgets"]["text_tokens"] == 10_000
+
+
+def test_formal_runtime_rejects_budget_below_mandatory_floor():
+    _, _, lease, snapshot = runtime_case()
+
+    with pytest.raises(ContextValidationError, match="mandatory formal context alone exceeds text budget"):
+        compile_formal_for_lease(
+            lease, snapshot, NoArtifacts(), config(text_budget=TextBudget(1))
+        )
+
+
 def test_formal_lease_compiler_is_one_call_boundary():
     view, store, lease, _ = runtime_case()
 
@@ -243,6 +278,7 @@ def test_formal_runtime_fails_closed_on_truncated_retrieval():
         ("max_depth", -1),
         ("max_nodes", 0),
         ("require_complete_retrieval", "yes"),
+        ("token_counter", object()),
     ],
 )
 def test_formal_runtime_config_rejects_invalid_values(field, value):
