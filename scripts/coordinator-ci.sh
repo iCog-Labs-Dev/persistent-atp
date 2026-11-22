@@ -12,7 +12,7 @@ if ! python3 -m pip --version >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends python3-pip python3-dev build-essential
 fi
 python3 -m pip install --break-system-packages --disable-pip-version-check \
-  -e packages/persistent-atp-client -e '.[dev]' janus-swi
+  -e packages/persistent-atp-client -e '.[dev,omega-playground]' janus-swi
 git init "$OMEGA_PINNED_ROOT"
 git -C "$OMEGA_PINNED_ROOT" fetch --depth=1 https://github.com/singnet/Omega.git \
   ba185cd359d9fe231b904110b988af39fafa5014

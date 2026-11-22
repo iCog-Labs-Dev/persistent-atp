@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import logging
@@ -1416,9 +1417,22 @@ def test_oversized_notifications_retain_terminal_routing(channel):
 
 def test_real_websocket_reconnect_retries_final_with_same_id(channel, task_host, monkeypatch):
     """Actual local sockets, patched pinned channel, scripted proof execution."""
-    from websockets.sync.server import serve
     from omegaclaw.runtime import DEFAULT_OMEGA_ROOT
     from omegaclaw.runtime_overlay import patched_bytes
+    omega_root = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
+    channel_path = omega_root / "channels/wschat.py"
+    if not channel_path.is_file():
+        reason = f"pinned Omega WebSocket channel unavailable at {channel_path}; set OMEGA_PINNED_ROOT"
+        if os.environ.get("OMEGA_RUNTIME_REQUIRED") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+    try:
+        from websockets.sync.server import serve
+    except ImportError:
+        reason = "WebSocket integration dependencies unavailable; install the omega-playground extra"
+        if os.environ.get("OMEGA_RUNTIME_REQUIRED") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
     hook, bridge = channel
     adapter, port, clock = task_host
     config = types.ModuleType("config")
@@ -1428,9 +1442,9 @@ def test_real_websocket_reconnect_retries_final_with_same_id(channel, task_host,
     monkeypatch.setitem(sys.modules, "config", config)
     monkeypatch.setitem(sys.modules, "src.logger", logger)
     monkeypatch.setitem(sys.modules, "channels", types.SimpleNamespace(CommChannel=object))
-    raw = (DEFAULT_OMEGA_ROOT / "channels/wschat.py").read_bytes()
+    raw = channel_path.read_bytes()
     ws = types.ModuleType("wschat")
-    ws.__file__ = str(DEFAULT_OMEGA_ROOT / "channels/wschat.py")
+    ws.__file__ = str(channel_path)
     monkeypatch.setitem(sys.modules, "wschat", ws)
     exec(compile(patched_bytes("channels/wschat.py", raw), ws.__file__, "exec"), ws.__dict__)
     messages = []
