@@ -18,6 +18,7 @@ _last_poll = 0.0
 _errors = []
 _dispatch_offset = 0
 _observe_offset = 0
+_task_offset = 0
 
 
 def reporting_policy():
@@ -134,15 +135,22 @@ def _invoke(kind, workspace, **arguments):
             "request_id": identity,
             "message": "Bridge intent checkpointed; receiver admission and results arrive separately."})
     except (ValueError, TypeError, KeyError) as exc:
-        code = str(exc) if str(exc) in {"TOKEN_MISSING", "PLUGIN_DISABLED", "UNREGISTERED_WORKSPACE", "INVALID_BUDGET", "CYCLE_LIMIT_REACHED"} else "INVALID_REQUEST"
-        return json.dumps({"transport_status": "error", "error_code": code})
+        code = str(exc) if str(exc) in {"TOKEN_MISSING", "PLUGIN_DISABLED", "UNREGISTERED_WORKSPACE", "INVALID_BUDGET", "CYCLE_LIMIT_REACHED", "TASK_OWNED_BY_COORDINATOR"} else "INVALID_REQUEST"
+        detail = {"expected_budget_fields": ["max_steps", "wall_clock_ms"]} if code == "INVALID_BUDGET" else {}
+        if code == "TASK_OWNED_BY_COORDINATOR":
+            detail["message"] = ("Use a new bounded managed task to continue this proof, with proof_id, "
+                "expected_revision, expected_theorem_hash, max_cycles and max_research. "
+                "Status, audit and export remain available.")
+        return json.dumps({"transport_status": "error", "error_code": code, **detail})
 
 
 def _render(report):
     raw = json.dumps(report, ensure_ascii=False, sort_keys=True)
     if len(raw) > 16000:
         keep = {key: report[key] for key in ("notification_id", "request_id", "operation_ref", "operation_id",
-                    "project_revision", "revision", "proof_id", "journal_hash", "event_hash") if key in report}
+                    "project_revision", "revision", "proof_id", "journal_hash", "event_hash", "lifecycle",
+                    "mathematical_disposition", "execution_phase", "error_code", "event_history_complete",
+                    "events_pending", "effective_budget") if key in report}
         raw = json.dumps({**keep, "rendering_incomplete": True,
             "message": "Detailed output omitted. Retrieve the complete operation/artifacts through the authorized SDK; this is not a complete goal/dependency list."}, ensure_ascii=False)
     return "PERSISTENT_ATP_RESULT " + raw
@@ -150,7 +158,7 @@ def _render(report):
 
 def take_completed():
     """Called by the loop thread; reports stay durable until history append ACK."""
-    global _last_poll, _dispatch_offset, _observe_offset
+    global _last_poll, _dispatch_offset, _observe_offset, _task_offset
     if not _enabled:
         return ""
     adapter = _get_adapter()
@@ -159,14 +167,30 @@ def take_completed():
         _last_poll = now
         if adapter.bootstrap_due():
             _submit("startup", lambda: adapter.bootstrap())
+        tasks = adapter.tasks.actionable()
+        batch = _rotate(tasks, _task_offset)
+        _task_offset += len(batch)
+        for identity in batch:
+            _submit("task:" + identity, lambda identity=identity: adapter.tasks.tick(identity))
         # Bounded round-robin batches leave capacity for both dispatch and
         # observation, even when either list exceeds the executor's queue.
-        pending = adapter.dispatchable_intents()
+        pending = [row for row in adapter.dispatchable_intents() if not row.get("task_id")]
         batch = _rotate(pending, _dispatch_offset)
         _dispatch_offset += len(batch)
         for row in batch:
             _submit(row["id"], lambda identity=row["id"]: _execute(adapter, identity))
-        active = adapter.active_intents()
+        # Task reducers observe their own operation until settled; afterwards
+        # drain any remaining event pages without launching another operation.
+        task_records = adapter.state.snapshot()["tasks"]
+        active = []
+        for row in adapter.active_intents():
+            owner = task_records.get(row.get("task_id"))
+            if row.get("task_id") and owner is None:
+                adapter.stage_report("missing-task:" + row["id"], {"error_code": "TASK_METADATA_UNAVAILABLE",
+                    "request_id": row["id"], "operation_ref": row["ref"],
+                    "message": "Task metadata is missing; observing existing work without recreating user intent."})
+            if owner is None or owner["phase"] in {"delivery", "done"}:
+                active.append(row)
         batch = _rotate(active, _observe_offset)
         _observe_offset += len(batch)
         for row in batch:
@@ -174,6 +198,11 @@ def take_completed():
         selected = adapter.state.snapshot().get("selected_proof")
         if selected:
             _submit(f"status:{selected}", lambda: adapter.refresh_status(selected))
+        # Channel I/O is bounded and runs off the MeTTa loop thread.
+        import sys
+        channel = sys.modules.get("persistent_atp_channel")
+        if channel is not None:
+            _submit("task-delivery", channel.flush_connected)
     with _lock:
         errors = _errors[:]
         _errors.clear()

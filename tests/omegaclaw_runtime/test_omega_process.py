@@ -24,6 +24,12 @@ SDK_PATH = Path(os.environ.get("OMEGACLAW_PROVIDER_SDK_PATH",
                        sysconfig.get_paths()["purelib"]))
 
 
+def unavailable(reason):
+    if os.environ.get("OMEGA_RUNTIME_REQUIRED") == "1":
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 class DeepSeekMockHandler(BaseHTTPRequestHandler):
     requests = []
     loop_request_id = None
@@ -110,12 +116,12 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     omega_source = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
     petta_source = Path(os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa")))
     if not (omega_source / "src/plugin.py").is_file() or not (petta_source / "src/main.pl").is_file():
-        pytest.skip("pinned Omega/PeTTa checkouts unavailable; omega tier requires them")
+        unavailable("pinned Omega/PeTTa checkouts unavailable; omega tier requires them")
     process_python = os.environ.get("PETTA_PYTHON", sys.executable)
     version = subprocess.run([process_python, "-c", "import sys; print(sys.version_info >= (3, 11))"], capture_output=True, text=True)
     assert version.stdout.strip() == "True", "PETTA_PYTHON must be Python >=3.11"
     if subprocess.run([process_python, "-c", "import janus_swi"], capture_output=True).returncode != 0:
-        pytest.skip("janus_swi unavailable; omega tier requires it")
+        unavailable("janus_swi unavailable; omega tier requires it")
     petta_root = tmp_path / "petta"
     petta_root.mkdir()
     for folder in ("src", "lib", "python"):
@@ -186,6 +192,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         result = json.loads(result_line.split("=", 1)[1])
         assert result["registered_skills"] == 11
         assert result["actual_loop_verified"] and DeepSeekMockHandler.loop_verified
+        assert result["zero_turn_task_acknowledged"]
         assert result["next_model_request_saw_digest"] is True
         proof = result["create"]["proof_id"]
         assert service.store.head(proof)[0] >= 2

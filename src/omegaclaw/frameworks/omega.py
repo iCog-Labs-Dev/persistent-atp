@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import math
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.codecs import fingerprint, request_from_dict, to_dict
 from persistent_atp_client.errors import (
     AdmissionRejected, ClientError, CursorExpired, ReceiverProtocolError,
-    UnsupportedCapability, StalePrecondition,
+    UnsupportedCapability, StalePrecondition, TransientUnavailable,
 )
 
 from ..specification import parse_json, validate_spec
@@ -55,6 +56,8 @@ class OmegaAdapter:
         if type(retry_base_seconds) not in (int, float) or not math.isfinite(retry_base_seconds) or retry_base_seconds <= 0:
             raise ValueError("retry_base_seconds must be finite and positive")
         self.retry_limit, self.retry_base_seconds, self._clock = retry_limit, retry_base_seconds, clock
+        from .tasks import TaskWorkflow
+        self.tasks = TaskWorkflow(self)
 
     @classmethod
     def from_environment(cls):
@@ -73,7 +76,7 @@ class OmegaAdapter:
         return cls(HTTPReceiverAdapter(url, token), workspace=workspace, cache_path=path, receiver_id=url,
                    max_cycles_per_proof=limit, retry_limit=retry_limit, retry_base_seconds=retry_base)
 
-    def reserve(self, kind, workspace, arguments, *, intent_id=None, new_intent=False):
+    def reserve(self, kind, workspace, arguments, *, intent_id=None, new_intent=False, task_id=None, deadline=None):
         """Checkpoint workflow intent without doing network I/O on Omega's loop."""
         if workspace != self.workspace:
             raise ValueError("UNREGISTERED_WORKSPACE")
@@ -108,11 +111,28 @@ class OmegaAdapter:
         if kind == "proof-export":
             ProofExport(arguments["proof"], arguments["destination"])
         identity = intent_id or uuid.uuid4().hex
+        if deadline is not None and (not isinstance(deadline, datetime) or deadline.tzinfo is None
+                                     or deadline.utcoffset().total_seconds() != 0):
+            raise ValueError("intent deadline must be an aware UTC datetime")
+        deadline_value = deadline.isoformat().replace("+00:00", "Z") if deadline is not None else None
         def reserve(data):
+            if task_id is None:
+                for task in data.get("tasks", {}).values():
+                    owns_proof = parsed.get("proof") is not None and parsed.get("proof") == task.get("proof_id")
+                    owns_spec = kind == "proof-create" and parsed.get("spec") == (task.get("request") or {}).get("spec")
+                    if (owns_proof and kind not in {"proof-status", "proof-audit", "proof-export"}) or owns_spec:
+                        raise ValueError("TASK_OWNED_BY_COORDINATOR")
             existing = data["intents"].get(identity)
             if existing:
                 if existing["kind"] != kind or existing["arguments"] != parsed:
                     raise ValueError("intent identity was reused with different arguments")
+                if deadline_value is not None and existing.get("deadline") != deadline_value:
+                    if existing.get("deadline") is not None:
+                        raise ValueError("intent identity was reused with a different deadline")
+                    if not existing.get("request") and not existing.get("ref"):
+                        existing["deadline"] = deadline_value
+                    # Prepared legacy requests are immutable. execute() only
+                    # looks those up; it will not submit them without a deadline.
                 return existing["id"]
             if not new_intent:
                 for row in data["intents"].values():
@@ -126,7 +146,8 @@ class OmegaAdapter:
                     raise ValueError("CYCLE_LIMIT_REACHED")
             data["intents"][identity] = {"id": identity, "kind": kind, "arguments": parsed,
                 "state": "reserved", "request": None, "ref": None, "cursor": None,
-                "event_ids": [], "event_sequence": -1, "version": -1}
+                "event_ids": [], "event_sequence": -1, "version": -1, "task_id": task_id,
+                "deadline": deadline_value}
             return identity
         return self.state.update(reserve)
 
@@ -229,7 +250,22 @@ class OmegaAdapter:
         if (fingerprint(request) != row["fingerprint"] or request.request_id != row["id"]
                 or request.workspace_id != self.workspace):
             raise ReceiverProtocolError("workflow checkpoint request identity mismatch")
+        if row.get("deadline") is not None and to_dict(request)["deadline"] != row["deadline"]:
+            raise ReceiverProtocolError("workflow checkpoint deadline differs from prepared request")
         return request
+
+    def _deadline_elapsed(self, row):
+        return row.get("deadline") is not None and self._clock() >= datetime.fromisoformat(
+            row["deadline"].replace("Z", "+00:00")).timestamp()
+
+    def _deadline_reconcile(self, row):
+        """Read-only recovery; never resubmit an expired or legacy task intent."""
+        if row.get("request"):
+            self._recover_cached_intent(row, None)
+            recovered = self.state.intent(row["id"])
+            if recovered.get("ref"):
+                return self._admission(recovered)
+        raise StalePrecondition("task request expired or lacks its bound deadline; no new admission permitted")
 
     def _check_identity(self, proof, identity, label):
         cursor = None
@@ -250,6 +286,14 @@ class OmegaAdapter:
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
         proof = args["proof"]
+        if row.get("task_id"):
+            task = self.state.snapshot()["tasks"][row["task_id"]]
+            pins = task["request"]
+            if pins.get("proof_id") and kind not in {"proof-audit", "proof-export"}:
+                if digest.target_artifact.hash != pins["expected_theorem_hash"]:
+                    raise StalePrecondition("attached proof target changed")
+                if kind == "proof-cycle" and digest.revision != pins["expected_revision"]:
+                    raise StalePrecondition("attached proof changed before dispatch; review a new task intent")
         if kind in {'hypothesis-formalize', 'hypothesis-revise'}:
             expected = int(args['expected_revision'])
             if digest.revision != expected:
@@ -268,7 +312,10 @@ class OmegaAdapter:
             return action, Preconditions(
                 expected_revision=expected, expected_theorem_hash=digest.target_artifact.hash)
         if kind in {"formal-search", "formal-resume"}:
-            if self.caps.backend_mode != "real":
+            caps = self.client.capabilities(contract_version='2.0')
+            if caps.backend_mode == 'unavailable' and kind in caps.actions and 'reconcile-search' in caps.controls:
+                raise TransientUnavailable('formal provider readiness is pending')
+            if caps.backend_mode != "real":
                 raise UnsupportedCapability("FORMAL_BACKEND_UNAVAILABLE")
             if kind == "formal-resume" and "durable-resume" not in self.caps.controls:
                 raise UnsupportedCapability("durable checkpoint continuation is unavailable")
@@ -292,6 +339,17 @@ class OmegaAdapter:
 
     def execute(self, identity):
         """Submit once through the SDK; never wait for execution completion."""
+        row = self.state.intent(identity)
+        proof = (row.get("arguments") or {}).get("proof")
+        if proof and row['kind'] not in {'proof-status', 'proof-audit', 'proof-export'}:
+            with self.state.coordinate_proof(proof) as acquired:
+                if not acquired:
+                    return {'request_id': identity, 'phase': 'waiting', 'transport_status': 'pending',
+                            'error_code': 'PROOF_COORDINATION_BUSY', 'automatic_retry': True}
+                return self._execute(identity)
+        return self._execute(identity)
+
+    def _execute(self, identity):
         row = self.state.intent(identity)
         if row.get("ref"):
             return self._admission(row)
@@ -319,15 +377,30 @@ class OmegaAdapter:
                 result = self.status(row["arguments"]["proof"])
                 self.state.patch(identity, state="completed")
                 return {**result, "request_id": identity}
+            if row["kind"] not in {"proof-audit", "proof-export"}:
+                data = self.state.snapshot()
+                proof = (row.get("arguments") or {}).get("proof")
+                if proof:
+                    owner = data.get("proof_owners", {}).get(proof)
+                    managed = any(task.get("proof_id") == proof for task in data["tasks"].values())
+                    if (managed and not row.get("task_id") or
+                            owner and owner["task_id"] != row.get("task_id")):
+                        raise ValueError("TASK_OWNED_BY_COORDINATOR")
+            legacy_task = row.get("task_id") and row.get("deadline") is None
+            if self._deadline_elapsed(row) or legacy_task:
+                return self._deadline_reconcile(row)
             if row.get("request"):
                 request = self._request(row)
             else:
                 action, pre = self._action(row)
-                request = self.client.prepare(action, workspace_id=self.workspace, request_id=identity, preconditions=pre)
+                request = self.client.prepare(action, workspace_id=self.workspace, request_id=identity, preconditions=pre,
+                    deadline=datetime.fromisoformat(row["deadline"].replace("Z", "+00:00")) if row.get("deadline") else None)
                 self.state.patch(identity, request=to_dict(request), fingerprint=fingerprint(request), state="prepared")
             if row.get("artifact_repair_pending"):
                 self.client.put_artifact(self._spec_bytes(row), workspace_id=self.workspace,
                     media_type="application/json", expected_hash=request.action.spec_artifact.hash)
+            if self._deadline_elapsed(row):
+                return self._deadline_reconcile(self.state.intent(identity))
             handle = self.client.reconcile(request) if row.get("request") else self.client.submit(request)
             row = self.state.patch(identity, ref=to_dict(handle.ref), state="accepted",
                                    observation_pending=True, next_attempt_at=0, artifact_repair_pending=False)
@@ -497,7 +570,8 @@ class OmegaAdapter:
                             observation_pending=not drained, observation_failures=0, observation_retry_at=0,
                             replay_until_sequence=replay_until, replay_sequence=replay_sequence,
                             cursor_epoch=cursor_epoch, history_incomplete=history_incomplete,
-                            state="completed" if snapshot.lifecycle in TERMINAL_LIFECYCLES else "accepted")
+                            state="completed" if snapshot.lifecycle in TERMINAL_LIFECYCLES else "accepted",
+                            snapshot=to_dict(snapshot))
                 outbox = data.setdefault("outbox", {})
                 for report in reports:
                     if report["notification_id"] not in data.get("displayed", []):

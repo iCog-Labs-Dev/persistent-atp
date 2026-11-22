@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OMEGA_ROOT = ROOT / "tmp" / "repos" / "Omega-ba185cd"
 MANIFEST = "persistent_atp_runtime.json"
 CORE_PATHS = ("src", "providers", "profile", "Autotests/mock", "proxy/nginx.sh",
-              "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
+              "channels", "lib_omega.metta", "lib_nal.metta", "lib_pln.metta")
 
 
 def verify_checkout(root):
@@ -22,7 +22,11 @@ def verify_checkout(root):
     result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
     if result.stdout.strip() != OMEGA_REVISION:
         raise ValueError("Omega checkout has the wrong revision")
-    result = subprocess.run(["git", "-C", str(root), "diff", "--no-ext-diff", "--quiet", "HEAD", "--", *CORE_PATHS])
+    from .runtime_overlay import PATCHES, original_bytes
+    for name in PATCHES:
+        original_bytes(name, (root / name).read_bytes())
+    result = subprocess.run(["git", "-C", str(root), "diff", "--no-ext-diff", "--quiet", "HEAD", "--", *CORE_PATHS,
+                             *(f":(exclude){name}" for name in PATCHES)])
     if result.returncode:
         raise ValueError("pinned Omega core files have local changes")
 

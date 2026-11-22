@@ -260,6 +260,38 @@ def test_observation_reports_requested_and_effective_budgets_separately(tmp_path
     assert "target remains open" in report["message"]
 
 
+def test_pending_formal_readiness_retries_same_intent_with_refreshed_capabilities(tmp_path, monkeypatch):
+    class Port(ScriptedReceiverPort):
+        ready = False
+        async def capabilities(self, **kwargs):
+            caps = await super().capabilities(**kwargs)
+            return replace(caps, backend_mode='real' if self.ready else 'unavailable',
+                independent_replay=self.ready, controls=caps.controls | {'reconcile-search'})
+        async def read_status(self, **kwargs):
+            return ProjectDigest('reference', 'p1', 1, 'sha256:' + 'a' * 64, 1,
+                ArtifactRef('sha256:' + 'b' * 64), 'P', 'provisional', False, 'fixture', 'scripted-test')
+    port = Port()
+    clock = [1000.0]
+    adapter = OmegaAdapter(port, workspace='reference', cache_path=tmp_path / 'pending.json', clock=lambda: clock[0])
+    # Claim membership is independently checked by the coordination tests.
+    monkeypatch.setattr(adapter, '_check_identity', lambda *args: None)
+    try:
+        identity = adapter.reserve('formal-search', 'reference', {'proof': 'p1', 'claim': 'p1/c-1',
+            'budget': '{"max_steps":1,"wall_clock_ms":100}'})
+        waiting = adapter.execute(identity)
+        assert waiting['error_code'] == 'TRANSIENT_UNAVAILABLE' and waiting['automatic_retry']
+        assert adapter.state.intent(identity)['request'] is None
+        assert adapter.caps.backend_mode == 'unavailable'
+        port.ready = True
+        clock[0] += 2
+        admitted = adapter.execute(identity)
+        assert admitted['durable_admission'] and admitted['request_id'] == identity
+        assert adapter.state.intent(identity)['request']['request_id'] == identity
+        assert adapter.execute(identity)['operation_ref'] == admitted['operation_ref']
+    finally:
+        adapter.close()
+
+
 def test_changed_duplicate_event_is_rejected_without_losing_operation(host):
     adapter, receiver, _ = host
     identity, _ = create(adapter)

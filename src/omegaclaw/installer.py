@@ -12,12 +12,13 @@ import re
 import shutil
 from .runtime import OMEGA_REVISION, PETTA_REVISION, MANIFEST, seal_runtime, verify_checkout, verify_manifest
 from .container_entrypoint import patch_entrypoint
+from .runtime_overlay import PATCHES, patched_bytes
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 CLIENT_ROOT = Path(str(files("persistent_atp_client")))
 PLUGIN_FILES = ("persistent_atp.metta", "omega_persistent_atp_bridge.py",
-                "deepseek_provider.py", "coordinator-policy.txt")
+                "deepseek_provider.py", "coordinator-policy.txt", "persistent_atp_channel.py")
 # Omega's core registry is named providers.py. Install the package module under
 # a unique plugin name so the Omega registry cannot be shadowed.
 PROVIDER_PLUGIN = "persistent_atp_providers.py"
@@ -27,6 +28,7 @@ ROUTE_MARKER = "location = /deepseek/chat/completions {"
 def install(omega_root: Path) -> dict:
     omega_root = omega_root.resolve()
     verify_checkout(omega_root)
+    runtime_updates = {name: patched_bytes(name, (omega_root / name).read_bytes()) for name in PATCHES}
     catalogue = omega_root / "config" / "plugins.yaml"
     proxy = omega_root / "proxy" / "nginx.conf.template"
     if not (omega_root / "src" / "plugin.py").is_file() or not catalogue.is_file() or not proxy.is_file():
@@ -91,7 +93,7 @@ def install(omega_root: Path) -> dict:
     # journal and executor implementations stay on the trusted host.
     adapter_package = plugin_dir / "omegaclaw"
     adapter_package.mkdir(exist_ok=True)
-    for name in ("__init__.py", "specification.py", "runtime.py"):
+    for name in ("__init__.py", "specification.py", "runtime.py", "runtime_overlay.py"):
         shutil.copy2(PACKAGE_ROOT / name, adapter_package / name)
     shutil.copytree(PACKAGE_ROOT / "frameworks", adapter_package / "frameworks", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -104,6 +106,8 @@ def install(omega_root: Path) -> dict:
         launcher.write_text(updated_launcher)
     if updated_entrypoint != original_entrypoint:
         entrypoint.write_text(updated_entrypoint)
+    for name, raw in runtime_updates.items():
+        (omega_root / name).write_bytes(raw)
     seal_runtime(omega_root)
     return {"omega_root": str(omega_root), "required_omega_revision": OMEGA_REVISION, "plugin_location": str(plugin_dir),
             "catalogue": str(catalogue), "proxy_template": str(proxy)}

@@ -302,9 +302,65 @@ except janus_swi.PrologError as exc:
 else:
     raise AssertionError("real Omega loop did not reach its bounded test-channel stop")
 assert channel.confirmed
+
+# A structured WebSocket task must finish even when the model allowance is
+# zero. Exercise the installed frame hook, actual recursive MeTTa heartbeat,
+# reference HTTP receiver/gate and final ACK without provider inference.
+plugin.loadPythonPlugin("wschat", omega_root + "/channels")
+import wschat
+import omega_persistent_atp_bridge as bridge
+wschat._ws_url = "ws://managed-process-fixture/session"
+wschat._connected = True
+managed_messages = []
+def capture_managed(payload, **kwargs):
+    managed_messages.append(payload)
+    wschat._handle_frame(json.dumps({"type": "ack", "client_seq": payload["client_seq"], "seq": None}))
+wschat._send_json = capture_managed
+managed_frame = {"type": "user_message", "seq": 1, "text": "Complete a bounded proof task",
+    "persistent_atp_task": {"spec": json.loads(spec), "max_cycles": 1, "max_research": 0,
+                            "reply_prefix": "MANAGED_PROCESS_FINAL"}}
+wschat._handle_frame(json.dumps(managed_frame))
+wschat._handle_frame(json.dumps(managed_frame))  # Replay cannot create another task.
+assert wschat.getLastMessage() == ""
+assert len(bridge._get_adapter().state.snapshot()["tasks"]) == 1
+bridge._get_adapter().state.update(lambda data: data.setdefault("continuation", {}).update(used=24))
+class ManagedChannel(channels.CommChannel):
+    received = 0
+    def receive(self):
+        self.received += 1
+        tasks = bridge._get_adapter().state.snapshot()["tasks"]
+        if managed_messages and all(task["phase"] == "done" for task in tasks.values()):
+            raise RuntimeError("MANAGED_TASK_COMPLETE")
+        if self.received > 1000:
+            raise RuntimeError("MANAGED_TASK_TIMEOUT")
+        return ""
+    def send(self, message):
+        raise AssertionError("managed task must use its durable response outbox")
+channels.registerCommChannel("atp-managed", ManagedChannel())
+channels.commChannelStart("atp-managed")
+saved_chat = providers.llmProviderChat
+def forbidden_chat(*args, **kwargs):
+    raise AssertionError("zero-turn task attempted a model call")
+providers.llmProviderChat = forbidden_chat
+config.init_config(["sleepInterval=0.01", "maxNewInputLoops=" + ("100" if sdk_roundtrip else "0"),
+                    "maxWakeLoops=0", "wakeupInterval=3600"])
+execute("!(initLoop)")
+try:
+    execute("!(omega 2)")
+except janus_swi.PrologError as exc:
+    assert "MANAGED_TASK_COMPLETE" in str(exc), str(exc)
+finally:
+    providers.llmProviderChat = saved_chat
+    wschat._connected = False
+assert len(managed_messages) == 1
+managed_task = next(iter(bridge._get_adapter().state.snapshot()["tasks"].values()))
+assert managed_task["delivery"]["state"] == "acknowledged"
+assert managed_task["status"]["formal_verified"] is False
+assert set(managed_task["steps"]) == {"create", "cycle-1", "audit", "export"}
 print("PROCESS_RESULT=" + json.dumps({"create": envelope,
     "next_model_request_saw_digest": envelope["event_hash"] in next_request.messages[1].content,
     "deepseek_mock_roundtrip": envelope["event_hash"] in status_raw,
     "sdk_provider_roundtrip": sdk_roundtrip,
     "gateway_request_without_key": gateway_response.calls[0].name == "proof-audit",
-    "registered_skills": len(tool_names), "total_tools": len(tools), "actual_loop_verified": channel.confirmed}, sort_keys=True), flush=True)
+    "registered_skills": len(tool_names), "total_tools": len(tools), "actual_loop_verified": channel.confirmed,
+    "zero_turn_task_acknowledged": managed_task["delivery"]["state"] == "acknowledged"}, sort_keys=True), flush=True)

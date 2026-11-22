@@ -243,3 +243,227 @@ bash scripts/omegaclaw-test.sh --tier formal-contract
 These checks use scripted search and, when installed, a fresh Lean process for
 the controlled replay fixture. They do not establish trained GNN/MCTS readiness;
 that requires the provider's pinned native environment and model assets.
+
+## Durable coordinator tasks
+
+The pinned WebSocket profile accepts an explicit task envelope alongside the
+ordinary message text. This keeps task identity and execution limits out of
+model memory. For example:
+
+```json
+{
+  "type": "user_message",
+  "seq": 1,
+  "text": "Prove this target and report its evidence.",
+  "persistent_atp_task": {
+    "spec": {
+      "theorem": "True",
+      "definitions": {},
+      "assumptions": [],
+      "quantifier_domains": {},
+      "allowed_background": [],
+      "targets": ["True"],
+      "verification_policy": {"independent_lean_replay": true}
+    },
+    "workspace": "reference",
+    "max_cycles": 2,
+    "max_research": 1,
+    "timeout_seconds": 240,
+    "reply_prefix": "MY_TASK_FINAL"
+  }
+}
+```
+
+Text-only clients can send `PERSISTENT_ATP_TASK ` followed by the task object's
+JSON. Ordinary free-form messages retain Omega's existing tool workflow; their
+prose is not silently interpreted as permission to increase execution limits.
+
+Task intake is persisted before the channel consumes the message. The server
+must preserve its URL/session namespace and monotonically increasing `seq`
+values across reconnects and restarts. The channel credential fingerprint also
+binds the task's destination. Replaying the same message recovers the same task;
+reusing its identity with changed task fields is rejected. A distinct sequence
+number creates a distinct task, even for an identical theorem.
+
+To continue an existing proof, send a new managed task with the same complete
+`spec`, a `proof_id`, `expected_revision`, and `expected_theorem_hash` from
+authoritative proof status, and explicit `max_cycles` and `max_research`
+allowances. The theorem hash is `target_artifact.hash`, not the journal hash.
+For example, add these fields to the task object above (using actual status):
+
+```json
+{
+  "proof_id": "the-existing-proof-id",
+  "expected_revision": 7,
+  "expected_theorem_hash": "sha256:<actual target artifact digest>",
+  "max_cycles": 1,
+  "max_research": 0
+}
+```
+
+Attachment retrieves and checks the full committed specification, reconciles
+active operations and unresolved mathematical requests, and atomically claims
+workflow ownership. It creates no new proof and does not modify the earlier
+task or replenish an existing provider run. A changed revision or target
+requires a new reviewed intent. A finished task does not imply that its backend
+stopped; conflicting work must settle or be reconciled first. Independent
+proof tasks can progress concurrently within one coordinator process. Status,
+audit and export remain accessible after a managed task finishes; mathematical
+follow-up work requires a new managed task with its own limits.
+The final response distinguishes the proof's observed verification status from
+verification of an attachment that has not passed its exact-specification checks.
+
+Handoff checks and mathematical dispatch share a proof-scoped lock, including
+when the same cache is reopened. A durable `proof_owners` record remains after
+reporting or delivery acknowledgment. Ownership transfers only after fresh
+receiver observations establish that earlier work settled; an unrelated proof
+can continue while these checks wait on I/O. This assumes one coordinator and
+its retained cache for a workspace, rather than independent competing caches.
+Reporting, attachment and mathematical dispatch use the same settlement check.
+A `succeeded` or `cancelled` lifecycle with missing, `null` or `false`
+`execution_settled` does not permit ownership transfer or another mathematical
+operation. Dispatch checks fresh observations again after attachment, including
+after restart. Unsettled results cannot trigger follow-up research; status,
+audit and export remain available.
+
+Terminal formal searches with unresolved execution have an explicit trusted
+recovery path. This includes failed searches and legacy succeeded/cancelled
+operations without settlement evidence. With the receiver running, inspect the
+original operation's current observation version, then run:
+
+```bash
+.venv/bin/python -m omegaclaw.cli reconcile-search --config formal \
+  --operation-id <receiver-operation-id> \
+  --expected-observation-version <current-version> \
+  --request-id <stable-reconciliation-control-id>
+```
+
+The capability-gated SDK equivalent is
+`handle.reconcile_search(SearchReconciliationRequest(control_id, handle.ref, version))`.
+It performs GET observations of the original provider run and validates the
+original request, environment and result artifacts. New evidence still needs
+the original valid lease and fencing authority at the commit gate. A successful
+reconciliation appends a separate content-addressed execution receipt to the
+receiver's operational ledger and advances the operation's observation version.
+The original lifecycle, result, error and request remain intact. The coordinator
+checks that receipt before permitting a new, explicitly pinned continuation.
+The original service job must also be terminal. Already confirmed settled
+successes need no reconciliation job. Terminal status alone does not establish
+that the underlying formal workflow is search-only: replay phases remain
+blocked by this control, regardless of their receiver lifecycle.
+
+Provider HTTP exchanges have a total monotonic deadline covering DNS,
+connection setup, headers and complete response bodies, including errors and
+binary artifacts. Each exchange runs in a disposable standard-library helper
+process. Expiry kills and reaps that process, releasing local network resources;
+request credentials pass through stdin, not process arguments. An expired POST
+can still have reached the provider. Its original identity remains necessary
+for search reconciliation, and a lost replay receipt remains unresolved.
+
+General capability and submission handlers read a provider/configuration-scoped
+readiness cache instead of contacting the provider. One background worker
+refreshes it using a five-second HTTP deadline; cached observations expire after
+five seconds and are not reused on restart. Unknown or stale readiness defers
+new formal admission with a retryable error. Status, audit, export and recovery
+stay accessible. Readiness schedules work; it never establishes proof truth.
+
+Reconciliation runs as a durable background job, with two workers and at most
+32 queued or running jobs. Admission and control-scoped capability negotiation
+perform no provider reads on the HTTP handler. Status, other proofs and job
+polling remain accessible while provider observation waits. A job retains its
+original control ID, body and 120-second observation deadline through restart;
+at most three worker attempts are allowed across restarts. New reads and evidence
+admission stop when that deadline expires. An already persisted completion
+receipt finishes the job without another provider read.
+
+The SDK call waits by polling the job, with a default 60-second client timeout.
+Use `wait=False` or the CLI's `--no-wait` to return its `SearchReconciliationJob`
+immediately; the CLI's `--timeout` controls client observation time. After timeout
+or cancellation, observe the same job with
+`handle.wait_search_reconciliation(control_id, timeout=60)`, or repeat the exact
+original control to reattach. Neither action creates another job or refreshes
+its allowance. A terminal `blocked` job retains its diagnostic; another provider
+observation needs a new control ID and the current operation version. The typed
+job is also available at `GET /v2/reconciliations/{workspace}/{control_id}`.
+
+This control starts no search, provider retry or independent replay. Active or
+missing runs, changed bindings, expired authority and uncertain replay attempts
+remain blocked. The pinned provider exposes only replay verdict summaries, so a
+lost full replay receipt cannot be recovered through this search-only control.
+Reconciled search certificates remain pending independent replay and do not
+establish `formal_verified`. The CLI uses the live receiver through the public
+SDK; it does not open another service against the workspace database.
+
+Heartbeat workers drive creation, one automatic proof cycle, an optional
+lemma-bridge against an actual returned obstruction, status, audit, export and
+final reporting through the existing SDK. They continue with zero model turns.
+Managed input suspends model polling; a fresh ordinary message restores the
+existing agent workflow.
+The cycle includes configured intake, alignment, search and independent replay;
+verification remains a receiver/gate decision. Cycle allowances are ceilings:
+an exhausted search does not justify an identical second search. Candidate
+selection, refinement and true frontier continuation require further explicit
+work; speculative research does not verify a lemma or its parent.
+
+The version-2 workflow store preserves task/step identities, prepared requests,
+operation references, limits and final responses across process/container
+restart. Existing version-1 request/cursor/outbox records migrate without
+changing their identities. Retain the configured memory volume. Complete loss
+of task storage cannot reconstruct the user's reporting contract from active
+receiver operations alone.
+
+The task deadline is bound into immutable SDK requests and rechecked at receiver
+admission after validation/lock waits. Expiry stops new mathematical admission,
+not already admitted service work; lookup still recovers original admissions.
+Finalization has a separate deadline 30 seconds after mathematical work ends,
+or after the task deadline, whichever occurs first. Its requests use that fixed
+deadline across retries. Prepared legacy requests without a bound deadline are
+looked up rather than silently rewritten or resubmitted. The
+cutoffs govern new admission; an in-flight read may finish at its transport
+timeout. The
+response records unresolved operations, unavailable evidence and mismatched
+audit/export revisions explicitly. Large target previews are labeled incomplete
+and retain the target artifact pointer.
+
+Final responses use a persisted `client_seq` and body across at most four
+delivery attempts. Socket writes remain `delivery-uncertain` until the server
+returns an acknowledgment. Each reply is claimed immediately before its send;
+a failed write leaves later, unsent replies' retry allowances untouched. A flush
+attempts at most four replies. The acknowledgment frame is
+`{"type":"ack","client_seq":"<same ID>"}`. The server must deduplicate
+that ID; an ACK confirms server acceptance, not that a human read the message.
+Unacknowledged responses remain available in workflow state after automatic
+retries stop. Other communication channels do not acquire this guarantee.
+
+Final reports preserve original error codes, bounded diagnostics, run IDs and
+operation references. `operation_execution` records each operation's lifecycle,
+observed version and separate `execution_settled` value: `true` for confirmed
+settlement, `false` for observed active work, and `null` when settlement is
+unknown. `execution_may_continue` remains true for active or unknown execution.
+A failed operation or a legacy response without settlement evidence cannot
+establish that remote work stopped. A validated reconciliation receipt can
+establish settlement while preserving the original failure and mathematical
+status. Uncertain failures do not trigger a further research operation.
+An uncertain creation with a consistent receiver-returned proof ID retains that
+ID and collects status, audit and export within the original finalization
+window. It starts no cycle or replacement creation. Proof IDs must agree with
+the original request/operation binding; missing or conflicting IDs remain
+unresolved. A cached, validated ID is retained even after the evidence window
+expires, with unavailable evidence reported explicitly. Pending drafts from an
+older coordinator can recover that correlation without extending their deadline.
+Already persisted final messages retain their original ID and body; later
+reconciliation is observed through current receiver state.
+
+Run the required coordinator tier with the provisioned pinned Omega/PeTTa
+runtime and Janus bridge:
+
+```bash
+bash scripts/omegaclaw-test.sh --tier coordinator
+```
+
+Missing runtime prerequisites fail this tier. CI runs the same task and actual
+MeTTa-loop checks inside a digest-pinned official Omega image, with scripted
+receiver/model fixtures and no paid inference. The tests include zero-turn
+completion, restart, lost admission replies and real WebSocket reconnection
+after a lost final acknowledgment. Live trained-search acceptance remains a
+separate check.
