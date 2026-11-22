@@ -15,6 +15,7 @@ ARGUMENTS = {
     "lemma-bridge": ("proof", "obstruction", "workspace"),
     "hypothesis-formalize": ("proof", "hypothesis", "expected_revision", "workspace"),
     "hypothesis-revise": ("proof", "hypothesis", "spec_artifact", "previous_claim", "expected_revision", "workspace"),
+    "parent-refine": ("proof", "previous_declaration", "lemma", "budget", "expected_revision", "expected_theorem_hash", "workspace"),
 }
 
 MAX_ARGUMENT_BYTES = 16_384

@@ -24,7 +24,7 @@ class JobLedger:
             operation TEXT NOT NULL, phase TEXT NOT NULL, response TEXT NOT NULL
         )""")
         columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}
-        for column in ('formal_json', 'cycle_json', 'intake_json', 'research_json'):
+        for column in ('formal_json', 'cycle_json', 'intake_json', 'research_json', 'refinement_json'):
             if column not in columns:
                 self.conn.execute(f'ALTER TABLE operations ADD COLUMN {column} TEXT')
 
@@ -42,7 +42,7 @@ class JobLedger:
             else:
                 operation_id = str(uuid.uuid4())
                 result = {"operation_id": operation_id, "phase": "submitted", "transport_status": "accepted"}
-                if request["operation"] in {"proof-cycle", "proof-cycle-selected"}:
+                if request["operation"] in {"proof-cycle", "proof-cycle-selected", "parent-refine"}:
                     result["proof_id"] = request["arguments"]["proof"]
                 self.conn.execute("INSERT INTO operations (operation_id, request_id, body_hash, workspace, operation, phase, response) VALUES (?,?,?,?,?,?,?)", (
                     operation_id, request["request_id"], digest, request["workspace"],
@@ -86,7 +86,7 @@ class JobLedger:
 
     def active_cycle(self, proof_id: str, workspace: str, *, excluding_request_id: str | None = None) -> dict | None:
         # Operational deduplication only while a cycle is in flight.
-        rows = self.conn.execute("SELECT request_id, response FROM operations WHERE workspace=? AND operation IN ('proof-cycle','proof-cycle-selected') AND phase NOT IN ('finished','failed')", (workspace,)).fetchall()
+        rows = self.conn.execute("SELECT request_id, response FROM operations WHERE workspace=? AND operation IN ('proof-cycle','proof-cycle-selected','parent-refine') AND phase NOT IN ('finished','failed')", (workspace,)).fetchall()
         for row in rows:
             if row["request_id"] == excluding_request_id:
                 continue
@@ -108,6 +108,16 @@ class JobLedger:
     def research_state(self, operation_id: str) -> dict:
         row = self.conn.execute('SELECT research_json FROM operations WHERE operation_id=?', (operation_id,)).fetchone()
         return json.loads(row['research_json']) if row and row['research_json'] else {}
+
+    def refinement_state(self, operation_id: str) -> dict:
+        row = self.conn.execute('SELECT refinement_json FROM operations WHERE operation_id=?', (operation_id,)).fetchone()
+        return json.loads(row['refinement_json']) if row and row['refinement_json'] else {}
+
+    def save_refinement(self, operation_id: str, state: dict) -> None:
+        changed = self.conn.execute('UPDATE operations SET refinement_json=? WHERE operation_id=?',
+            (json.dumps(state, sort_keys=True, allow_nan=False), operation_id)).rowcount
+        if changed != 1:
+            raise ValueError('refinement requires a durably admitted operation')
 
     def save_research(self, operation_id: str, state: dict) -> None:
         changed = self.conn.execute('UPDATE operations SET research_json=? WHERE operation_id=?',

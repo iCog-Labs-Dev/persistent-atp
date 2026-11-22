@@ -108,8 +108,8 @@ class IntakeWorkflow:
         proposal = Proposal(lease['proof_id'], lease['actor'], lease['worker_class'],
             ops=tuple(ops), base_revision=lease['base_revision'], lease_id=lease['lease_id'],
             fencing_token=lease['fencing_token'], selected_move_id=lease['selected_move_id'])
-        if state is not None and self._owned_hypothesis(operation, state):
-            self.validate_hypothesis_history(operation, lease['proof_id'], self.service.view.node(state['claim_id']))
+        if state is not None and self._owned_attempt(operation, state):
+            self._validate_history(operation, state)
             prepared = state.setdefault('commit_proposals', [])
             if proposal.to_dict() not in prepared:
                 prepared.append(proposal.to_dict())
@@ -122,6 +122,15 @@ class IntakeWorkflow:
     @staticmethod
     def _owned_hypothesis(operation, state):
         return state['claim']['fields'].get('hypothesis_operation_id') == operation
+
+    def _owned_attempt(self, operation, state):
+        return self._owned_hypothesis(operation, state) or bool(state.get('refinement_artifact'))
+
+    def _validate_history(self, operation, state):
+        if state.get('refinement_artifact'):
+            return self.service.refinement.validate_history(operation)
+        return self.validate_hypothesis_history(operation, state['proof_id'],
+            self.service.view.node(state['claim_id']))
 
     def validate_hypothesis_history(self, operation, proof, claim):
         """Only this operation's admission and prepared intake writes may advance its revision."""
@@ -162,7 +171,7 @@ class IntakeWorkflow:
         self._save(operation, state)
 
     def _stage_lease(self, operation, state, key, worker, *, selected=None):
-        if not self._owned_hypothesis(operation, state) and key != 'clarification_lease':
+        if not self._owned_attempt(operation, state) and key != 'clarification_lease':
             return self._lease(state['proof_id'], selected or state['declaration_id'], worker)
         if key in state:
             self._resume_lease(operation, state, key)
@@ -267,7 +276,7 @@ class IntakeWorkflow:
             self._save(operation, state)
         return candidate
 
-    def run(self, operation, proof, *, claim_id=None, cancelled=lambda: False, on_progress=None):
+    def run(self, operation, proof, *, claim_id=None, cancelled=lambda: False, on_progress=None, refinement=False):
         service = self.service
         target_claim_id = claim_id or proof + '/c-1'
         if not isinstance(target_claim_id, str) or not target_claim_id.startswith(proof + '/'):
@@ -275,6 +284,7 @@ class IntakeWorkflow:
         with service.lock:
             service.catch_up(proof)
             state = service.jobs.intake_state(operation)
+            refinement_state = service.refinement.validate_history(operation) if refinement else None
         if state and (state.get('contract_manifest') != MANIFEST_HASH or state['proof_id'] != proof
                 or state.get('claim_id') != target_claim_id
                 or state['config_hash'] != self.config.checkpoint_hash()):
@@ -288,7 +298,7 @@ class IntakeWorkflow:
                     raise ValueError('automated intake requires the complete committed theorem specification')
                 if claim.fields.get('hypothesis_operation_id') == operation:
                     self.validate_hypothesis_history(operation, proof, claim)
-                if (service.view.edges_to(target_claim_id, 'DRAFTS_CLAIM') or service.view.edges_to(target_claim_id, 'ALIGNS_CLAIM')
+                if not refinement and (service.view.edges_to(target_claim_id, 'DRAFTS_CLAIM') or service.view.edges_to(target_claim_id, 'ALIGNS_CLAIM')
                         or service.view.edges_from(target_claim_id, 'FORMALIZES') or service.view.edges_to(target_claim_id, 'FORMALIZES')):
                     return {'ready': False, 'error_code': 'EXISTING_FORMALIZATION_REQUIRES_REVIEW'}
                 spec = json.loads(service.artifacts.get(claim.fields['theorem_spec_artifact']))
@@ -327,6 +337,10 @@ class IntakeWorkflow:
                     for edge in service.view.edges_from(record['id'], 'DEPENDS_ON'))
                 if lemma is not None:
                     state['verified_lemma'] = lemma
+                if refinement_state:
+                    if lemma != refinement_state['lemma'] or target_claim_id != refinement_state['claim_id']:
+                        raise ValueError('refinement intake differs from its admitted verified lemma')
+                    state['refinement_artifact'] = refinement_state['lineage_artifact']
                 self._save(operation, state)
         try:
             if state['provider_url'] != service.formal.config.url:
@@ -338,8 +352,8 @@ class IntakeWorkflow:
             if 'clarification' in state:
                 return self._clarification(operation, state)
             with service.lock:
-                if self._owned_hypothesis(operation, state):
-                    self.validate_hypothesis_history(operation, proof, service.view.node(target_claim_id))
+                if self._owned_attempt(operation, state):
+                    self._validate_history(operation, state)
                     self._validate_inputs(state)
                     if service.view.node(state['declaration_id']) is None:
                         self._resume_lease(operation, state, 'draft_lease')
@@ -386,6 +400,9 @@ class IntakeWorkflow:
                             binding = service.artifacts.put(canonical_json(state['verified_lemma']))
                             ops.append(SetField('FormalDeclaration', state['declaration_id'],
                                 'lemma_reuse_artifact', binding, prior=None))
+                        if state.get('refinement_artifact'):
+                            ops.append(SetField('FormalDeclaration', state['declaration_id'],
+                                'parent_refinement_artifact', state['refinement_artifact'], prior=None))
                         ops += [UpsertNode('Environment', state['environment_id'], {'toolchain': self.config.toolchain,
                             'environment_hash': state['environment_hash'], 'provider_environment_id': state['provider_environment_id']}),
                             AddEdge('PINNED_ENVIRONMENT', state['declaration_id'], state['environment_id'], state['environment_id'] + '-pin')]
@@ -401,7 +418,7 @@ class IntakeWorkflow:
                 state['packet_artifact'] = service.artifacts.put(compilation.context_text.encode())
                 if 'review_lease' not in state:
                     state['review_lease'] = self._lease(proof, state['declaration_id'], 'alignment-reviewer', conflicts=(state['claim_id'],))
-                elif self._owned_hypothesis(operation, state) and service.view.node(state['alignment_id']) is None:
+                elif self._owned_attempt(operation, state) and service.view.node(state['alignment_id']) is None:
                     self._resume_lease(operation, state, 'review_lease', conflicts=(state['claim_id'],))
                 self._save(operation, state)
             if on_progress:

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from persistent_atp_client import (
     AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,
     Preconditions, ProofAudit, ProofCreate, ProofCycle, ProofExport, StatementAlign,
-    SyncClient, HypothesisFormalize, HypothesisRevise,
+    SyncClient, HypothesisFormalize, HypothesisRevise, ParentRefine,
 )
 from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
@@ -34,6 +34,7 @@ SKILLS = {
     "statement-align": ("proof", "claim", "lean_source"), "lemma-bridge": ("proof", "obstruction"),
     "hypothesis-formalize": ("proof", "hypothesis", "expected_revision"),
     "hypothesis-revise": ("proof", "hypothesis", "spec", "previous_claim", "expected_revision"),
+    "parent-refine": ("proof", "previous_declaration", "lemma", "budget", "expected_revision", "expected_theorem_hash"),
 }
 
 
@@ -94,6 +95,13 @@ class OmegaAdapter:
             parsed["budget"] = to_dict(Budget(**value))
         if kind == "statement-align":
             ArtifactRef(arguments["lean_source"])
+        if kind == 'parent-refine':
+            revision = arguments['expected_revision']
+            if not revision.isascii() or not revision.isdecimal():
+                raise ValueError('expected_revision must be a nonnegative decimal revision')
+            parsed['expected_revision'] = str(int(revision))
+            ParentRefine(arguments['proof'], arguments['previous_declaration'], arguments['lemma'], Budget(**parsed['budget']))
+            Preconditions(expected_revision=int(revision), expected_theorem_hash=arguments['expected_theorem_hash'])
         if kind in {"hypothesis-formalize", "hypothesis-revise"}:
             HypothesisFormalize(arguments['proof'], arguments['hypothesis'])
             if not arguments['hypothesis'].startswith(arguments['proof'] + '/'):
@@ -139,8 +147,8 @@ class OmegaAdapter:
                     if row["state"] not in {"completed", "rejected"} and row["kind"] == kind:
                         if row["arguments"] == parsed or (kind == "proof-create" and row["arguments"] is None):
                             return row["id"]
-            if kind == "proof-cycle":
-                count = sum(row["kind"] == kind and row.get("arguments", {}).get("proof") == parsed["proof"]
+            if kind in {"proof-cycle", "parent-refine"}:
+                count = sum(row["kind"] in {"proof-cycle", "parent-refine"} and row.get("arguments", {}).get("proof") == parsed["proof"]
                             for row in data["intents"].values() if row.get("arguments") is not None)
                 if count >= self.max_cycles_per_proof:
                     raise ValueError("CYCLE_LIMIT_REACHED")
@@ -286,6 +294,18 @@ class OmegaAdapter:
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
         proof = args["proof"]
+        if kind == 'parent-refine':
+            if (digest.revision != int(args['expected_revision'])
+                    or digest.target_artifact.hash != args['expected_theorem_hash']):
+                raise StalePrecondition('parent refinement pins changed; prepare a new explicit intent')
+            caps = self.client.capabilities(contract_version='2.3')
+            if kind not in caps.actions:
+                raise UnsupportedCapability('parent refinement is unavailable')
+            self._check_identity(proof, args['previous_declaration'], 'FormalDeclaration')
+            self._check_identity(proof, args['lemma'], 'Claim')
+            return ParentRefine(proof, args['previous_declaration'], args['lemma'], Budget(**args['budget'])), \
+                Preconditions(expected_revision=int(args['expected_revision']),
+                    expected_theorem_hash=args['expected_theorem_hash'])
         if row.get("task_id"):
             task = self.state.snapshot()["tasks"][row["task_id"]]
             pins = task["request"]

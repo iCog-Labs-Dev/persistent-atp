@@ -88,7 +88,7 @@ assert "deepseek_provider" in catalogue, catalogue
 skills_once = execute("!(getSkills)")[0]
 assert skills_once.count('(proof-create "') == 1, skills_once
 for name in ("proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export",
-             "formal-search", "formal-resume", "statement-align", "lemma-bridge", "hypothesis-formalize", "hypothesis-revise"):
+             "formal-search", "formal-resume", "statement-align", "lemma-bridge", "hypothesis-formalize", "hypothesis-revise", "parent-refine"):
     assert skills_once.count(f'({name} "') == 1, (name, skills_once)
 execute(f"!(loadMettaPlugin persistent_atp {json.dumps(plugin_dir)})")
 skills_twice = execute("!(getSkills)")[0]
@@ -98,7 +98,7 @@ assert listener_count == 1, listener_count
 for name, arity in (("proof-create", 3), ("proof-cycle", 3), ("proof-status", 3),
                     ("proof-audit", 3), ("proof-export", 4), ("formal-search", 5),
                     ("formal-resume", 5), ("statement-align", 5), ("lemma-bridge", 4), ("hypothesis-formalize", 5),
-                    ("hypothesis-revise", 7)):
+                    ("hypothesis-revise", 7), ("parent-refine", 8)):
     args = ",".join("_" for _ in range(arity))
     count = janus_swi.query_once(f"findall(1, clause('{name}'({args}), _), L), length(L, Count)")["Count"]
     assert count == 1, (name, count)
@@ -168,6 +168,7 @@ tool_names = {
     "lemma-bridge": ("proof", "obstruction", "workspace"),
     "hypothesis-formalize": ("proof", "hypothesis", "expected_revision", "workspace"),
     "hypothesis-revise": ("proof", "hypothesis", "spec", "previous_claim", "expected_revision", "workspace"),
+    "parent-refine": ("proof", "previous_declaration", "lemma", "budget", "expected_revision", "expected_theorem_hash", "workspace"),
 }
 native_skills = janus_swi.query_once("'getSkills'(Skills)")["Skills"]
 tools = providers.getTools(native_skills)
@@ -248,6 +249,9 @@ all_calls = {
     "hypothesis-formalize": {"proof": proof, "hypothesis": f"{proof}/hyp-" + "0" * 32, "expected_revision": "0"},
     "hypothesis-revise": {"proof": proof, "hypothesis": f"{proof}/hyp-" + "0" * 32,
         "spec": spec, "previous_claim": "", "expected_revision": "0"},
+    "parent-refine": {"proof": proof, "previous_declaration": f"{proof}/fd-1", "lemma": f"{proof}/c-2",
+        "budget": '{"max_steps":5,"wall_clock_ms":1000}', "expected_revision": "0",
+        "expected_theorem_hash": "sha256:" + "0" * 64},
 }
 for name, arguments in all_calls.items():
     arguments["workspace"] = "reference"
@@ -261,7 +265,7 @@ for name, arguments in all_calls.items():
     expression = f'!({name} ' + ' '.join(json.dumps(call.arguments[key]) for key in tool_names[name]) + ')'
     result = await_reply(execute(expression)[0], read=name == "proof-status", allow_error=True)
     assert not result.get("formal_verified"), result
-    if name in {"formal-search", "formal-resume", "lemma-bridge", "hypothesis-formalize", "hypothesis-revise"}:
+    if name in {"formal-search", "formal-resume", "lemma-bridge", "hypothesis-formalize", "hypothesis-revise", "parent-refine"}:
         assert result.get("error_code"), result
 
 # Run Omega's real recursive loop with a bounded test communication channel.

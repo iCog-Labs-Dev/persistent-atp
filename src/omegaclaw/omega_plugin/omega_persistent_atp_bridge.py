@@ -244,3 +244,7 @@ def hypothesis_formalize(proof, hypothesis, expected_revision, workspace):
 def hypothesis_revise(proof, hypothesis, spec, previous_claim, expected_revision, workspace):
     return _invoke("hypothesis-revise", workspace, proof=proof, hypothesis=hypothesis, spec=spec,
         previous_claim=previous_claim, expected_revision=expected_revision)
+
+def parent_refine(proof, previous_declaration, lemma, budget, expected_revision, expected_theorem_hash, workspace):
+    return _invoke('parent-refine', workspace, proof=proof, previous_declaration=previous_declaration,
+        lemma=lemma, budget=budget, expected_revision=expected_revision, expected_theorem_hash=expected_theorem_hash)

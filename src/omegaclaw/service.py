@@ -85,7 +85,7 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
-        self.formal = self.cycles = self.intake = self.research = None
+        self.formal = self.cycles = self.intake = self.research = self.refinement = None
         if formal_config is not None:
             self.formal = FormalWorkflow(self, formal_config)
             from .cycle_runtime import CycleWorkflow
@@ -95,6 +95,8 @@ class OperationService:
             from .research_runtime import ResearchWorkflow
             self.intake = IntakeWorkflow(self, intake_config)
             self.research = ResearchWorkflow(self, intake_config)
+            from .refinement_runtime import ParentRefinementWorkflow
+            self.refinement = ParentRefinementWorkflow(self)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:
@@ -109,12 +111,12 @@ class OperationService:
                 "proof-create", "proof-status", "proof-audit", "proof-export",
                 *({"proof-cycle"} if self.cycles is not None else set()),
                 *({"lemma-bridge"} if self.research is not None else set()),
-                *({"hypothesis-formalize", "hypothesis-revise"} if self.intake is not None else set())}:
+                *({"hypothesis-formalize", "hypothesis-revise", "parent-refine"} if self.intake is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
         with self.lock:
-            if request["operation"] == "proof-cycle":
+            if request["operation"] in {"proof-cycle", "parent-refine"}:
                 active = self.jobs.active_cycle(request["arguments"]["proof"], self.workspace,
                     excluding_request_id=request["request_id"])
                 if active:
@@ -144,7 +146,7 @@ class OperationService:
     def _run_admitted(self, request, operation_id):
         # These workflows own short locks around their durable stages. Their
         # provider calls must run without an enclosing service lock.
-        staged_workflow = (request["operation"] in {"hypothesis-formalize", "hypothesis-revise"}
+        staged_workflow = (request["operation"] in {"hypothesis-formalize", "hypothesis-revise", "parent-refine"}
             or request["operation"] == "lemma-bridge" and self.research is not None
             or request["operation"] == "proof-cycle" and self.cycles is not None)
         try:
@@ -186,6 +188,10 @@ class OperationService:
             if self.cycles is not None:
                 return self.cycles.run(operation_id, proof_id)
             return self._cycle(proof_id, operation_id)
+        if operation == 'parent-refine':
+            return self.refinement.run(operation_id, proof_id, args['previous_declaration'], args['lemma'],
+                self._parse_budget(args['budget']), expected_revision=int(args['expected_revision']),
+                expected_theorem_hash=args['expected_theorem_hash'])
         if operation == "proof-export":
             return self._export(proof_id, args["destination"])
         if operation in ("formal-search", "formal-resume"):

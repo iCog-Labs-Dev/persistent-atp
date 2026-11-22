@@ -21,7 +21,7 @@ from ..specification import parse_json, validate_spec
 
 READ_ONLY_KINDS = frozenset({'proof-status', 'proof-audit', 'proof-export'})
 MATHEMATICAL_KINDS = frozenset({'proof-cycle', 'formal-search', 'formal-resume', 'lemma-bridge',
-    'statement-align', 'hypothesis-formalize', 'hypothesis-revise'})
+    'statement-align', 'hypothesis-formalize', 'hypothesis-revise', 'parent-refine'})
 
 
 def _identity(*parts):
@@ -569,7 +569,8 @@ class TaskWorkflow:
                 "formal_verified", "operation_id", "projection_lag", "hypothesis_ids", "hypothesis_status",
                 "result_artifact", "packet_artifact", "error_code", "clarification_reasons", "required_work",
                 "cycle_disposition", "mathematical_disposition", "formalization_disposition", "replay_status",
-                "budget", 'summary', 'run_id', 'claim_id', 'execution_settled', 'execution_reconciliation') if key in value}
+                "budget", 'summary', 'run_id', 'claim_id', 'execution_settled', 'execution_reconciliation',
+                'lemma_use_audit_artifact', 'refinement_artifact', 'previous_declaration_id', 'declaration_id') if key in value}
             fields["rendering_incomplete"] = set(value) - set(fields) != set()
             for key, item in list(fields.items()):
                 if len(json.dumps(item, ensure_ascii=False).encode()) > 2048:

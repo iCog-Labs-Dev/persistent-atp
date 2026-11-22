@@ -195,7 +195,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         assert completed.returncode == 0, completed.stderr[-6000:] + completed.stdout[-6000:]
         result_line = next(line for line in completed.stdout.splitlines() if line.startswith("PROCESS_RESULT="))
         result = json.loads(result_line.split("=", 1)[1])
-        assert result["registered_skills"] == 11
+        assert result["registered_skills"] == 12
         assert result["actual_loop_verified"] and DeepSeekMockHandler.loop_verified
         assert result["zero_turn_task_acknowledged"]
         assert result["next_model_request_saw_digest"] is True
@@ -206,7 +206,7 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         assert result["deepseek_mock_roundtrip"] is True
         assert result["sdk_provider_roundtrip"] is sdk_enabled
         transport_rows = [row for row in DeepSeekMockHandler.requests if not row.get("loop")]
-        assert len(transport_rows) == (18 if result["sdk_provider_roundtrip"] else 17)
+        assert len(transport_rows) == (19 if result["sdk_provider_roundtrip"] else 18)
         first, second = (record["body"] for record in transport_rows[:2])
         for record in DeepSeekMockHandler.requests[:5]:
             assert record["auth"] == "Bearer mock-transport-only"

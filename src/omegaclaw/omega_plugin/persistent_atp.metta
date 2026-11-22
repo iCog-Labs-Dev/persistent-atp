@@ -17,6 +17,7 @@
 !(import_prolog_function lemma-bridge)
 !(import_prolog_function hypothesis-formalize)
 !(import_prolog_function hypothesis-revise)
+!(import_prolog_function parent-refine)
 !(import_prolog_function persistent-atp-collect-results)
 
 (= (loadOmegaPlugin)
@@ -41,6 +42,7 @@
             (add-skill lemma-bridge "Request speculative invention linked to the exact obstruction." (proof obstruction workspace))
             (add-skill hypothesis-formalize "Formalize one explicitly selected speculative hypothesis at the exact expected revision. Produces a provisional claim and statement review, not a verified lemma." (proof hypothesis expected_revision workspace))
             (add-skill hypothesis-revise "Explicitly refine a suggestion with complete theorem-spec JSON and an exact expected revision. previous_claim is the last provisional attempt ID, or empty if none exists. Creates a separate provisional claim; preserves all earlier attempts." (proof hypothesis spec previous_claim expected_revision workspace))
+            (add-skill parent-refine "Explicitly retry the literal parent after a settled unsuccessful search, using one independently verified lemma. Supply the previous declaration, lemma claim, bounded JSON budget and exact revision/theorem pins. Preserves earlier attempts; requires fresh alignment, replay and actual lemma use." (proof previous_declaration lemma budget expected_revision expected_theorem_hash workspace))
             (add-heartbeat-listener persistent_atp (|-> ($iter) (persistent-atp-collect-results $iter))))
          (progn
             (remove-skill proof-create)
@@ -54,6 +56,7 @@
             (remove-skill lemma-bridge)
             (remove-skill hypothesis-formalize)
             (remove-skill hypothesis-revise)
+            (remove-skill parent-refine)
             (py-call (omega_persistent_atp_bridge.disable))))
       ())))
 
@@ -89,3 +92,5 @@
    (py-call (omega_persistent_atp_bridge.hypothesis_formalize $proof $hypothesis $expected_revision $workspace)))
 (= (hypothesis-revise $proof $hypothesis $spec $previous_claim $expected_revision $workspace)
    (py-call (omega_persistent_atp_bridge.hypothesis_revise $proof $hypothesis $spec $previous_claim $expected_revision $workspace)))
+(= (parent-refine $proof $previous_declaration $lemma $budget $expected_revision $expected_theorem_hash $workspace)
+   (py-call (omega_persistent_atp_bridge.parent_refine $proof $previous_declaration $lemma $budget $expected_revision $expected_theorem_hash $workspace)))

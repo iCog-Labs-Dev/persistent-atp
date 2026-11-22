@@ -15,7 +15,7 @@ ARTIFACT_FIELDS = frozenset({"target_artifact", "literal_target_hash", "theorem_
     "checkpoint_artifact", "artifact_hash", "binding_artifact_hash",
     "provider_binding_artifact", "provider_result_artifact", "input_artifact_hash",
     "source_artifact_hash", "receipt_artifact", "attestation_artifact_hash",
-    "diagnostic_artifact", "revision_spec_artifact", "lemma_reuse_artifact"})
+    "diagnostic_artifact", "revision_spec_artifact", "lemma_reuse_artifact", "parent_refinement_artifact"})
 ARTIFACT_LIST_FIELDS = frozenset({"diagnostic_artifacts"})
 
 
