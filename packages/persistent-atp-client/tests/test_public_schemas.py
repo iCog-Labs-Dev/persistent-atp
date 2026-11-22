@@ -6,7 +6,7 @@ import jsonschema
 import pytest
 
 from persistent_atp_client import (
-    Admission, ArtifactRef, Budget, BudgetAmendment, CancelRequest,
+    Admission, ArtifactRef, Budget, BudgetAmendment, CancelRequest, SearchReconciliationRequest, SearchReconciliationJob,
     CapabilitySet, DecisionResponse, OperationRef, OperationSnapshot,
     ProjectDigest, CoordinationItem, CoordinationPage, schema_manifest, AsyncClient, Preconditions,
     QueueResearchMoves, ResearchGuidance,
@@ -41,6 +41,9 @@ def test_public_models_have_packaged_strict_schemas():
                          (CoordinationItem("node", "p1/c-1", "Claim", {}),), 1,
                          None, "reference-scripted"),
         CancelRequest("cancel-1", ref),
+        SearchReconciliationRequest("reconcile-1", ref, 2),
+        SearchReconciliationJob("reconcile-1", ref, "queued", 0),
+        SearchReconciliationJob("reconcile-1", ref, "blocked", 2, "REVIEW_REQUIRED", "Original search remains active"),
         BudgetAmendment("budget-1", ref, 0, Budget(2, 100)),
         DecisionResponse("decision-1", ref, "d1", 0, "keep", digest),
     )

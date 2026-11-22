@@ -120,7 +120,7 @@
       "properties": {
         "contract_version": {"enum": ["2.0", "2.1", "2.2"]},
         "actions": {"type": "array", "uniqueItems": true, "items": {"enum": ["proof-create", "proof-cycle", "proof-status", "proof-audit", "proof-export", "formal-search", "formal-resume", "statement-align", "lemma-bridge", "proof-cycle-selected", "queue-research-moves", "queue-coordinator-escalations", "hypothesis-formalize", "hypothesis-revise"]}},
-        "controls": {"type": "array", "uniqueItems": true, "items": {"enum": ["cancel", "amend-budget", "answer-decision", "coordination-read", "cycle-execution-revision", "atomic-coordinator-escalations"]}},
+        "controls": {"type": "array", "uniqueItems": true, "items": {"enum": ["cancel", "reconcile-search", "reconcile-search-jobs", "amend-budget", "answer-decision", "coordination-read", "cycle-execution-revision", "atomic-coordinator-escalations"]}},
         "backend_mode": {"enum": ["real", "scripted-test", "unavailable"]},
         "independent_replay": {"type": "boolean"},
         "receiver_mode": {"type": "string"}
@@ -156,6 +156,26 @@
       "required": ["request_id", "operation_ref", "expected_observation_version"],
       "properties": {"request_id": {"$ref": "#/$defs/id"}, "operation_ref": {"$ref": "#/$defs/OperationRef"},
         "expected_observation_version": {"$ref": "#/$defs/nullableNonnegative"}}
+    },
+    "SearchReconciliationRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "operation_ref", "expected_observation_version"],
+      "properties": {"request_id": {"$ref": "#/$defs/id"}, "operation_ref": {"$ref": "#/$defs/OperationRef"},
+        "expected_observation_version": {"$ref": "#/$defs/nonnegative"}}
+    },
+    "SearchReconciliationJob": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "operation_ref", "state", "version", "error_code", "summary"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/id"}, "operation_ref": {"$ref": "#/$defs/OperationRef"},
+        "state": {"enum": ["queued", "running", "succeeded", "blocked"]},
+        "version": {"$ref": "#/$defs/nonnegative"},
+        "error_code": {"$ref": "#/$defs/nullableId"},
+        "summary": {"type": ["string", "null"], "maxLength": 500}
+      },
+      "allOf": [{"if": {"properties": {"state": {"const": "blocked"}}},
+        "then": {"properties": {"error_code": {"$ref": "#/$defs/id"}}},
+        "else": {"properties": {"error_code": {"type": "null"}}}}]
     },
     "BudgetAmendment": {
       "type": "object", "additionalProperties": false,

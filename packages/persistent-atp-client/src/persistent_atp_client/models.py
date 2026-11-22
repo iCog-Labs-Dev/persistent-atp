@@ -600,6 +600,47 @@ class CancelRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchReconciliationRequest:
+    """Inspect a terminal unsettled search; never start, retry or replay it."""
+
+    request_id: str
+    operation_ref: OperationRef
+    expected_observation_version: int
+
+    def __post_init__(self):
+        _identifier(self.request_id, "request_id")
+        if not isinstance(self.operation_ref, OperationRef):
+            raise TypeError("operation_ref must be OperationRef")
+        if type(self.expected_observation_version) is not int or self.expected_observation_version < 0:
+            raise ValueError("expected_observation_version must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchReconciliationJob:
+    request_id: str
+    operation_ref: OperationRef
+    state: str
+    version: int
+    error_code: str | None = None
+    summary: str | None = None
+
+    def __post_init__(self):
+        _identifier(self.request_id, "request_id")
+        if not isinstance(self.operation_ref, OperationRef):
+            raise TypeError("operation_ref must be OperationRef")
+        if self.state not in {"queued", "running", "succeeded", "blocked"}:
+            raise ValueError("invalid reconciliation job state")
+        if type(self.version) is not int or self.version < 0:
+            raise ValueError("version must be nonnegative")
+        if self.error_code is not None:
+            _identifier(self.error_code, "error_code")
+        if (self.state == "blocked") != (self.error_code is not None):
+            raise ValueError("only blocked jobs carry an error code")
+        if self.summary is not None and (not isinstance(self.summary, str) or len(self.summary) > 500):
+            raise ValueError("summary must be bounded text")
+
+
+@dataclass(frozen=True, slots=True)
 class BudgetAmendment:
     request_id: str
     operation_ref: OperationRef

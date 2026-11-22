@@ -16,10 +16,11 @@ from .errors import (
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
     ReceiverProtocolError,
     StalePrecondition,
+    ReviewRequired,
 )
 from .models import (
     ACTION_TYPES, COORDINATION_ACTION_TYPES, COORDINATOR_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
-    CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
+    CancelRequest, SearchReconciliationRequest, SearchReconciliationJob, DecisionResponse, Event, FormalResume, FormalSearch,
     LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
@@ -324,6 +325,7 @@ class OperationHandle:
         self.ref = ref
         self._request_id = request_id
         self._last_version = -1
+        self._reconciliation_versions = {}
 
     async def snapshot(self) -> OperationSnapshot:
         result = await self._client._port.get_operation(self.ref)
@@ -403,6 +405,93 @@ class OperationHandle:
             raise ValueError("control operation mismatch")
         return await self._client._port.cancel(request)
 
+    async def reconcile_search(self, request: SearchReconciliationRequest, *, wait: bool = True,
+                               timeout: float = 60, poll_interval: float = 0.1):
+        if not isinstance(request, SearchReconciliationRequest) or request.operation_ref != self.ref:
+            raise ValueError("control operation mismatch")
+        if type(wait) is not bool:
+            raise TypeError("wait must be boolean")
+        _duration(timeout, "timeout")
+        _duration(poll_interval, "poll_interval")
+        end = time.monotonic() + timeout
+        try:
+            caps = await self._reconciliation_capabilities(end)
+            if "reconcile-search" not in caps.controls:
+                raise UnsupportedCapability("receiver cannot reconcile original searches")
+            result = await _before(self._client._port.reconcile_search(request), end)
+            if isinstance(result, SearchReconciliationJob):
+                if 'reconcile-search-jobs' not in caps.controls:
+                    raise ReceiverProtocolError('receiver did not advertise reconciliation jobs')
+                self._check_reconciliation_job(result, request.request_id, -1)
+                if not wait:
+                    return result
+                return await self._wait_search_reconciliation(request.request_id, end, poll_interval, result)
+            return self._check_reconciled_snapshot(_response(result, OperationSnapshot))
+        except TimeoutError as exc:
+            raise ObservationTimeout(request_id=request.request_id, operation_ref=self.ref) from exc
+
+    def _check_reconciled_snapshot(self, snapshot):
+        if snapshot.ref != self.ref or self._request_id is not None and snapshot.request_id != self._request_id:
+            raise ReceiverProtocolError("search reconciliation operation identity mismatch")
+        if snapshot.observation_version < self._last_version:
+            raise ReceiverProtocolError("receiver observation version regressed")
+        self._last_version = snapshot.observation_version
+        return snapshot
+
+    def _check_reconciliation_job(self, job, request_id, version):
+        _response(job, SearchReconciliationJob)
+        version = max(version, self._reconciliation_versions.get(request_id, -1))
+        if job.operation_ref != self.ref or job.request_id != request_id or job.version < version:
+            raise ReceiverProtocolError('reconciliation job identity or version changed')
+        self._reconciliation_versions[request_id] = job.version
+
+    async def _reconciliation_capabilities(self, end):
+        probe = getattr(self._client._port, 'reconciliation_capabilities', None)
+        caps = _response(await _before(probe() if probe else self._client.capabilities(), end), CapabilitySet)
+        if caps.contract_version != '2.0':
+            raise UnsupportedContract('reconciliation requires contract 2.0 capability negotiation')
+        return caps
+
+    async def wait_search_reconciliation(self, request_id: str, *, timeout: float = 60, poll_interval: float = 0.1):
+        # Validates the control identity without admitting or refreshing it.
+        SearchReconciliationRequest(request_id, self.ref, 0)
+        _duration(timeout, 'timeout')
+        _duration(poll_interval, 'poll_interval')
+        try:
+            end = time.monotonic() + timeout
+            caps = await self._reconciliation_capabilities(end)
+            if 'reconcile-search-jobs' not in caps.controls:
+                raise UnsupportedCapability('receiver does not advertise reconciliation jobs')
+            return await self._wait_search_reconciliation(request_id, end, poll_interval)
+        except TimeoutError as exc:
+            raise ObservationTimeout(request_id=request_id, operation_ref=self.ref) from exc
+
+    async def _wait_search_reconciliation(self, request_id, end, interval, job=None):
+        version = -1
+        while True:
+            if time.monotonic() >= end:
+                raise ObservationTimeout(request_id=request_id, operation_ref=self.ref)
+            if job is None:
+                reader = getattr(self._client._port, 'read_search_reconciliation', None)
+                if reader is None:
+                    raise ReceiverProtocolError('receiver advertised reconciliation jobs without a reader')
+                job = await _before(reader(
+                    workspace_id=self.ref.workspace_id, request_id=request_id), end)
+            self._check_reconciliation_job(job, request_id, version)
+            version = job.version
+            if job.state == 'blocked':
+                raise ReviewRequired(job.summary or job.error_code, request_id=request_id, operation_ref=self.ref)
+            if job.state == 'succeeded':
+                snapshot = await _before(self.snapshot(), end)
+                receipt = (snapshot.result or {}).get('execution_reconciliation')
+                if (not isinstance(receipt, dict) or receipt.get('execution_settled') is not True
+                        or receipt.get('operation_ref') != self.ref.to_dict()
+                        or receipt.get('request_id') != snapshot.request_id):
+                    raise ReceiverProtocolError('completed reconciliation lacks its original operation receipt')
+                return snapshot
+            await asyncio.sleep(min(interval, max(0, end - time.monotonic())))
+            job = None
+
     async def amend_budget(self, request: BudgetAmendment):
         if request.operation_ref != self.ref:
             raise ValueError("control operation mismatch")
@@ -472,6 +561,12 @@ class SyncClient:
 
     def cancel(self, control):
         return self._run(self.attach(control.operation_ref).cancel(control))
+
+    def reconcile_search(self, control, **kwargs):
+        return self._run(self.attach(control.operation_ref).reconcile_search(control, **kwargs))
+
+    def wait_search_reconciliation(self, ref, request_id, **kwargs):
+        return self._run(self.attach(ref).wait_search_reconciliation(request_id, **kwargs))
 
     def amend_budget(self, control):
         return self._run(self.attach(control.operation_ref).amend_budget(control))
