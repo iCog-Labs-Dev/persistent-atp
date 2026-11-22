@@ -14,7 +14,7 @@ from omegaclaw.api import serve
 from omegaclaw.export import check_export
 from omegaclaw.frameworks.omega import OmegaAdapter
 from omegaclaw.receiver import ReferenceReceiver
-from omegaclaw.tests.test_formal_v2_receiver import provider
+from omegaclaw.tests.test_formal_v2_receiver import provider, checked_receiver
 from omegaclaw.tests.test_hypothesis_recovery import hypothesis, HypothesisCase
 from omegaclaw.tests.test_production_intake import CANDIDATE, REVIEW, SPEC
 from omegaclaw.tests.test_research_runtime import candidate
@@ -138,7 +138,7 @@ def test_revision_preserves_refusal_and_can_reach_independent_replay(hypothesis,
     # Exercise real independent Lean replay of the explicitly scripted True
     # search fixture; this is not a trained-provider acceptance claim.
     case.service.formal.config = replace(case.service.formal.config, mode='real')
-    receiver = ReferenceReceiver(case.service)
+    receiver = checked_receiver(case.service)
     async def scenario():
         client = AsyncClient(LocalReceiverAdapter(receiver))
         handle = await client.formal_search(case.proof, corrected['claim_id'], Budget(5, 1000), workspace_id='reference')

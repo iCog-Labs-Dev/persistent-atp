@@ -1,5 +1,6 @@
 """Real reference gate path through the independent typed client package."""
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,64 @@ from persistent_atp_client.errors import ArtifactUnavailable, IdempotencyConflic
 from omegaclaw.receiver import ReferenceReceiver
 from omegaclaw.service import OperationService
 from omegaclaw.api import serve
+
+
+def test_deadline_is_rechecked_after_validation_before_new_admission(tmp_path, monkeypatch):
+    import omegaclaw.receiver as module
+    instant = [datetime.now(timezone.utc)]
+    class Clock:
+        @staticmethod
+        def now(zone): return instant[0]
+    monkeypatch.setattr(module, "datetime", Clock)
+    async def scenario():
+        service = OperationService(tmp_path)
+        receiver = ReferenceReceiver(service)
+        client = AsyncClient(LocalReceiverAdapter(receiver))
+        try:
+            artifact = await client.put_artifact(json.dumps({"proof_id": "deadline-proof", "title": "True",
+                "literal_target": "True"}).encode(), workspace_id="reference", media_type="application/json")
+            request = client.prepare(ProofCreate(artifact), workspace_id="reference",
+                request_id="expires-during-validation", deadline=instant[0] + timedelta(seconds=1))
+            original = receiver._artifact
+            def delayed_artifact(ref):
+                instant[0] = request.deadline + timedelta(seconds=1)
+                return original(ref)
+            monkeypatch.setattr(receiver, "_artifact", delayed_artifact)
+            with pytest.raises(StalePrecondition):
+                await receiver.submit(request)
+            assert receiver._db.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+            assert receiver._db.execute("SELECT count(*) FROM events").fetchone()[0] == 0
+            assert service.store.head("deadline-proof")[0] == 0
+        finally:
+            receiver.close()
+            await client.aclose()
+    asyncio.run(scenario())
+
+
+def test_expired_retry_recovers_original_admission(tmp_path, monkeypatch):
+    import omegaclaw.receiver as module
+    instant = [datetime.now(timezone.utc)]
+    class Clock:
+        @staticmethod
+        def now(zone): return instant[0]
+    monkeypatch.setattr(module, "datetime", Clock)
+    async def scenario():
+        service = OperationService(tmp_path)
+        receiver = ReferenceReceiver(service)
+        client = AsyncClient(LocalReceiverAdapter(receiver))
+        try:
+            artifact = await client.put_artifact(json.dumps({"proof_id": "already-admitted", "title": "True",
+                "literal_target": "True"}).encode(), workspace_id="reference", media_type="application/json")
+            request = client.prepare(ProofCreate(artifact), workspace_id="reference",
+                request_id="same-deadline", deadline=instant[0] + timedelta(seconds=10))
+            original = await receiver.submit(request)
+            instant[0] = request.deadline + timedelta(seconds=1)
+            assert await receiver.submit(request) == original
+            assert receiver._db.execute("SELECT count(*) FROM requests").fetchone()[0] == 1
+        finally:
+            receiver.close()
+            await client.aclose()
+    asyncio.run(scenario())
 
 
 def test_reference_receiver_durable_admission_gate_and_restart(tmp_path):

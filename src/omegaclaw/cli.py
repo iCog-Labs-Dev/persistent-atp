@@ -188,6 +188,13 @@ def main(argv=None) -> int:
     upload = sub.add_parser("artifact-put", help="trusted local upload of exact project input bytes")
     upload.add_argument("--config", required=True)
     upload.add_argument("--file", required=True)
+    reconcile = sub.add_parser("reconcile-search", help="inspect an unsettled original search without retry or replay")
+    reconcile.add_argument("--config", required=True)
+    reconcile.add_argument("--operation-id", required=True)
+    reconcile.add_argument("--expected-observation-version", required=True, type=int)
+    reconcile.add_argument("--request-id", required=True, help="stable control identity retained across transport retries")
+    reconcile.add_argument("--no-wait", action="store_true", help="enqueue or reattach and return the durable job immediately")
+    reconcile.add_argument("--timeout", type=float, default=60, help="maximum client observation time in seconds")
     smoke = sub.add_parser("smoke")
     smoke.add_argument("--profile", default="reference")
     smoke.add_argument("--output", required=True)
@@ -210,6 +217,29 @@ def main(argv=None) -> int:
             server.server_close()
             receiver.close()
             service.close()
+        return 0
+    if args.command == "reconcile-search":
+        from persistent_atp_client import AsyncClient, SearchReconciliationRequest, OperationRef
+        from persistent_atp_client.adapters.http import HTTPReceiverAdapter
+        from persistent_atp_client.codecs import to_dict
+        from persistent_atp_client.errors import ClientError
+        config, _ = load_config(args.config)
+        token = os.environ.get(config["token_env"], "")
+        async def reconcile_original():
+            # Use the live receiver; opening another service could dispatch
+            # queued work and would bypass the host's connection locks.
+            port = HTTPReceiverAdapter(f"http://{config['host']}:{int(config['port'])}", token, timeout=60)
+            async with AsyncClient(port) as client:
+                ref = OperationRef(config["workspace"], args.operation_id)
+                return await client.attach(ref).reconcile_search(SearchReconciliationRequest(
+                    args.request_id, ref, args.expected_observation_version), wait=not args.no_wait, timeout=args.timeout)
+        try:
+            result = asyncio.run(reconcile_original())
+        except ClientError as exc:
+            print(json.dumps({"error_code": exc.code, "reconciled": False, "request_id": args.request_id,
+                "operation_id": args.operation_id, "job_may_continue": exc.code in {'OBSERVATION_TIMEOUT', 'TRANSIENT_UNAVAILABLE'}}))
+            return 1
+        print(json.dumps(to_dict(result), sort_keys=True))
         return 0
     if args.command == "artifact-put":
         config, root = load_config(args.config)

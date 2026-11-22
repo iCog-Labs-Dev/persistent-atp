@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,10 +20,11 @@ from persistent_atp_client.codecs import canonical_json, fingerprint, request_fr
 from persistent_atp_client.errors import (
     ArtifactUnavailable, HashMismatch, Forbidden, IdempotencyConflict, StalePrecondition,
     UnsupportedCapability,
+    ReviewRequired, QuotaExceeded, TransientUnavailable,
 )
 from persistent_atp_client.models import (
     action_types_for_contract, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
-    CancelRequest, CapabilitySet, DecisionResponse, Event, FormalResume,
+    CancelRequest, SearchReconciliationRequest, SearchReconciliationJob, CapabilitySet, DecisionResponse, Event, FormalResume,
     FormalSearch, HypothesisFormalize, HypothesisRevise, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, ProofStatus, ProjectDigest,
     StatementAlign, TERMINAL_LIFECYCLES, SelectedProofCycle, QueueResearchMoves,
@@ -32,6 +34,9 @@ from mathproof.scheduler import GlobalScheduler
 from artifacts.errors import ArtifactIntegrityError
 
 from .service import OperationService
+
+MAX_RECONCILIATION_JOBS = 32
+READINESS_TTL_SECONDS = 5
 
 
 class ReferenceReceiver:
@@ -44,6 +49,7 @@ class ReferenceReceiver:
         self.principal = principal
         self.workspace_id = service.workspace
         self._lock = threading.RLock()
+        self._reconcile_locks = {}
         # JournalStore has one SQLite connection. Serialize receiver reads with
         # worker commits so an HTTP poll cannot inspect a transaction in flight.
         self._service_lock = service.lock
@@ -73,13 +79,56 @@ class ReferenceReceiver:
                 request_id TEXT NOT NULL, body BLOB NOT NULL,
                 PRIMARY KEY(principal, workspace_id, request_id)
             );
+            CREATE TABLE IF NOT EXISTS search_reconciliations (
+                operation_id TEXT PRIMARY KEY REFERENCES requests(operation_id),
+                request_fingerprint TEXT NOT NULL, receipt_artifact TEXT NOT NULL,
+                summary TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reconciliation_jobs (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                principal TEXT NOT NULL, workspace_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL, body BLOB NOT NULL,
+                state TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0, error_code TEXT, summary TEXT,
+                deadline REAL NOT NULL,
+                UNIQUE(principal, workspace_id, request_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS active_reconciliation_job
+                ON reconciliation_jobs(operation_id) WHERE state IN ('queued','running');
         """)
+        columns = {row['name'] for row in self._db.execute('PRAGMA table_info(reconciliation_jobs)')}
+        if 'deadline' not in columns:
+            self._db.execute('ALTER TABLE reconciliation_jobs ADD COLUMN deadline REAL NOT NULL DEFAULT 0')
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atp-reference-receiver")
+        self._reconciliation_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="atp-reconciliation")
+        self._readiness_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='atp-readiness')
+        self._readiness_clock = time.monotonic
+        self._readiness_record = None
+        self._readiness_pending = None
+        self._closing = False
+        self._reconciliation_pending = set()
         self._pending = set()
         with self._lock:
             rows = self._db.execute("SELECT operation_id FROM requests WHERE lifecycle IN ('queued','running','cancelling')").fetchall()
         for row in rows:
             self._schedule(row["operation_id"])
+        with self._lock:
+            # A crash after the receipt transaction needs no more provider I/O,
+            # even if the observation deadline or restart allowance elapsed.
+            self._db.execute("UPDATE reconciliation_jobs SET state='succeeded', version=version+1, error_code=NULL, summary=NULL "
+                "WHERE principal=? AND workspace_id=? AND state IN ('queued','running') AND operation_id IN "
+                "(SELECT operation_id FROM search_reconciliations)", (self.principal, self.workspace_id))
+            self._db.execute("UPDATE reconciliation_jobs SET state='blocked', version=version+1, error_code='REVIEW_REQUIRED', "
+                "summary='Reconciliation restart allowance exhausted; review a new control.' "
+                "WHERE principal=? AND workspace_id=? AND state IN ('queued','running') AND attempts>=3",
+                (self.principal, self.workspace_id))
+            self._db.execute("UPDATE reconciliation_jobs SET state='queued', version=version+1 "
+                "WHERE principal=? AND workspace_id=? AND state='running'", (self.principal, self.workspace_id))
+            jobs = self._db.execute("SELECT request_id FROM reconciliation_jobs WHERE principal=? AND workspace_id=? AND state='queued'",
+                (self.principal, self.workspace_id)).fetchall()
+        for job in jobs:
+            self._schedule_reconciliation(job['request_id'])
+        self._formal_readiness()
 
     def _artifact(self, address):
         try:
@@ -100,31 +149,82 @@ class ReferenceReceiver:
         self._db.execute("INSERT INTO events(event_id,operation_id,event_type,observation_version) VALUES (?,?,?,?)",
                          (uuid.uuid4().hex, operation_id, event_type, version))
 
+    def _readiness_key(self):
+        provider = self.service.formal
+        return provider, getattr(provider, 'config', None)
+
+    def _formal_readiness(self):
+        """Return True/False for fresh observations, None while unknown/stale.
+
+        Only a worker may contact the provider. Cache data is operational,
+        expires conservatively and is discarded on provider/config changes.
+        """
+        key = self._readiness_key()
+        if key[0] is None:
+            return False
+        with self._lock:
+            record = self._readiness_record
+            if (record is not None and record['key'] == key
+                    and self._readiness_clock() - record['checked_at'] < READINESS_TTL_SECONDS):
+                return record['available']
+            if self._readiness_pending is None and not self._closing:
+                self._readiness_pending = key
+                self._readiness_executor.submit(self._check_readiness, key)
+            return None
+
+    def _check_readiness(self, key):
+        try:
+            try:
+                available = key[0].ready() is True
+            except Exception:
+                available = False
+            with self._lock:
+                if not self._closing and self._readiness_key() == key:
+                    self._readiness_record = {'key': key, 'available': available,
+                        'checked_at': self._readiness_clock()}
+        finally:
+            with self._lock:
+                self._readiness_pending = None
+                changed = not self._closing and self._readiness_key() != key
+            if changed:
+                self._formal_readiness()
+
     async def capabilities(self, contract_version: str = "2.0") -> CapabilitySet:
         if contract_version not in {"2.0", "2.1", "2.2"}:
             raise UnsupportedCapability("unsupported contract version")
         actions = action_types_for_contract(contract_version)
-        available = self.service.formal is not None and self.service.formal.ready()
+        readiness = self._formal_readiness()
+        available = readiness is True
+        # Pending readiness keeps configured actions discoverable so admission
+        # can defer with a retryable error rather than reject the user's intent.
+        supports_formal = self.service.formal is not None and readiness is not False
         if self.service.profile == "production":
             actions = {kind: value for kind, value in actions.items() if kind in {
                 "proof-create", "proof-status", "proof-audit", "proof-export",
-                *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if available else set()),
+                *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if supports_formal else set()),
                 *({'lemma-bridge'} if self.service.research is not None else set()),
                 *({'hypothesis-formalize', 'hypothesis-revise'} if self.service.intake is not None else set())}}
         elif self.service.formal is not None:
             actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
-                       and (kind != 'formal-search' or available)}
+                       and (kind != 'formal-search' or supports_formal)}
         if self.service.intake is None:
             actions.pop('hypothesis-formalize', None)
             actions.pop('hypothesis-revise', None)
         controls = {'coordination-read'} if contract_version == '2.1' else set()
-        if available:
+        if self.service.formal is not None:
             controls.add('cancel')
+        if self.service.formal is not None:
+            controls.update({'reconcile-search', 'reconcile-search-jobs'})
         return CapabilitySet(contract_version, frozenset(actions),
                              controls=frozenset(controls),
                              backend_mode=self.service.formal.config.mode if available else 'unavailable',
                              independent_replay=bool(available and self.service.formal.config.mode == 'real'),
                              receiver_mode=self.service.receiver_mode)
+
+    async def reconciliation_capabilities(self):
+        """Configuration-only negotiation; recovery must not probe a slow provider."""
+        controls = {'reconcile-search', 'reconcile-search-jobs'} if self.service.formal is not None else set()
+        return CapabilitySet('2.0', frozenset(), frozenset(controls), receiver_mode=self.service.receiver_mode)
 
     async def submit(self, request: ActionRequest) -> Admission:
         if not isinstance(request, ActionRequest):
@@ -146,6 +246,10 @@ class ReferenceReceiver:
         capabilities = await self.capabilities(request.contract_version)
         if request.action.kind not in capabilities.actions:
             raise UnsupportedCapability("action is unavailable under this contract version")
+        formal_action = isinstance(request.action, FormalSearch) or (
+            self.service.cycles is not None and isinstance(request.action, (ProofCycle, SelectedProofCycle)))
+        if formal_action and self.service.formal is not None and self._formal_readiness() is not True:
+            raise TransientUnavailable('formal provider readiness is pending; retry the original request')
         if isinstance(request.action, QueueResearchMoves) and request.preconditions.expected_revision is None:
             raise ValueError("guidance requires an expected proof revision")
         if request.deadline is not None and request.deadline <= datetime.now(timezone.utc):
@@ -198,6 +302,13 @@ class ReferenceReceiver:
                 row = self._db.execute("SELECT * FROM requests WHERE principal=? AND workspace_id=? AND request_id=?",
                                        (self.principal, self.workspace_id, request.request_id)).fetchone()
                 if row is None:
+                    if formal_action and self.service.formal is not None and self._formal_readiness() is not True:
+                        raise TransientUnavailable('formal provider readiness changed before admission')
+                    # Artifact validation and lock acquisition may cross the
+                    # deadline. Linearize new admission only after rechecking;
+                    # an existing admission remains recoverable after expiry.
+                    if request.deadline is not None and request.deadline <= datetime.now(timezone.utc):
+                        raise StalePrecondition("request deadline elapsed during admission", request_id=request.request_id)
                     operation_id = uuid.uuid4().hex
                     self._db.execute("INSERT INTO requests VALUES (?,?,?,?,?,?,?, ?,?)",
                                      (self.principal, self.workspace_id, request.request_id, digest, body,
@@ -297,7 +408,7 @@ class ReferenceReceiver:
                 or outcome.get('transport_status') == 'error' else 'succeeded')
         except Exception as exc:
             lifecycle = 'failed'
-            outcome = {'error_code': getattr(exc, 'code', type(exc).__name__),
+            outcome = {'error_code': getattr(exc, 'code', None) or type(exc).__name__,
                 'summary': getattr(exc, 'public_summary',
                     'Operation requires reconciliation; no mathematical outcome is inferred.')}
             if job is not None:
@@ -343,6 +454,15 @@ class ReferenceReceiver:
     def _finish(self, operation_id, lifecycle, version, outcome):
         with self._lock:
             owner = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (operation_id,)).fetchone()
+        request = request_from_json(owner['body'])
+        code = (outcome or {}).get('error_code') or ''
+        read_only = isinstance(request.action, (ProofStatus, ProofAudit, ProofExport))
+        unsettled = isinstance(code, str) and code.endswith('RECONCILIATION_REQUIRED')
+        # This describes executor settlement, never mathematical truth. A
+        # provider failure can leave remote search/replay activity unresolved.
+        settled = (True if read_only or lifecycle in {'succeeded', 'cancelled'} and not unsettled
+                   else None if lifecycle in TERMINAL_LIFECYCLES else False)
+        outcome = {**outcome, 'execution_settled': settled}
         pointers = []
         if isinstance(outcome, dict):
             pointers = list(outcome.get("artifact_pointers", ()))
@@ -441,10 +561,18 @@ class ReferenceReceiver:
         with self._lock:
             row = self._db.execute("SELECT * FROM requests WHERE principal=? AND workspace_id=? AND operation_id=?",
                                    (self.principal, ref.workspace_id, ref.operation_id)).fetchone()
+            resolution = self._db.execute('SELECT * FROM search_reconciliations WHERE operation_id=?',
+                (ref.operation_id,)).fetchone()
         if row is None:
             raise KeyError("operation not found")
         request = request_from_json(row["body"])
         outcome = json.loads(row["result"]) if row["result"] else None
+        if resolution:
+            if resolution['request_fingerprint'] != row['fingerprint']:
+                raise ValueError('reconciliation differs from original receiver request')
+            # Original result/lifecycle remain immutable. This separate receipt
+            # changes only the operational observation version, never proof truth.
+            outcome = {**(outcome or {}), 'execution_reconciliation': json.loads(resolution['summary'])}
         if row['lifecycle'] in TERMINAL_LIFECYCLES and outcome is not None:
             # Repair missing grants for already completed operations from an
             # older receiver without changing their observation or proof revision.
@@ -614,6 +742,220 @@ class ReferenceReceiver:
                     raise
         return await self.get_operation(ref)
 
+    @staticmethod
+    def _search_reconciliation_action(row):
+        """Eligibility describes uncertainty, independently of success/failure."""
+        action = request_from_json(row['body']).action
+        if row['lifecycle'] not in TERMINAL_LIFECYCLES or not isinstance(action, (FormalSearch, ProofCycle, SelectedProofCycle)):
+            raise UnsupportedCapability('only terminal receiver-owned formal searches can be reconciled')
+        result = json.loads(row['result']) if row['result'] else {}
+        code = result.get('error_code') or ''
+        if (row['lifecycle'] != 'failed' and result.get('execution_settled') is True
+                and not (isinstance(code, str) and code.endswith('RECONCILIATION_REQUIRED'))):
+            raise UnsupportedCapability('formal search execution is already settled')
+        return action
+
+    async def reconcile_search(self, control: SearchReconciliationRequest):
+        """Durably admit one observation job; never wait on provider I/O here."""
+        if not isinstance(control, SearchReconciliationRequest):
+            raise TypeError('typed search reconciliation control is required')
+        self._scope(control.operation_ref.workspace_id)
+        if self.service.formal is None:
+            raise UnsupportedCapability('formal search reconciliation is unavailable')
+        body = canonical_json({'kind': 'reconcile-search', 'request': control})
+        with self._lock:
+            previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
+                (self.principal, self.workspace_id, control.request_id)).fetchone()
+            if previous and previous['body'] != body:
+                raise IdempotencyConflict('control identity was reused with another body')
+            job = self._job_row(control.request_id)
+            if job:
+                return self._job_snapshot(job)
+            row = self._db.execute('SELECT * FROM requests WHERE principal=? AND workspace_id=? AND operation_id=?',
+                (self.principal, self.workspace_id, control.operation_ref.operation_id)).fetchone()
+            if row is None:
+                raise KeyError('operation not found')
+            if not previous and row['observation_version'] != control.expected_observation_version:
+                raise StalePrecondition('operation changed before reconciliation')
+            self._search_reconciliation_action(row)
+            resolved = self._db.execute('SELECT 1 FROM search_reconciliations WHERE operation_id=?', (row['operation_id'],)).fetchone()
+        if not resolved:
+            with self._service_lock:
+                original = self.service.jobs.conn.execute('SELECT phase FROM operations WHERE request_id=? AND workspace=?',
+                    (row['request_id'], self.workspace_id)).fetchone()
+            if original is None or original['phase'] not in {'failed', 'finished'}:
+                raise UnsupportedCapability('original terminal formal job is unavailable')
+        with self._lock:
+            # Recheck after crossing the service lock: concurrent admission may
+            # have reserved this control or the same operation in the meantime.
+            job = self._job_row(control.request_id)
+            if job:
+                if job['body'] != body:
+                    raise IdempotencyConflict('control identity was reused with another body')
+                return self._job_snapshot(job)
+            previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
+                (self.principal, self.workspace_id, control.request_id)).fetchone()
+            if previous and previous['body'] != body:
+                raise IdempotencyConflict('control identity was reused with another body')
+            current = self._db.execute('SELECT observation_version FROM requests WHERE operation_id=?', (row['operation_id'],)).fetchone()
+            if not previous and current['observation_version'] != control.expected_observation_version:
+                raise StalePrecondition('operation changed before reconciliation admission')
+            resolved = self._db.execute('SELECT 1 FROM search_reconciliations WHERE operation_id=?', (row['operation_id'],)).fetchone()
+            if self._db.execute("SELECT 1 FROM reconciliation_jobs WHERE operation_id=? AND state IN ('queued','running')",
+                    (row['operation_id'],)).fetchone():
+                raise ReviewRequired('another reconciliation job already owns this operation')
+            count = self._db.execute("SELECT COUNT(*) FROM reconciliation_jobs WHERE state IN ('queued','running')").fetchone()[0]
+            if not resolved and count >= MAX_RECONCILIATION_JOBS:
+                raise QuotaExceeded('reconciliation queue is full')
+            self._db.execute('BEGIN IMMEDIATE')
+            try:
+                if not previous:
+                    self._db.execute('INSERT INTO controls VALUES (?,?,?,?)',
+                        (self.principal, self.workspace_id, control.request_id, body))
+                self._db.execute('INSERT INTO reconciliation_jobs(principal,workspace_id,request_id,operation_id,body,state,deadline) VALUES (?,?,?,?,?,?,?)',
+                    (self.principal, self.workspace_id, control.request_id, row['operation_id'], body,
+                     'succeeded' if resolved else 'queued', time.time() + 120))
+                self._db.execute('COMMIT')
+            except BaseException:
+                self._db.execute('ROLLBACK')
+                raise
+            job = self._job_snapshot(self._job_row(control.request_id))
+        if job.state == 'queued':
+            self._schedule_reconciliation(control.request_id)
+        return job
+
+    def _job_row(self, request_id):
+        return self._db.execute('SELECT * FROM reconciliation_jobs WHERE principal=? AND workspace_id=? AND request_id=?',
+            (self.principal, self.workspace_id, request_id)).fetchone()
+
+    @staticmethod
+    def _job_snapshot(row):
+        return SearchReconciliationJob(row['request_id'], OperationRef(row['workspace_id'], row['operation_id']),
+            row['state'], row['version'], row['error_code'], row['summary'])
+
+    async def read_search_reconciliation(self, *, workspace_id, request_id):
+        self._scope(workspace_id)
+        with self._lock:
+            row = self._job_row(request_id)
+        if row is None:
+            raise KeyError('reconciliation job not found')
+        return self._job_snapshot(row)
+
+    def _schedule_reconciliation(self, request_id):
+        with self._lock:
+            if request_id in self._reconciliation_pending:
+                return
+            self._reconciliation_pending.add(request_id)
+        def run():
+            try:
+                self._run_reconciliation(request_id)
+            finally:
+                with self._lock:
+                    self._reconciliation_pending.discard(request_id)
+        try:
+            self._reconciliation_executor.submit(run)
+        except BaseException:
+            with self._lock:
+                self._reconciliation_pending.discard(request_id)
+            raise
+
+    def _run_reconciliation(self, request_id):
+        with self._lock:
+            row = self._job_row(request_id)
+            if row is None or row['state'] != 'queued':
+                return
+            self._db.execute("UPDATE reconciliation_jobs SET state='running', version=version+1, attempts=attempts+1 "
+                "WHERE sequence=?", (row['sequence'],))
+        try:
+            raw = json.loads(row['body'])['request']
+            control = SearchReconciliationRequest(raw['request_id'], OperationRef(**raw['operation_ref']), raw['expected_observation_version'])
+            if time.time() >= row['deadline']:
+                raise ReviewRequired('Reconciliation observation deadline elapsed; review a new control.')
+            self._reconcile_search(control, deadline=row['deadline'])
+        except Exception as exc:
+            error = 'REVIEW_REQUIRED'
+            summary = str(exc)[:500] if isinstance(exc, ReviewRequired) else 'Search reconciliation failed; review the original control and provider binding.'
+            state = 'blocked'
+        else:
+            state, error, summary = 'succeeded', None, None
+        with self._lock:
+            self._db.execute('UPDATE reconciliation_jobs SET state=?, version=version+1, error_code=?, summary=? WHERE sequence=?',
+                (state, error, summary, row['sequence']))
+
+    def _reconcile_search(self, control, *, deadline):
+        """Worker-only observation and gate admission for the original search."""
+        if not isinstance(control, SearchReconciliationRequest):
+            raise TypeError('typed search reconciliation control is required')
+        self._scope(control.operation_ref.workspace_id)
+        if self.service.formal is None:
+            raise UnsupportedCapability('formal search reconciliation is unavailable')
+        with self._lock:
+            lock = self._reconcile_locks.setdefault(control.operation_ref.operation_id, threading.Lock())
+        with lock:
+            body = canonical_json({'kind': 'reconcile-search', 'request': control})
+            with self._lock:
+                row = self._db.execute('SELECT * FROM requests WHERE operation_id=?',
+                    (control.operation_ref.operation_id,)).fetchone()
+                previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
+                    (self.principal, self.workspace_id, control.request_id)).fetchone()
+                if previous and previous['body'] != body:
+                    raise IdempotencyConflict('control identity was reused with another body')
+                resolved = self._db.execute('SELECT 1 FROM search_reconciliations WHERE operation_id=?',
+                    (row['operation_id'],)).fetchone()
+                if not previous and row['observation_version'] != control.expected_observation_version:
+                    raise StalePrecondition('operation changed before reconciliation')
+                if resolved and not previous:
+                    self._db.execute('INSERT INTO controls VALUES (?,?,?,?)',
+                        (self.principal, self.workspace_id, control.request_id, body))
+            if resolved:
+                return
+            request = request_from_json(row['body'])
+            self._search_reconciliation_action(row)
+            with self._service_lock:
+                job = self.service.jobs.conn.execute('SELECT operation_id, phase FROM operations WHERE request_id=? AND workspace=?',
+                    (row['request_id'], self.workspace_id)).fetchone()
+            if job is None or job['phase'] not in {'failed', 'finished'}:
+                raise UnsupportedCapability('original terminal formal job is unavailable')
+            with self._lock:
+                # Reserve the identity before provider observation or a gate
+                # commit. A crash/retry retains it; no new work is authorized.
+                previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
+                    (self.principal, self.workspace_id, control.request_id)).fetchone()
+                if previous and previous['body'] != body:
+                    raise IdempotencyConflict('control identity was reused with another body')
+                if not previous:
+                    self._db.execute('INSERT INTO controls VALUES (?,?,?,?)',
+                        (self.principal, self.workspace_id, control.request_id, body))
+            # Network I/O never holds either SQLite connection's lock.
+            from mathproof.maths_ai_http import MathsAIAPIError
+            from context_compiler.errors import ContextValidationError
+            try:
+                receipt = self.service.formal.reconcile_search(job['operation_id'], request.action.proof_id, deadline=deadline)
+            except (MathsAIAPIError, ContextValidationError) as exc:
+                raise ReviewRequired(str(exc)) from exc
+            receipt.update(operation_ref=control.operation_ref.to_dict(), request_id=row['request_id'],
+                request_fingerprint=row['fingerprint'], service_operation_id=job['operation_id'])
+            with self._service_lock:
+                artifact = self.service.artifacts.put(canonical_json(receipt))
+            summary = {key: receipt[key] for key in ('format', 'operation_ref', 'request_id',
+                'request_fingerprint', 'proof_id', 'run_id', 'execution_settled', 'replay_performed')}
+            summary['receipt_artifact'] = artifact
+            with self._lock:
+                self._db.execute('BEGIN IMMEDIATE')
+                try:
+                    self._db.execute('INSERT INTO search_reconciliations VALUES (?,?,?,?)',
+                        (row['operation_id'], row['fingerprint'], artifact, json.dumps(summary, sort_keys=True)))
+                    self._db.execute('INSERT OR IGNORE INTO artifact_grants VALUES (?,?,?)',
+                        (self.principal, self.workspace_id, artifact))
+                    version = row['observation_version'] + 1
+                    self._db.execute('UPDATE requests SET observation_version=? WHERE operation_id=?',
+                        (version, row['operation_id']))
+                    self._event(row['operation_id'], 'search-reconciled', version)
+                    self._db.execute('COMMIT')
+                except BaseException:
+                    self._db.execute('ROLLBACK')
+                    raise
+
     async def amend_budget(self, control: BudgetAmendment):
         raise UnsupportedCapability("reference budget amendment is unavailable")
 
@@ -625,6 +967,10 @@ class ReferenceReceiver:
         return None
 
     def close(self):
+        with self._lock:
+            self._closing = True
         self._executor.shutdown(wait=True)
+        self._reconciliation_executor.shutdown(wait=True)
+        self._readiness_executor.shutdown(wait=True)
         with self._lock:
             self._db.close()

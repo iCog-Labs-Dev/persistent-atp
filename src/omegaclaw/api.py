@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from persistent_atp_client.codecs import request_from_json, to_dict
-from persistent_atp_client.models import ArtifactRef, OperationRef, Budget, CancelRequest, BudgetAmendment, DecisionResponse
+from persistent_atp_client.models import ArtifactRef, OperationRef, Budget, CancelRequest, SearchReconciliationRequest, BudgetAmendment, DecisionResponse
 from persistent_atp_client.errors import ClientError, UnsupportedCapability
 
 from .contracts import ContractError
@@ -101,7 +101,13 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                 parts = [unquote(item) for item in path.path.split("/") if item]
                 query = parse_qs(path.query)
                 if parts == ["v2", "capabilities"]:
-                    data = asyncio.run(receiver.capabilities(query.get("contract_version", ["2.0"])[0]))
+                    scoped = getattr(receiver, 'reconciliation_capabilities', None)
+                    if query.get('control') == ['reconcile-search'] and scoped:
+                        data = asyncio.run(scoped())
+                    else:
+                        data = asyncio.run(receiver.capabilities(query.get("contract_version", ["2.0"])[0]))
+                elif len(parts) == 4 and parts[:2] == ['v2', 'reconciliations']:
+                    data = asyncio.run(receiver.read_search_reconciliation(workspace_id=parts[2], request_id=parts[3]))
                 elif len(parts) == 4 and parts[:2] == ["v2", "requests"]:
                     data = asyncio.run(receiver.lookup_request(parts[2], parts[3]))
                 elif len(parts) == 4 and parts[:2] == ["v2", "operations"]:
@@ -148,20 +154,22 @@ def serve(service, token: str, host: str = "127.0.0.1", port: int = 0, *, receiv
                 body = self.rfile.read(size)
                 if self.path == "/v2/requests":
                     data = asyncio.run(receiver.submit(request_from_json(body)))
-                elif self.path in {"/v2/controls/cancel", "/v2/controls/amend-budget", "/v2/controls/answer-decision"}:
+                elif self.path in {"/v2/controls/cancel", "/v2/controls/reconcile-search", "/v2/controls/amend-budget", "/v2/controls/answer-decision"}:
                     raw = _strict_json(body)
                     if not isinstance(raw, dict):
                         raise ValueError("invalid control")
                     raw["operation_ref"] = OperationRef(**raw["operation_ref"])
                     name = self.path.rsplit("/", 1)[1]
                     model, method = {"cancel": (CancelRequest, receiver.cancel),
+                        "reconcile-search": (SearchReconciliationRequest, getattr(receiver, 'reconcile_search', None)),
                         "amend-budget": (BudgetAmendment, receiver.amend_budget),
                         "answer-decision": (DecisionResponse, receiver.answer_decision)}[name]
                     if name == "amend-budget":
                         raw["additional_budget"] = Budget(**raw["additional_budget"])
                     control = model(**raw)
-                    caps = asyncio.run(receiver.capabilities())
-                    if name not in caps.controls:
+                    scoped = getattr(receiver, 'reconciliation_capabilities', None)
+                    caps = asyncio.run(scoped() if name == 'reconcile-search' and scoped else receiver.capabilities())
+                    if name not in caps.controls or method is None:
                         raise UnsupportedCapability("receiver does not advertise this control")
                     # Authorize the referenced operation independently of body
                     # identity; trusted actor/lease fields are not accepted.

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from omegaclaw.tests.test_formal_v2_receiver import provider, configured
+from omegaclaw.tests.test_formal_v2_receiver import provider, configured, checked_receiver
 from omegaclaw.cycle_runtime import CycleWorkflow
 from omegaclaw.formal_runtime import FormalWorkflow
 from mathproof.maths_ai_http import MathsAIHTTPFormalATP
@@ -225,7 +225,7 @@ def test_unformalized_proof_reports_blocked_without_scripted_fallback(provider, 
     service = OperationService(tmp_path/'receiver', formal_config=FormalProviderConfig('http://fixture',deployment_id='fixture',profile='bounded',mode='scripted-test'))
     service.submit({'schema_version':1,'request_id':'create','workspace':'reference','operation':'proof-create',
         'arguments':{'spec':'{"proof_id":"p1","title":"Unformalized","literal_target":"True"}'}})
-    receiver = ReferenceReceiver(service)
+    receiver = checked_receiver(service)
     async def scenario():
         client = AsyncClient(LocalReceiverAdapter(receiver))
         outcome = await (await client.proof_cycle('p1',workspace_id='reference')).wait(timeout=10,poll_interval=.05)

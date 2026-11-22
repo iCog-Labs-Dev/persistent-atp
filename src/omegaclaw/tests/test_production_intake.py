@@ -13,7 +13,7 @@ from omegaclaw.intake_runtime import IntakeConfig, IntakeWorkflow
 from omegaclaw.formal_runtime import FormalProviderConfig
 from omegaclaw.receiver import ReferenceReceiver
 from omegaclaw.service import OperationService
-from omegaclaw.tests.test_formal_v2_receiver import provider
+from omegaclaw.tests.test_formal_v2_receiver import provider, checked_receiver
 from persistent_atp_client import AsyncClient
 from persistent_atp_client.adapters.local import LocalReceiverAdapter
 
@@ -57,7 +57,7 @@ def admit(service, proof):
 
 def test_fresh_claim_cycle_generates_reviews_then_dispatches_once(provider, tmp_path, monkeypatch):
     service, proof, llm = setup(tmp_path, monkeypatch)
-    receiver = ReferenceReceiver(service)
+    receiver = checked_receiver(service)
     async def scenario():
         client = AsyncClient(LocalReceiverAdapter(receiver))
         handle = await client.proof_cycle(proof, workspace_id='reference')

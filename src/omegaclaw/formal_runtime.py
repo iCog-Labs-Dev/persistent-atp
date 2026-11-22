@@ -157,6 +157,7 @@ class FormalWorkflow:
         try:
             client = self.client()
             client.timeout = min(client.timeout, 5)
+            client.observation_deadline = time.time() + 5
             self.deployment(client)
             return True
         except (FormalV2Error, OSError, ValueError, KeyError, TypeError):
@@ -180,6 +181,72 @@ class FormalWorkflow:
     def _accepted(result):
         if not result.accepted:
             raise FormalV2Error('commit gate rejected formal evidence; review current revision and authority')
+
+    def reconcile_search(self, operation, proof, *, deadline=None):
+        """Observe and admit one original search, without any provider POST.
+
+        A terminal search response proves search quiescence under the pinned
+        provider contract. It says nothing about an uncertain independent
+        replay. Original lease authority remains mandatory for new evidence.
+        """
+        service, state = self.service, self._load(operation)
+        if not state or state.get('contract_manifest') != MANIFEST_HASH:
+            raise ContractMigrationRequired()
+        if (state.get('provider_url') != self.config.url or state.get('proof_id') != proof
+                or state.get('request', {}).get('proof_id') != proof
+                or state.get('request', {}).get('run_id') != state.get('run_id')):
+            raise FormalV2Error('original search binding changed')
+        if state.get('phase') not in {'prepared', 'searching', 'search-admitted', 'search-reconciled',
+                'obstruction-bound', 'obstruction-ready'}:
+            raise ReplayReconciliationRequired('only search-only outcomes can be reconciled by this control')
+        # Never substitute a current deployment or refresh the original request.
+        client = self.client()
+        client.observation_deadline = deadline
+        client.restore_prepared(state['request'])
+        if state.get('binding'):
+            client.restore(state['binding'], refresh=False)
+        client.formal_search_status(state['run_id'])
+        snapshot, canonical = client.cached_evidence(state['run_id'])
+        if snapshot['status'] not in {'finished', 'interrupted'} or snapshot.get('result') is None:
+            raise FormalV2Error('original provider search is not settled')
+        if snapshot.get('replays'):
+            # Verdict-only entries cannot establish receipt delivery or replay
+            # quiescence. The full receipt retrieval API remains unavailable.
+            raise ReplayReconciliationRequired('provider reports replay activity without retrievable full receipts')
+        binding = client.binding(state['run_id'])
+        result = snapshot['result']
+        addresses = {item['sha256'] for item in result['artifacts']}
+        addresses.update(result[key] for key in ('input_artifact_hash', 'source_artifact_hash') if result.get(key))
+        evidence = _Evidence(binding, canonical, {key: _Artifacts(service).get(key) for key in addresses})
+        with service.lock:
+            if deadline is not None and time.time() >= deadline:
+                raise FormalV2Error('search reconciliation observation deadline elapsed')
+            service.catch_up(proof)
+            node = service.view.node(state['run_id'])
+            existing = node.fields.get('provider_binding_artifact') if node else None
+            if existing:
+                if service.artifacts.get(existing) != canonical_json(binding):
+                    raise FormalV2Error('admitted search differs from the original provider result')
+            else:
+                # The gate rejects stale revision, expired lease or fencing
+                # authority. Reconciliation never re-leases old search evidence.
+                self._accepted(admit_search(evidence, state['run_id'], SimpleNamespace(**state['search_lease']),
+                    service.gate, service.artifacts))
+                service.catch_up(proof)
+            self._release(SimpleNamespace(**state['search_lease']))
+            receipt = {'format': 'persistent-atp-search-reconciliation-v1',
+                'proof_id': proof, 'run_id': state['run_id'], 'provider_url': state['provider_url'],
+                'contract_manifest': MANIFEST_HASH, 'request_digest': snapshot['request_digest'],
+                'provider_request_hash': content_hash(state['request']),
+                'environment_hash': state['request']['environment_hash'],
+                'provider_status': snapshot['status'], 'attempt': snapshot['attempts'],
+                'disposition': snapshot['result']['disposition'],
+                'binding_artifact': service.artifacts.put(canonical_json(binding)),
+                'execution_settled': True, 'replay_performed': False,
+                'revision': service.store.head(proof)[0], 'event_hash': service.store.head(proof)[1]}
+            state.update(binding=binding, phase='search-reconciled')
+            self._save(operation, state)
+        return receipt
 
     def _prepare(self, operation, proof, claim, budget, client, deployment, *, selection=None):
         identity, profile, selected = deployment
