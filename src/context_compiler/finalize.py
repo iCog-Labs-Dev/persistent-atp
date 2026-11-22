@@ -55,6 +55,7 @@ def finalize_packet(
     rendering_version: str,
     extra_budgets: Mapping[str, object] | None = None,
     selection_policy_configs: Mapping[str, Mapping[str, object]] | None = None,
+    token_counter_config: Mapping[str, object] | None = None,
 ) -> CompiledResult:
     """Attach a deterministic digest and provenance manifest to a packet.
 
@@ -136,6 +137,10 @@ def finalize_packet(
         manifest["selection_policies"] = policies
     if selection_policy_configs:
         manifest["selection_policy_configs"] = _json_value(dict(selection_policy_configs))
+    if token_counter_config is not None:
+        if not isinstance(token_counter_config, Mapping):
+            raise ContextValidationError("token_counter_config must be a mapping")
+        manifest["token_counter"] = _json_value(dict(token_counter_config))
     return CompiledResult(
         packet=packet,
         selection_decisions=selection_decisions,

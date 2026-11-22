@@ -23,8 +23,8 @@ from context_compiler.selection import (
     REASON_OVER_FAILED_STATE_LIMIT,
     REASON_OVER_TEXT_BUDGET,
 )
+from context_compiler.budgeting import CanonicalTokenCounter
 from context_compiler.obstruction import (
-    CharHeuristicTokenCounter,
     MappingArtifactReader,
     ObstructionTask,
     SuspectedCause,
@@ -554,7 +554,7 @@ def test_to_dict_carries_the_full_payload():
 
 
 def test_budget_is_respected_and_attempts_are_selected_individually():
-    counter = CharHeuristicTokenCounter()
+    counter = CanonicalTokenCounter()
     case = scenario()
     full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     assert counter.count(full.packet.content) <= 1200
@@ -604,7 +604,7 @@ def test_tiny_budget_cannot_truncate_the_mandatory_kernel():
 
 
 def _tokens(text):
-    return CharHeuristicTokenCounter().count(text)
+    return CanonicalTokenCounter().count(text)
 
 
 def _compile_with_budget(budget):
@@ -735,7 +735,7 @@ def test_semantic_duplicate_state_names_its_survivor():
 
 
 def test_budgeted_compilation_is_deterministic():
-    counter = CharHeuristicTokenCounter()
+    counter = CanonicalTokenCounter()
     case = scenario()
     full = compile_obstruction(case.request, case.bundle, case.reader, case.task)
     budget = counter.count(full.packet.content) - 1

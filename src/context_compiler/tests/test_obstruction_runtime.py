@@ -203,7 +203,7 @@ def test_obstruction_runtime_uses_configured_token_counter():
 
     policy_config = dispatch.manifest["selection_policy_configs"]["weighted-mmr-v1"]
     assert counter.calls > 1
-    assert "chars_per_token=8" in policy_config["cost_normalization"]
+    assert dispatch.manifest["token_counter"]["chars_per_token"] == 8
 
 
 def test_obstruction_runtime_rejects_wrong_consumer_worker():

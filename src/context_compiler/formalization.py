@@ -8,7 +8,13 @@ from typing import Any, Mapping, Sequence
 
 from shared.vocab import ClaimStatus, WorkerClass
 
-from .budgeting import CharHeuristicTokenCounter, Section, TokenCounter, fit_sections
+from .budgeting import (
+    CanonicalTokenCounter,
+    Section,
+    TokenCounter,
+    fit_sections,
+    token_counter_manifest,
+)
 from .contracts import (
     CompileRequest,
     CompiledResult,
@@ -160,6 +166,7 @@ def compile_formalization(
         raise ContextValidationError(
             "formalization context must contain JSON-compatible values"
         ) from exc
+    counter = token_counter if token_counter is not None else CanonicalTokenCounter()
     fit = fit_sections(
         (
             Section(
@@ -170,7 +177,7 @@ def compile_formalization(
             ),
         ),
         request.text_budget,
-        token_counter or CharHeuristicTokenCounter(),
+        counter,
         # The formalizer consumes the context as JSON, so omit prose headings.
         render=lambda sections: "\n\n".join(section.body for section in sections),
     )
@@ -187,5 +194,6 @@ def compile_formalization(
         tuple(decisions),
         compiler_version=compiler_version,
         rendering_version="canonical-json/1",
+        token_counter_config=token_counter_manifest(counter),
     )
     return FormalizationCompilation(result=result, payload=payload)

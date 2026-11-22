@@ -431,8 +431,12 @@ Mandatory context is rendered and checked first; compilation errors if that
 floor alone exceeds `TextBudget`. Optional items are admitted only when the
 complete rendered packet stays within budget. Formal caps use stable text-cost
 estimates and formal text budgets count the actual serialized envelope using
-the configured token counter (the default is the deterministic character
-heuristic). Verified premises retain precedence over suggestions, and resumed
+the configured token counter. The default is the canonical `cl100k_base`
+encoding through `tiktoken`; `CharHeuristicTokenCounter` is available only when
+an explicitly approximate count is desired. The canonical budget is consistent
+across workers but is not a claim about any provider's private tokenizer. For
+offline deployment, warm and persist tiktoken's verified encoding cache during
+image setup. Verified premises retain precedence over suggestions, and resumed
 runs remain mandatory. Obstruction attempts are separate optional items, with
 tactic family, failure family, executor result, and parent-state identity in the
 diversity penalty, allowing a budget to retain representative mechanisms.

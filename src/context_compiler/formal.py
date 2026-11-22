@@ -57,7 +57,7 @@ from .contracts import (
     SourceRef,
     TheoremKernel,
 )
-from .budgeting import CharHeuristicTokenCounter, TokenCounter
+from .budgeting import CanonicalTokenCounter, TokenCounter, token_counter_manifest
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
 from .obstruction import ArtifactReader
@@ -747,7 +747,7 @@ def compile_formal(
         raise ContextValidationError("context_limits must be FormalContextLimits")
     if token_counter is not None and not callable(getattr(token_counter, "count", None)):
         raise ContextValidationError("token_counter must provide count(text)")
-    counter = token_counter if token_counter is not None else CharHeuristicTokenCounter()
+    counter = token_counter if token_counter is not None else CanonicalTokenCounter()
 
     refs = sorted(bundle.sources, key=lambda r: r.source_id)
     sources = {ref.source_id: _load(ref, reader) for ref in refs}
@@ -1361,10 +1361,9 @@ def compile_formal(
         selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
             cost_normalization=(
                 "item caps: lexical text length / maximum candidate text length; "
-                "text budget: marginal full-envelope counter tokens / text_budget.max_tokens; "
-                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
-                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
+                "text budget: marginal full-envelope counter tokens / text_budget.max_tokens"
             ),
         )},
+        token_counter_config=token_counter_manifest(counter),
     )
     return FormalCompilation(payload=payload, packet=packet, result=result)

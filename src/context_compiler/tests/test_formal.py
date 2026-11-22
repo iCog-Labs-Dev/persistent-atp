@@ -490,7 +490,8 @@ class FormalContextLimitTests(unittest.TestCase):
         budget = counter.count(full.packet.content) - 1
 
         limited = compile_formal(
-            replace(request, text_budget=TextBudget(budget)), bundle, reader, task, access
+            replace(request, text_budget=TextBudget(budget)), bundle, reader, task, access,
+            token_counter=counter,
         )
 
         self.assertLessEqual(counter.count(limited.packet.content), budget)

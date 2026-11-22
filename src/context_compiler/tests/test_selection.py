@@ -5,6 +5,7 @@ import math
 import unittest
 
 from context_compiler.budgeting import (
+    CanonicalTokenCounter,
     CharHeuristicTokenCounter,
     Section,
     fit_sections,
@@ -98,6 +99,13 @@ class WeightedMMRTests(unittest.TestCase):
             DEFAULT_CONTEXT_POLICY.relevance({"novelty": math.nan})
         with self.assertRaises(ContextValidationError):
             DEFAULT_CONTEXT_POLICY.relevance({"not_a_feature": 1.0})
+
+    def test_canonical_counter_uses_auditable_encoding_identity(self):
+        counter = CanonicalTokenCounter()
+
+        self.assertGreater(counter.count("a complete packet"), 0)
+        self.assertEqual(counter.manifest_config()["encoding"], "cl100k_base")
+        self.assertEqual(counter.manifest_config()["library"], "tiktoken")
 
 
 class ReasonTests(unittest.TestCase):

@@ -59,7 +59,7 @@ from .contracts import (
     TextBudget,
     TheoremKernel,
 )
-from .budgeting import Section, fit_sections
+from .budgeting import CanonicalTokenCounter, Section, fit_sections, token_counter_manifest
 from .errors import ContextValidationError
 from .finalize import _json_value, finalize_packet
 from .selection import (
@@ -276,6 +276,13 @@ class CharHeuristicTokenCounter(TokenCounter):
         if not text:
             return 0
         return (len(text) + self.chars_per_token - 1) // self.chars_per_token
+
+    def manifest_config(self) -> dict[str, object]:
+        return {
+            "algorithm": "character-length-heuristic",
+            "chars_per_token": self.chars_per_token,
+            "unit": "estimated tokens",
+        }
 
 
 @dataclass(frozen=True)
@@ -931,6 +938,14 @@ def _derive_questions(
     environment_hash: str,
     supplied: Sequence[str],
 ) -> tuple[str, ...]:
+    def compact(values: Sequence[str], limit: int) -> str:
+        unique = _ordered_unique(values)
+        preview = unique[:limit]
+        rendered = ", ".join(preview)
+        if len(unique) > limit:
+            rendered += f", and {len(unique) - limit} more"
+        return rendered
+
     questions: list[str] = []
     for question in supplied:
         _require_str("research_question", question)
@@ -942,15 +957,22 @@ def _derive_questions(
         if failure.hypotheses:
             evidence.append(f"hypotheses={'; '.join(failure.hypotheses)!r}")
         if failure.attempts:
-            attempts = ", ".join(
-                attempt.tactic_family
-                + (f" with {', '.join(attempt.premises)}" if attempt.premises else "")
-                for attempt in failure.attempts
+            tactic_families = compact(
+                [attempt.tactic_family for attempt in failure.attempts], 6
             )
-            evidence.append(f"attempts={attempts!r}")
+            evidence.append(
+                f"attempts={len(failure.attempts)} across tactic families="
+                f"{tactic_families!r}"
+            )
+            premise_names = compact(
+                [premise for attempt in failure.attempts for premise in attempt.premises],
+                8,
+            )
+            if premise_names:
+                evidence.append(f"candidate premises={premise_names!r}")
         if failure.diagnostics:
-            diagnostics = "; ".join(
-                diagnostic.text for diagnostic in failure.diagnostics
+            diagnostics = compact(
+                [diagnostic.text for diagnostic in failure.diagnostics], 2
             )
             evidence.append(f"diagnostics={diagnostics!r}")
         question = (
@@ -1241,9 +1263,7 @@ def compile_obstruction(
         raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
     max_failed_states = _require_positive("max_failed_states", max_failed_states)
 
-    counter: TokenCounter = (
-        token_counter if token_counter is not None else CharHeuristicTokenCounter()
-    )
+    counter: TokenCounter = token_counter if token_counter is not None else CanonicalTokenCounter()
     if not isinstance(counter, TokenCounter):
         raise ContextValidationError("token_counter must provide count(text)")
 
@@ -1377,12 +1397,9 @@ def compile_obstruction(
         compiler_version=compiler_version,
         rendering_version=rendering_version,
         selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
-            cost_normalization=(
-                f"counter.count(render([section])) / text_budget.max_tokens; "
-                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
-                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
-            ),
+            cost_normalization="counter.count(render([section])) / text_budget.max_tokens",
         )},
+        token_counter_config=token_counter_manifest(counter),
     )
     return ObstructionCompilation(payload=payload, packet=packet, result=result)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from importlib.metadata import PackageNotFoundError, version
 from typing import Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .contracts import TextBudget
@@ -31,6 +32,41 @@ TRUNCATION_MARKER = " …[truncated]"
 @runtime_checkable
 class TokenCounter(Protocol):
     def count(self, text: str) -> int: ...
+
+
+class CanonicalTokenCounter:
+    """Count with the project-wide ``cl100k_base`` canonical encoding."""
+
+    encoding_name = "cl100k_base"
+
+    def __init__(self) -> None:
+        try:
+            import tiktoken
+        except ImportError as exc:  # pragma: no cover - installation failure path
+            raise ContextValidationError(
+                "CanonicalTokenCounter requires the tiktoken dependency"
+            ) from exc
+        self._encoding = tiktoken.get_encoding(self.encoding_name)
+        try:
+            self._library_version = version("tiktoken")
+        except PackageNotFoundError:  # pragma: no cover - nonstandard vendoring
+            self._library_version = "unknown"
+
+    def count(self, text: str) -> int:
+        if not isinstance(text, str):
+            raise ContextValidationError("token counter input must be a string")
+        # Treat special-token spellings as ordinary packet text. A context
+        # packet cannot introduce control tokens by including their spelling.
+        return len(self._encoding.encode(text, disallowed_special=()))
+
+    def manifest_config(self) -> dict[str, str]:
+        return {
+            "algorithm": "tiktoken-encoding",
+            "encoding": self.encoding_name,
+            "library": "tiktoken",
+            "library_version": self._library_version,
+            "special_token_handling": "encode_as_ordinary_text",
+        }
 
 
 class CharHeuristicTokenCounter:
@@ -53,6 +89,27 @@ class CharHeuristicTokenCounter:
 
     def count(self, text: str) -> int:
         return math.ceil(len(text) / self._chars_per_token) if text else 0
+
+    def manifest_config(self) -> dict[str, object]:
+        return {
+            "algorithm": "character-length-heuristic",
+            "chars_per_token": self._chars_per_token,
+            "unit": "estimated tokens",
+        }
+
+
+def token_counter_manifest(counter: TokenCounter) -> dict[str, object]:
+    """Describe the exact configured counter for deterministic packet audits."""
+    describe = getattr(counter, "manifest_config", None)
+    if callable(describe):
+        config = describe()
+        if isinstance(config, Mapping):
+            return dict(config)
+    return {
+        "algorithm": "custom-token-counter",
+        "implementation": f"{type(counter).__module__}.{type(counter).__qualname__}",
+        "version": "caller-managed",
+    }
 
 
 @dataclass(frozen=True)

@@ -190,7 +190,7 @@ def test_formal_runtime_threads_budget_and_token_counter_into_compilation():
 
     policy_config = dispatch.manifest["selection_policy_configs"]["weighted-mmr-v1"]
     assert counter.calls >= 1
-    assert "chars_per_token=8" in policy_config["cost_normalization"]
+    assert dispatch.manifest["token_counter"]["chars_per_token"] == 8
     assert dispatch.manifest["budgets"]["text_tokens"] == 10_000
 
 

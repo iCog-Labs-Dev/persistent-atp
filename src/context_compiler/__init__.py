@@ -1,5 +1,6 @@
 """Shared contracts and finalization for context compilation."""
 
+from .budgeting import CanonicalTokenCounter
 from .contracts import (
     CompileRequest,
     CompiledResult,
@@ -63,6 +64,7 @@ from .runtime import (
 __all__ = [
     "ArtifactReader",
     "AttemptEvidence",
+    "CanonicalTokenCounter",
     "CharHeuristicTokenCounter",
     "CompileRequest",
     "CompiledDispatch",

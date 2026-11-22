@@ -177,6 +177,7 @@ class ResearchCompilerTests(unittest.TestCase):
         self.assertEqual(config["relevance_weight"], 0.6)
         self.assertEqual(config["token_cost_weight"], 0.2)
         self.assertIn("counter.count", config["cost_normalization"])
+        self.assertEqual(out.manifest["token_counter"]["encoding"], "cl100k_base")
 
     def test_wrong_packet_kind(self):
         request, bundle, reader, task = make()

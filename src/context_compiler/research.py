@@ -21,10 +21,11 @@ from shared.vocab import (
 )
 
 from .budgeting import (
-    CharHeuristicTokenCounter,
+    CanonicalTokenCounter,
     Section,
     TokenCounter,
     fit_sections,
+    token_counter_manifest,
 )
 from .contracts import (
     CompiledResult,
@@ -335,7 +336,7 @@ def compile_research(
         raise ContextValidationError("task must be a ResearchTask")
     if not isinstance(selection_policy, ContextSelectionPolicy):
         raise ContextValidationError("selection_policy must be a ContextSelectionPolicy")
-    counter = token_counter if token_counter is not None else CharHeuristicTokenCounter()
+    counter = token_counter if token_counter is not None else CanonicalTokenCounter()
     if not isinstance(counter, TokenCounter):
         raise ContextValidationError("token_counter must provide count(text)")
 
@@ -551,12 +552,9 @@ def compile_research(
         compiler_version=compiler_version,
         rendering_version=rendering_version,
         selection_policy_configs={selection_policy.name: selection_policy.manifest_config(
-            cost_normalization=(
-                f"counter.count(render([section])) / text_budget.max_tokens; "
-                f"counter={type(counter).__module__}.{type(counter).__qualname__}; "
-                f"chars_per_token={getattr(counter, 'chars_per_token', 'custom')}"
-            ),
+            cost_normalization="counter.count(render([section])) / text_budget.max_tokens",
         )},
+        token_counter_config=token_counter_manifest(counter),
     )
     return ResearchCompilation(result=result, token_count=fit.token_count)
 
