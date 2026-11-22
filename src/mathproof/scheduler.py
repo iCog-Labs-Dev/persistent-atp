@@ -46,6 +46,7 @@ __all__ = [
     "Candidate",
     "Lease",
     "SchedulerPolicy",
+    "SchedulerPortfolio",
     "SchedulerStatistics",
     "GlobalScheduler",
 ]
@@ -63,6 +64,12 @@ FEATURES = (
     "repeated_failure_risk",
     "human_priority",
     "availability_of_suitable_worker_or_model_or_tool",
+    "pln_strength",
+    "pln_confidence",
+    "proof_number_priority",
+    "disproof_number_priority",
+    "state_novelty",
+    "transposition_novelty",
 )
 
 NEUTRAL_DEFAULTS: dict[str, float] = {
@@ -78,6 +85,12 @@ NEUTRAL_DEFAULTS: dict[str, float] = {
     "repeated_failure_risk": 0.5,
     "human_priority": 0.5,
     "availability_of_suitable_worker_or_model_or_tool": 1.0,
+    "pln_strength": 0.5,
+    "pln_confidence": 0.5,
+    "proof_number_priority": 0.5,
+    "disproof_number_priority": 0.5,
+    "state_novelty": 0.5,
+    "transposition_novelty": 0.5,
 }
 
 CATEGORY_WORKER_CLASS = {
@@ -122,7 +135,8 @@ class Lease:
     policy_name: str = POLICY_NAME
 
     @classmethod
-    def from_row(cls, row: LeaseRow, score_snapshot: dict[str, float], policy_name: str) -> "Lease":
+    def from_row(cls, row: LeaseRow, score_snapshot: dict[str, float],
+                 policy_name: str | None = None) -> "Lease":
         return cls(
             lease_id=row.lease_id,
             proof_id=row.proof_id,
@@ -135,7 +149,7 @@ class Lease:
             issued_at=row.issued_at,
             expires_at=row.expires_at,
             score_snapshot=score_snapshot,
-            policy_name=policy_name,
+            policy_name=policy_name or row.policy_name or POLICY_NAME,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,14 +191,52 @@ class SchedulerPolicy:
             "availability_of_suitable_worker_or_model_or_tool": 0.7,
             "estimated_cost": -0.4,
             "repeated_failure_risk": -0.6,
+            "pln_strength": 0.35,
+            "pln_confidence": 0.25,
+            "proof_number_priority": 0.35,
+            "disproof_number_priority": 0.15,
+            "state_novelty": 0.25,
+            "transposition_novelty": 0.15,
         }
     )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("scheduler policy name must be a non-empty string")
+        if not isinstance(self.weights, Mapping) or set(self.weights) != set(FEATURES):
+            raise ValueError("scheduler policy weights must define every scheduler feature")
+        if any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in self.weights.values()):
+            raise ValueError("scheduler policy weights must be finite numbers")
 
     def score(self, features: Mapping[str, float]) -> tuple[float, dict[str, float]]:
         """The derived priority and the snapshot that produced it."""
         snapshot = {name: float(features.get(name, NEUTRAL_DEFAULTS[name])) for name in FEATURES}
         priority = sum(self.weights[name] * snapshot[name] for name in FEATURES)
         return priority, snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerPortfolio:
+    """A deterministic rotation of named policies using the lease audit stream."""
+
+    policies: tuple[SchedulerPolicy, ...]
+    name: str = "lease-audit-round-robin-v1"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policies, tuple) or not self.policies:
+            raise ValueError("scheduler portfolio must contain at least one policy")
+        if not all(isinstance(policy, SchedulerPolicy) for policy in self.policies):
+            raise ValueError("scheduler portfolio entries must be SchedulerPolicy values")
+        if len({policy.name for policy in self.policies}) != len(self.policies):
+            raise ValueError("scheduler portfolio policy names must be unique")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("scheduler portfolio name must be non-empty")
+
+    def select(self, issued_lease_count: int) -> SchedulerPolicy:
+        if type(issued_lease_count) is not int or issued_lease_count < 0:
+            raise ValueError("issued_lease_count must be nonnegative")
+        return self.policies[issued_lease_count % len(self.policies)]
 
 
 class SchedulerStatistics:
@@ -229,6 +281,7 @@ class GlobalScheduler:
         store: JournalStore,
         *,
         policy: SchedulerPolicy | None = None,
+        portfolio: SchedulerPortfolio | None = None,
         clock: Callable[[], float] = time.time,
         statistics: SchedulerStatistics | None = None,
         worker_actors: Mapping[str, str] | None = None,
@@ -236,7 +289,12 @@ class GlobalScheduler:
     ):
         self._view = view
         self._store = store
+        if policy is not None and portfolio is not None:
+            raise ValueError("select either one scheduler policy or a policy portfolio")
+        if portfolio is not None and not isinstance(portfolio, SchedulerPortfolio):
+            raise TypeError("portfolio must be a SchedulerPortfolio")
         self._policy = policy or SchedulerPolicy()
+        self._portfolio = portfolio
         self._clock = clock
         self.statistics = statistics or SchedulerStatistics()
         self._worker_actors = dict(worker_actors or {})
@@ -269,38 +327,53 @@ class GlobalScheduler:
         if category is not None and category not in CATEGORY_WORKER_CLASS:
             raise ValueError(f"unknown frontier category {category!r}")
         revision, frontier = self._snapshot_frontier(proof_id)
-        scored: list[tuple[float, Candidate, str, dict[str, float]]] = []
-        for candidate in frontier:
-            if category is not None and candidate.category != category:
-                continue
-            try:
-                worker_class = CATEGORY_WORKER_CLASS[candidate.category]
-            except KeyError as exc:
-                raise ValueError(f"no route for candidate category {candidate.category!r}") from exc
-            if worker_class not in self._worker_actors:
-                continue
-            features = self._feature_vector(candidate, worker_class)
-            priority, snapshot = self._policy.score(features)
-            if not math.isfinite(priority):
-                raise ValueError("routing priority must be finite")
-            scored.append((priority, candidate, worker_class, snapshot))
-        scored.sort(key=lambda item: (-item[0], item[1].move_id))
+        policies = self._policies()
+        candidate_sets: list[list[RoutedLeaseCandidate]] = []
+        scored_by_policy: dict[str, list[tuple[float, Candidate, str, dict[str, float]]]] = {}
+        for policy in policies:
+            scored: list[tuple[float, Candidate, str, dict[str, float]]] = []
+            for candidate in frontier:
+                if category is not None and candidate.category != category:
+                    continue
+                try:
+                    worker_class = CATEGORY_WORKER_CLASS[candidate.category]
+                except KeyError as exc:
+                    raise ValueError(f"no route for candidate category {candidate.category!r}") from exc
+                if worker_class not in self._worker_actors:
+                    continue
+                features = self._feature_vector(candidate, worker_class)
+                priority, snapshot = policy.score(features)
+                if not math.isfinite(priority):
+                    raise ValueError("routing priority must be finite")
+                scored.append((priority, candidate, worker_class, snapshot))
+            scored.sort(key=lambda item: (-item[0], item[1].move_id))
+            scored_by_policy[policy.name] = scored
+            policy_config = self._policy_audit_config(policy)
+            candidate_sets.append([
+                RoutedLeaseCandidate(
+                    candidate.move_id, snapshot, self._worker_actors[worker_class],
+                    worker_class, candidate.conflict_ids, policy.name, policy_config,
+                )
+                for _priority, candidate, worker_class, snapshot in scored
+            ])
 
-        row = self._store.claim_best_routed(
-            proof_id,
-            [RoutedLeaseCandidate(
-                candidate.move_id, snapshot, self._worker_actors[worker_class],
-                worker_class, candidate.conflict_ids,
-            ) for _priority, candidate, worker_class, snapshot in scored],
-            base_revision=revision,
-            ttl_seconds=ttl_seconds,
-        )
+        if self._portfolio is None:
+            row = self._store.claim_best_routed(
+                proof_id, candidate_sets[0], base_revision=revision, ttl_seconds=ttl_seconds,
+            )
+        else:
+            row = self._store.claim_best_routed(
+                proof_id, (), base_revision=revision, ttl_seconds=ttl_seconds,
+                candidate_sets=candidate_sets,
+            )
         if row is None:
             return None
+        selected_policy = next(policy for policy in policies if policy.name == row.policy_name)
+        scored = scored_by_policy[selected_policy.name]
         snapshot = next(snapshot for _, candidate, worker_class, snapshot in scored
                         if candidate.move_id == row.selected_move_id
                         and worker_class == row.worker_class)
-        return Lease.from_row(row, snapshot, self._policy.name)
+        return Lease.from_row(row, snapshot, selected_policy.name)
 
     def lease_selected(self, proof_id: str, move_id: str, worker_class: str, *, actor: str,
                        ttl_seconds: float = 600.0) -> Lease | None:
@@ -310,12 +383,32 @@ class GlobalScheduler:
             and CATEGORY_WORKER_CLASS[item.category] == worker_class), None)
         if candidate is None:
             return None
-        features = self._feature_vector(candidate, worker_class)
-        _, snapshot = self._policy.score(features)
-        row = self._store.claim_next(proof_id,
-            [LeaseCandidate(candidate.move_id, snapshot, candidate.conflict_ids)],
-            actor=actor, worker_class=worker_class, base_revision=revision, ttl_seconds=ttl_seconds)
-        return Lease.from_row(row, snapshot, self._policy.name) if row else None
+        policies = self._policies()
+        candidate_sets: list[list[RoutedLeaseCandidate]] = []
+        snapshots: dict[str, dict[str, float]] = {}
+        for policy in policies:
+            _, snapshot = policy.score(self._feature_vector(candidate, worker_class))
+            snapshots[policy.name] = snapshot
+            candidate_sets.append([RoutedLeaseCandidate(
+                candidate.move_id, snapshot, actor, worker_class, candidate.conflict_ids,
+                policy.name, self._policy_audit_config(policy),
+            )])
+        if self._portfolio is None:
+            row = self._store.claim_next(
+                proof_id,
+                [LeaseCandidate(move_id, snapshots[policies[0].name], candidate.conflict_ids,
+                                policies[0].name, self._policy_audit_config(policies[0]))],
+                actor=actor, worker_class=worker_class,
+                base_revision=revision, ttl_seconds=ttl_seconds,
+            )
+        else:
+            row = self._store.claim_best_routed(
+                proof_id, (), base_revision=revision, ttl_seconds=ttl_seconds,
+                candidate_sets=candidate_sets,
+            )
+        if row is None:
+            return None
+        return Lease.from_row(row, snapshots[row.policy_name], row.policy_name)
 
     def lease_next(
         self,
@@ -332,26 +425,47 @@ class GlobalScheduler:
         The trusted caller supplies the actual worker's actor and class.
         """
         revision, frontier = self._snapshot_frontier(proof_id)
-        scored = []
-        for candidate in frontier:
-            features = self._feature_vector(candidate, worker_class)
-            priority, snapshot = self._policy.score(features)
-            scored.append((priority, candidate, snapshot))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        row = self._store.claim_next(
-            proof_id,
-            [LeaseCandidate(candidate.move_id, snapshot, candidate.conflict_ids)
-             for _, candidate, snapshot in scored],
-            actor=actor,
-            worker_class=worker_class,
-            base_revision=revision,
-            ttl_seconds=ttl_seconds,
-        )
+        policies = self._policies()
+        candidate_sets: list[list[RoutedLeaseCandidate]] = []
+        scored_by_policy: dict[str, list[tuple[float, Candidate, dict[str, float]]]] = {}
+        for policy in policies:
+            scored = []
+            for candidate in frontier:
+                features = self._feature_vector(candidate, worker_class)
+                priority, snapshot = policy.score(features)
+                scored.append((priority, candidate, snapshot))
+            scored.sort(key=lambda item: (-item[0], item[1].move_id))
+            scored_by_policy[policy.name] = scored
+            policy_config = self._policy_audit_config(policy)
+            candidate_sets.append([
+                RoutedLeaseCandidate(
+                    candidate.move_id, snapshot, actor, worker_class,
+                    candidate.conflict_ids, policy.name, policy_config,
+                )
+                for _, candidate, snapshot in scored
+            ])
+        if self._portfolio is None:
+            row = self._store.claim_next(
+                proof_id,
+                [LeaseCandidate(
+                    candidate.move_id, snapshot, candidate.conflict_ids,
+                    policies[0].name, self._policy_audit_config(policies[0]),
+                ) for _, candidate, snapshot in scored_by_policy[policies[0].name]],
+                actor=actor, worker_class=worker_class,
+                base_revision=revision, ttl_seconds=ttl_seconds,
+            )
+        else:
+            row = self._store.claim_best_routed(
+                proof_id, (), base_revision=revision, ttl_seconds=ttl_seconds,
+                candidate_sets=candidate_sets,
+            )
         if row is None:
             return None
+        selected_policy_name = row.policy_name or policies[0].name
+        scored = scored_by_policy[selected_policy_name]
         snapshot = next(snapshot for _, candidate, snapshot in scored
                         if candidate.move_id == row.selected_move_id)
-        return Lease.from_row(row, snapshot, self._policy.name)
+        return Lease.from_row(row, snapshot, selected_policy_name)
 
     def release(self, proof_id: str, lease_id: str, *, fencing_token: int) -> bool:
         """Mark a dispatched lease finished (its token dies either way)."""
@@ -391,6 +505,7 @@ class GlobalScheduler:
             if node_id.startswith(prefix)
             and (record := view.node(node_id)) is not None
         }
+        centrality = self._dependency_centrality(view, nodes)
         candidates: list[Candidate] = []
 
         # Research moves under a live parent state (3.1, 3.4).
@@ -411,16 +526,18 @@ class GlobalScheduler:
                     ResearchMoveStatus.QUEUED.value,
                     ResearchMoveStatus.OPEN.value,
                 ):
+                    features = self._candidate_features(
+                        view, nodes, edge.dst_id, "research-move",
+                        {"expected_information_gain": 0.6,
+                         "formalization_readiness": 0.3, "estimated_cost": 1.0},
+                        centrality,
+                    )
                     candidates.append(
                         Candidate(
                             move_id=edge.dst_id,
                             category="research-move",
                             detail=f"proposed by {state_id}",
-                            features={
-                                "expected_information_gain": 0.6,
-                                "formalization_readiness": 0.3,
-                                "estimated_cost": 1.0,
-                            },
+                            features=features,
                         )
                     )
 
@@ -435,17 +552,20 @@ class GlobalScheduler:
                     for edge in view.edges_to(node_id, "SEARCHES")
                 ):
                     continue
+                features = self._candidate_features(
+                    view, nodes, node_id, "formal-run",
+                    {"formalization_readiness": 1.0,
+                     "expected_theorem_impact": 0.8,
+                     "verification_value": 0.7,
+                     "estimated_cost": 3.0},
+                    centrality,
+                )
                 candidates.append(
                     Candidate(
                         move_id=node_id,
                         category="formal-run",
                         detail="declaration ready for formal search",
-                        features={
-                            "formalization_readiness": 1.0,
-                            "expected_theorem_impact": 0.8,
-                            "verification_value": 0.7,
-                            "estimated_cost": 3.0,
-                        },
+                        features=features,
                     )
                 )
             elif record.label == "FormalRun":
@@ -461,18 +581,21 @@ class GlobalScheduler:
                 ):
                     continue
                 if self._run_has_open_checkpoint(view, node_id):
+                    features = self._candidate_features(
+                        view, nodes, node_id, "formal-run",
+                        {"formalization_readiness": 0.9,
+                         "expected_theorem_impact": 0.8,
+                         "verification_value": 0.7,
+                         "estimated_cost": 2.0},
+                        centrality,
+                    )
                     candidates.append(
                         Candidate(
                             move_id=node_id,
                             category="formal-run",
                             detail="searching run with an outstanding checkpoint",
                             conflict_ids=(target_id, *(edge.src_id for edge in view.edges_to(target_id, "SEARCHES"))),
-                            features={
-                                "formalization_readiness": 0.9,
-                                "expected_theorem_impact": 0.8,
-                                "verification_value": 0.7,
-                                "estimated_cost": 2.0,
-                            },
+                            features=features,
                         )
                     )
 
@@ -528,18 +651,21 @@ class GlobalScheduler:
                     for edge in view.edges_from(run_id, "RAISED_OBSTRUCTION")
                     if edge.dst_id != node_id
                 )
+                features = self._candidate_features(
+                    view, nodes, node_id, "obstruction-task",
+                    {"expected_information_gain": 0.9,
+                     "verification_value": 0.7,
+                     "formalization_readiness": 0.5,
+                     "estimated_cost": 1.5},
+                    centrality,
+                )
                 candidates.append(
                     Candidate(
                         move_id=node_id,
                         category="obstruction-task",
                         detail=f"formal failure raised by {run_id}",
                         conflict_ids=(run_id, *sibling_ids, *state_ids),
-                        features={
-                            "expected_information_gain": 0.9,
-                            "verification_value": 0.7,
-                            "formalization_readiness": 0.5,
-                            "estimated_cost": 1.5,
-                        },
+                        features=features,
                     )
                 )
 
@@ -549,20 +675,207 @@ class GlobalScheduler:
                     continue
                 if self._has_favorable_verdict(view, node_id):
                     continue
-                dependencies = len(view.edges_from(node_id, "DEPENDS_ON"))
+                features = self._candidate_features(
+                    view, nodes, node_id, "critic-task",
+                    {"verification_value": 0.9,
+                     "dependency_centrality": 0.25,
+                     "estimated_cost": 1.5},
+                    centrality,
+                )
                 candidates.append(
                     Candidate(
                         move_id=node_id,
                         category="critic-task",
                         detail="provisional claim awaiting a critic verdict",
-                        features={
-                            "verification_value": 0.9,
-                            "dependency_centrality": min(1.0, 0.25 * (dependencies + 1)),
-                            "estimated_cost": 1.5,
-                        },
+                        features=features,
                     )
                 )
         return candidates
+
+    def _dependency_centrality(
+        self, view: ReadView, nodes: Mapping[str, Any]
+    ) -> dict[str, float]:
+        """Normalized transitive DEPENDS_ON fan-in, scoped to committed Claims."""
+        claims = {node_id for node_id, node in nodes.items() if node.label == "Claim"}
+        dependents: dict[str, set[str]] = {claim_id: set() for claim_id in claims}
+        for dependent in claims:
+            for edge in view.edges_from(dependent, "DEPENDS_ON"):
+                if edge.dst_id in claims:
+                    dependents[edge.dst_id].add(dependent)
+        denominator = max(len(claims) - 1, 1)
+        centrality: dict[str, float] = {}
+        for claim_id in sorted(claims):
+            seen = {claim_id}
+            pending = list(sorted(dependents[claim_id], reverse=True))
+            while pending:
+                current = pending.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                pending.extend(sorted(dependents.get(current, ()), reverse=True))
+            centrality[claim_id] = min(1.0, (len(seen) - 1) / denominator)
+        return centrality
+
+    def _candidate_features(
+        self,
+        view: ReadView,
+        nodes: Mapping[str, Any],
+        move_id: str,
+        category: str,
+        base: Mapping[str, float],
+        centrality: Mapping[str, float],
+    ) -> dict[str, float]:
+        """Overlay reproducible graph/annotation signals on category priors."""
+        features = dict(base)
+        record = nodes.get(move_id)
+        if record is None:
+            return features
+        claim_ids = self._candidate_claim_ids(view, nodes, record)
+        if claim_ids:
+            features["dependency_centrality"] = sum(
+                centrality.get(claim_id, 0.0) for claim_id in claim_ids
+            ) / len(claim_ids)
+
+        signal_records = [record]
+        state_ids: set[str] = set()
+        run_ids: set[str] = set()
+        if record.label == "FormalRun":
+            run_ids.add(record.node_id)
+            state_ids.update(edge.dst_id for edge in view.edges_from(record.node_id, "HAS_ROOT"))
+            for checkpoint_edge in view.edges_from(record.node_id, "HAS_CHECKPOINT"):
+                state_ids.update(edge.dst_id for edge in view.edges_from(checkpoint_edge.dst_id, "CHECKPOINT_FRONTIER"))
+        elif record.label == "Obstruction":
+            state_ids.update(edge.dst_id for edge in view.edges_from(record.node_id, "AT_STATE"))
+            run_ids.update(edge.src_id for edge in view.edges_to(record.node_id, "RAISED_OBSTRUCTION"))
+        elif record.label == "FormalDeclaration":
+            for edge in view.edges_to(record.node_id, "SEARCHES"):
+                run_ids.add(edge.src_id)
+                state_ids.update(root.dst_id for root in view.edges_from(edge.src_id, "HAS_ROOT"))
+        elif record.label == "ResearchMove":
+            state_ids.update(edge.src_id for edge in view.edges_to(record.node_id, "PROPOSES"))
+        for state_id in sorted(state_ids):
+            state = nodes.get(state_id) or view.node(state_id)
+            if state is not None and state.label in {"FormalState", "ResearchState"}:
+                signal_records.append(state)
+
+        def annotation(record_: Any, field_name: str) -> float | None:
+            raw = record_.fields.get(field_name)
+            if raw is None:
+                annotations = record_.fields.get("annotations")
+                raw = annotations.get(field_name) if isinstance(annotations, Mapping) else None
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                return None
+            return float(raw)
+
+        for annotation_name, feature_name in (
+            ("pln_strength", "pln_strength"),
+            ("pln_confidence", "pln_confidence"),
+            ("state_novelty", "state_novelty"),
+        ):
+            observed = [annotation(item, annotation_name) for item in signal_records]
+            observed = [value for value in observed if value is not None]
+            if observed:
+                features[feature_name] = min(1.0, max(0.0, sum(observed) / len(observed)))
+
+        proof_numbers = [annotation(item, "proof_number") for item in signal_records]
+        proof_numbers = [value for value in proof_numbers if value is not None and value >= 0]
+        if proof_numbers:
+            features["proof_number_priority"] = sum(1.0 / (1.0 + value) for value in proof_numbers) / len(proof_numbers)
+        disproof_numbers = [annotation(item, "disproof_number") for item in signal_records]
+        disproof_numbers = [value for value in disproof_numbers if value is not None and value >= 0]
+        if disproof_numbers:
+            features["disproof_number_priority"] = sum(value / (1.0 + value) for value in disproof_numbers) / len(disproof_numbers)
+        transpositions = [annotation(item, "transposition_count") for item in signal_records]
+        transpositions = [value for value in transpositions if value is not None and value >= 0]
+        if transpositions:
+            features["transposition_novelty"] = sum(1.0 / (1.0 + value) for value in transpositions) / len(transpositions)
+
+        failure = self._committed_failure_risk(view, nodes, record, state_ids, run_ids)
+        if failure is not None:
+            features["repeated_failure_risk"] = failure
+        return features
+
+    @staticmethod
+    def _candidate_claim_ids(view: ReadView, nodes: Mapping[str, Any], record: Any) -> tuple[str, ...]:
+        claims: set[str] = set()
+        if record.label == "Claim":
+            claims.add(record.node_id)
+        elif record.label == "Obstruction":
+            claims.update(edge.src_id for edge in view.edges_to(record.node_id, "RESOLVES"))
+        elif record.label == "FormalRun":
+            declarations = {edge.dst_id for edge in view.edges_from(record.node_id, "SEARCHES")}
+            claims.update(
+                nodes[declaration_id].fields["claim_id"]
+                for declaration_id in declarations
+                if declaration_id in nodes and nodes[declaration_id].fields.get("claim_id") in nodes
+            )
+        elif record.label == "FormalDeclaration":
+            declared = record.fields.get("claim_id")
+            if isinstance(declared, str) and declared in nodes and nodes[declared].label == "Claim":
+                claims.add(declared)
+            for alignment_edge in view.edges_to(record.node_id, "ALIGNS_DECLARATION"):
+                claims.update(edge.dst_id for edge in view.edges_from(alignment_edge.src_id, "ALIGNS_CLAIM"))
+        elif record.label == "ResearchMove":
+            claims.update(edge.dst_id for edge in view.edges_from(record.node_id, "MOVE_TARGETS"))
+            raw = record.fields.get("required_claim_ids", ())
+            if isinstance(raw, (tuple, list)):
+                claims.update(item for item in raw if isinstance(item, str) and item in nodes)
+        return tuple(sorted(claim_id for claim_id in claims if claim_id in nodes and nodes[claim_id].label == "Claim"))
+
+    @staticmethod
+    def _committed_failure_risk(
+        view: ReadView,
+        nodes: Mapping[str, Any],
+        record: Any,
+        state_ids: set[str],
+        run_ids: set[str],
+    ) -> float | None:
+        outcomes: list[bool] = []
+        failed_dispositions = {
+            RunDisposition.STAGNATED.value, RunDisposition.BUDGET_EXHAUSTED.value,
+            RunDisposition.COUNTEREXAMPLE.value, RunDisposition.INVALID_REQUEST.value,
+            RunDisposition.ENVIRONMENT_ERROR.value, RunDisposition.INTERNAL_ERROR.value,
+        }
+        completed_dispositions = {RunDisposition.PROVED_PENDING_REPLAY.value}
+        failed_executor_results = {"lean-rejected", "timeout", "backend-missing", "parse-failure", "crash", "empty-output"}
+        attempt_ids: set[str] = set()
+        for state_id in state_ids:
+            attempt_ids.update(edge.src_id for edge in view.edges_to(state_id, "ON_STATE"))
+        if record.label == "Claim":
+            attempt_ids.update(edge.src_id for edge in view.edges_to(record.node_id, "REVIEWS_CLAIM"))
+        for attempt_id in sorted(attempt_ids):
+            attempt = nodes.get(attempt_id) or view.node(attempt_id)
+            if attempt is None or attempt.label != "Attempt":
+                continue
+            status = attempt.fields.get("status")
+            result = attempt.fields.get("executor_result")
+            if status in {AttemptStatus.REFUTED.value, AttemptStatus.RETRACTED.value} or result in failed_executor_results:
+                outcomes.append(True)
+            elif status in {AttemptStatus.SUPPORTED.value, AttemptStatus.CRITIC_ACCEPTED.value} or result == "lean-accepted":
+                outcomes.append(False)
+        for run_id in sorted(run_ids):
+            run = nodes.get(run_id) or view.node(run_id)
+            if run is None or run.label != "FormalRun":
+                continue
+            history = run.fields.get("attempt_history", ())
+            if isinstance(history, (tuple, list)) and history:
+                for item in history:
+                    if isinstance(item, Mapping):
+                        disposition = item.get("disposition")
+                        if disposition in failed_dispositions:
+                            outcomes.append(True)
+                        elif disposition in completed_dispositions:
+                            outcomes.append(False)
+            else:
+                disposition = run.fields.get("status")
+                if disposition in failed_dispositions:
+                    outcomes.append(True)
+                elif disposition in completed_dispositions:
+                    outcomes.append(False)
+        if not outcomes:
+            return None
+        # Beta(1,1) smoothing gives a neutral 0.5 when only one observation exists.
+        return (sum(outcomes) + 1.0) / (len(outcomes) + 2.0)
 
     # -- scoring -------------------------------------------------------------
 
@@ -576,9 +889,10 @@ class GlobalScheduler:
         """
         features = dict(NEUTRAL_DEFAULTS)
         features.update(candidate.features)
-        features["repeated_failure_risk"] = self.statistics.failure_risk(
-            candidate.category
-        )
+        if "repeated_failure_risk" not in candidate.features:
+            features["repeated_failure_risk"] = self.statistics.failure_risk(
+                candidate.category
+            )
         natural = CATEGORY_WORKER_CLASS.get(candidate.category, requested_worker_class)
         features["availability_of_suitable_worker_or_model_or_tool"] = (
             1.0 if requested_worker_class == natural else 0.3
@@ -592,11 +906,35 @@ class GlobalScheduler:
         self.statistics.record(category, "succeeded" if commit.accepted else "failed")
 
     def policy_snapshot(self) -> dict[str, Any]:
-        return {"policy_name": self._policy.name, "weights": dict(self._policy.weights)}
+        if self._portfolio is None:
+            return {"policy_name": self._policy.name, "weights": dict(self._policy.weights)}
+        return {
+            "portfolio_name": self._portfolio.name,
+            "selection": "round-robin by issued lease audit count",
+            "policies": [
+                {"policy_name": policy.name, "weights": dict(policy.weights)}
+                for policy in self._portfolio.policies
+            ],
+        }
 
     # -- helpers ---------------------------------------------------------------
     def _node_ids(self, view: ReadView, proof_id: str) -> list[str]:
         return [record.node_id for record in view.list_nodes(proof_id)]
+
+    def _policies(self) -> tuple[SchedulerPolicy, ...]:
+        return self._portfolio.policies if self._portfolio is not None else (self._policy,)
+
+    def _policy_audit_config(self, policy: SchedulerPolicy) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "policy_name": policy.name,
+            "weights": dict(policy.weights),
+        }
+        if self._portfolio is not None:
+            config.update({
+                "portfolio_name": self._portfolio.name,
+                "rotation": "atomic round-robin by issued lease audit sequence",
+            })
+        return config
 
     def _has_favorable_verdict(self, view: ReadView, claim_id: str) -> bool:
         for edge in view.edges_to(claim_id, "REVIEWS_CLAIM"):

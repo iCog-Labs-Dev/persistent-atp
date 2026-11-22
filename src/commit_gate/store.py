@@ -15,8 +15,8 @@ import math
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Iterator, Sequence
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .canon import GENESIS_HASH, canonical_json, chain_hash
 from .reasons import Reason
@@ -60,6 +60,7 @@ class LeaseRow:
     issued_at: float
     expires_at: float | None
     status: str
+    policy_name: str | None = None
 
     def is_live(self, now: float) -> bool:
         return (
@@ -78,6 +79,8 @@ class LeaseCandidate:
     move_id: str
     score_snapshot: dict[str, float]
     conflict_ids: tuple[str, ...] = ()
+    policy_name: str | None = None
+    policy_config: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +92,8 @@ class RoutedLeaseCandidate:
     actor: str
     worker_class: str
     conflict_ids: tuple[str, ...] = ()
+    policy_name: str | None = None
+    policy_config: Mapping[str, Any] | None = None
 
 
 class JournalStore:
@@ -214,7 +219,9 @@ class JournalStore:
                     worker_class TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     occurred_at_ns INTEGER NOT NULL,
-                    expires_at_ns INTEGER NOT NULL
+                    expires_at_ns INTEGER NOT NULL,
+                    policy_name TEXT,
+                    policy_config TEXT
                 )
                 """
             )
@@ -224,6 +231,7 @@ class JournalStore:
             for name, kind in (
                 ("selected_move_id", "TEXT"), ("score_snapshot", "TEXT"),
                 ("base_revision", "INTEGER"),
+                ("policy_name", "TEXT"), ("policy_config", "TEXT"),
             ):
                 if name not in audit_columns:
                     conn.execute(f"ALTER TABLE lease_audit ADD COLUMN {name} {kind}")
@@ -332,6 +340,8 @@ class JournalStore:
         selected_move_id: str, base_revision: int | None = None,
         ttl_seconds: float = 600.0,
         score_snapshot: dict[str, Any] | None = None,
+        policy_name: str | None = None,
+        policy_config: Mapping[str, Any] | None = None,
     ) -> LeaseRow:
         """Dispatch one move; distinct moves may hold leases concurrently.
 
@@ -378,6 +388,7 @@ class JournalStore:
             return self._insert_lease(
                 conn, proof_id, lease_id, actor, worker_class, selected_move_id,
                 revision, ttl_seconds, now_ns, "issued", score_snapshot,
+                policy_name, policy_config,
             )
 
     def claim_next(
@@ -395,7 +406,7 @@ class JournalStore:
             proof_id,
             [RoutedLeaseCandidate(
                 candidate.move_id, candidate.score_snapshot, actor, worker_class,
-                candidate.conflict_ids,
+                candidate.conflict_ids, candidate.policy_name, candidate.policy_config,
             ) for candidate in candidates],
             base_revision=base_revision,
             ttl_seconds=ttl_seconds,
@@ -404,13 +415,20 @@ class JournalStore:
     def claim_best_routed(
         self, proof_id: str, candidates: Sequence[RoutedLeaseCandidate], *,
         base_revision: int, ttl_seconds: float = 600.0,
+        candidate_sets: Sequence[Sequence[RoutedLeaseCandidate]] | None = None,
     ) -> LeaseRow | None:
         """Atomically reserve the first free move from ranked, routed choices.
 
         The trusted scheduler provides each move's class and actual actor.
         Routing and busy-target selection stay outside the proof hash chain.
+        When ``candidate_sets`` is supplied, the issued-audit sequence selects
+        one ranked policy set under the same write lock as lease reservation.
         """
-        for candidate in candidates:
+        pools = tuple(candidate_sets) if candidate_sets is not None else (candidates,)
+        if candidate_sets is not None and not pools:
+            raise ValueError("candidate_sets must contain at least one ranked policy")
+        all_candidates = [candidate for pool in pools for candidate in pool]
+        for candidate in all_candidates:
             self._validate_holder(candidate.actor, candidate.worker_class, ttl_seconds)
             if not candidate.move_id.startswith(f"{proof_id}/") or candidate.move_id == f"{proof_id}/":
                 raise ValueError("a dispatch lease needs a move in the proof namespace")
@@ -423,6 +441,12 @@ class JournalStore:
                     Reason.STALE_BASE_REVISION,
                     f"dispatch is based on revision {base_revision!r}, head is {revision}",
                 )
+            if candidate_sets is not None:
+                issued = conn.execute(
+                    "SELECT COUNT(*) FROM lease_audit WHERE proof_id = ? AND event_type = 'issued'",
+                    (proof_id,),
+                ).fetchone()[0]
+                candidates = pools[issued % len(pools)]
             busy = {row["selected_move_id"] for row in conn.execute(
                 "SELECT selected_move_id FROM leases WHERE proof_id = ? AND status = 'active'",
                 (proof_id,),
@@ -445,7 +469,7 @@ class JournalStore:
                     conn, proof_id, f"{proof_id}/ls-{serial}",
                     candidate.actor, candidate.worker_class,
                     candidate.move_id, revision, ttl_seconds, now_ns, "issued",
-                    candidate.score_snapshot,
+                    candidate.score_snapshot, candidate.policy_name, candidate.policy_config,
                 )
         return None
 
@@ -454,6 +478,8 @@ class JournalStore:
         actor: str, worker_class: str, selected_move_id: str | None,
         base_revision: int, ttl_seconds: float, now_ns: int, event: str,
         score_snapshot: dict[str, Any] | None = None,
+        policy_name: str | None = None,
+        policy_config: Mapping[str, Any] | None = None,
     ) -> LeaseRow:
         row = conn.execute(
             "SELECT MAX(fencing_token) AS top FROM leases WHERE proof_id = ?",
@@ -484,8 +510,10 @@ class JournalStore:
             "SELECT * FROM leases WHERE proof_id = ? AND lease_id = ?",
             (proof_id, lease_id),
         ).fetchone()
-        self._record_lease_event(conn, row, event, now_ns, score_snapshot)
-        return self._lease_row(row)
+        self._record_lease_event(
+            conn, row, event, now_ns, score_snapshot, policy_name, policy_config
+        )
+        return replace(self._lease_row(row), policy_name=policy_name)
 
     def release_lease(
         self, proof_id: str, lease_id: str, *, fencing_token: int,
@@ -543,6 +571,10 @@ class JournalStore:
                 "score_snapshot": (
                     json.loads(row["score_snapshot"]) if row["score_snapshot"] else None
                 ),
+                "policy_name": row["policy_name"],
+                "policy_config": (
+                    json.loads(row["policy_config"]) if row["policy_config"] else None
+                ),
                 "occurred_at_ns": row["occurred_at_ns"],
                 "expires_at_ns": row["expires_at_ns"], "created_at": row["created_at"],
             }
@@ -566,20 +598,24 @@ class JournalStore:
     def _record_lease_event(
         conn: sqlite3.Connection, row: sqlite3.Row, event: str, now_ns: int,
         score_snapshot: dict[str, Any] | None = None,
+        policy_name: str | None = None,
+        policy_config: Mapping[str, Any] | None = None,
     ) -> None:
         conn.execute(
             """
             INSERT INTO lease_audit (
                 proof_id, lease_id, fencing_token, actor, worker_class,
                 event_type, occurred_at_ns, expires_at_ns,
-                selected_move_id, score_snapshot, base_revision
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                selected_move_id, score_snapshot, base_revision, policy_name, policy_config
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (row["proof_id"], row["lease_id"], row["fencing_token"],
              row["actor"], row["worker_class"], event, now_ns, row["expires_at_ns"],
              row["selected_move_id"],
              canonical_json(score_snapshot).decode("utf-8")
-             if score_snapshot is not None else None, row["base_revision"]),
+             if score_snapshot is not None else None, row["base_revision"], policy_name,
+             canonical_json(dict(policy_config)).decode("utf-8")
+             if policy_config is not None else None),
         )
 
     def _supersede_leases(

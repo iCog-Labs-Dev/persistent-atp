@@ -284,12 +284,18 @@ class TestDispatchLeases(unittest.TestCase):
             worker_class="llm-research",
             selected_move_id="p1/rm-1",
             score_snapshot={"expected_information_gain": 0.8},
+            policy_name="research-v2",
+            policy_config={"policy_name": "research-v2", "weights": {"expected_information_gain": 0.9}},
         )
         events = self.store.read_lease_events("p1")
         self.assertEqual(events[0]["event"], "issued")
         self.assertEqual(
             events[0]["score_snapshot"], {"expected_information_gain": 0.8}
         )
+        self.assertEqual(events[0]["policy_name"], "research-v2")
+        self.assertEqual(events[0]["policy_config"], {
+            "policy_name": "research-v2", "weights": {"expected_information_gain": 0.9},
+        })
 
     def test_active_leases_lapses_due_rows_on_read(self):
         self.issue("ls-1", "p1/rm-1", ttl=10.0)
