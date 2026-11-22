@@ -33,6 +33,27 @@ def policy(**weights: float) -> SchedulerPolicy:
     return SchedulerPolicy(weights={name: weights.get(name, 0.0) for name in FEATURES})
 
 
+def formal_run_frontier() -> MemoryView:
+    view = MemoryView()
+    for index in (1, 2):
+        claim, declaration, alignment, run, state, checkpoint = (
+            f"p1/{kind}-{index}" for kind in ("c", "fd", "al", "fr", "fs", "cp")
+        )
+        view.add_node(claim, "Claim", {"status": "provisional"})
+        view.add_node(declaration, "FormalDeclaration", {"status": "aligned"})
+        view.add_node(alignment, "Alignment", {"verdict": "aligned", "lifecycle": "reviewed"})
+        view.add_node(run, "FormalRun", {"status": "searching"})
+        view.add_node(state, "FormalState", {"status": "open"})
+        view.add_node(checkpoint, "FormalCheckpoint", {})
+        for relation, source, target in (
+            ("ALIGNS_DECLARATION", alignment, declaration), ("ALIGNS_CLAIM", alignment, claim),
+            ("SEARCHES", run, declaration), ("HAS_ROOT", run, state),
+            ("HAS_CHECKPOINT", run, checkpoint), ("CHECKPOINT_FRONTIER", checkpoint, state),
+        ):
+            view.add_edge(relation, source, target, f"p1/{relation}-{index}")
+    return view
+
+
 @pytest.mark.parametrize(
     "feature, move_id, worker_class",
     [
@@ -295,6 +316,73 @@ def test_committed_review_failures_affect_repeat_risk_after_scheduler_restart():
 
     assert lease is not None and lease.selected_move_id == "p1/c-2"
     assert lease.score_snapshot["repeated_failure_risk"] == pytest.approx(0.5)
+
+
+def test_formal_run_centrality_follows_alignment_without_a_denormalized_claim_id():
+    view = formal_run_frontier()
+    for index in (3, 4):
+        view.add_node(f"p1/c-{index}", "Claim", {"status": "provisional"})
+    view.add_edge("DEPENDS_ON", "p1/c-3", "p1/c-2", "p1/dependency-1")
+    view.add_edge("DEPENDS_ON", "p1/c-4", "p1/c-3", "p1/dependency-2")
+    store = JournalStore()
+    try:
+        scheduler = GlobalScheduler(view, store, policy=policy(dependency_centrality=1.0),
+            worker_actors={"formal-atp": "atp"})
+        candidates = {item.move_id: item for item in scheduler.build_frontier("p1")}
+        assert candidates['p1/fr-1'].features['dependency_centrality'] == 0.0
+        assert candidates['p1/fr-2'].features['dependency_centrality'] == pytest.approx(2 / 3)
+        assert 'claim_id' not in view.node('p1/fd-2').fields
+        lease = scheduler.lease_best_global_move('p1')
+        assert lease.selected_move_id == 'p1/fr-2'
+        assert lease.score_snapshot['dependency_centrality'] == pytest.approx(2 / 3)
+        assert store.head('p1')[0] == 0
+    finally:
+        store._conn.close()
+
+
+@pytest.mark.parametrize('executor_result', [
+    'lean-rejected', 'timeout', 'backend-missing', 'parse-failure', 'crash', 'empty-output',
+])
+def test_formal_tactic_failures_in_child_goals_change_ranking_without_duplicate_counts(tmp_path, executor_result):
+    view = formal_run_frontier()
+    view.add_node('p1/fs-3', 'FormalState', {'status': 'open'})
+    # The accepted tactic still has an open child. Execution success is only
+    # scheduling evidence, and must never imply closure of either goal.
+    view.add_node('p1/ta-1', 'TacticApplication', {
+        'executor_result': 'lean-accepted', 'subgoal_count': 1, 'produced_goal_ids': ['p1/fs-3'],
+    })
+    view.add_edge('HAS_TACTIC', 'p1/fs-1', 'p1/ta-1', 'p1/accepted')
+    view.add_edge('FORMAL_REQUIRES', 'p1/ta-1', 'p1/fs-3', 'p1/child')
+    for index in (2, 3):
+        tactic = f'p1/ta-{index}'
+        view.add_node(tactic, 'TacticApplication', {
+            'executor_result': executor_result, 'subgoal_count': 0, 'produced_goal_ids': [],
+        })
+        view.add_edge('HAS_TACTIC', 'p1/fs-3', tactic, f'p1/trial-{index}')
+    # Duplicate links and overlapping root/checkpoint traversal cannot count
+    # the same executor result twice.
+    view.add_edge('HAS_TACTIC', 'p1/fs-1', 'p1/ta-1', 'p1/duplicate')
+    view.add_edge('CHECKPOINT_FRONTIER', 'p1/cp-1', 'p1/fs-1', 'p1/duplicate-frontier')
+    path = str(tmp_path / 'journal.db')
+    store = JournalStore(path)
+    try:
+        scheduler = GlobalScheduler(view, store, policy=policy(repeated_failure_risk=-1.0),
+            worker_actors={"formal-atp": "atp"})
+        candidate = next(item for item in scheduler.build_frontier('p1') if item.move_id == 'p1/fr-1')
+        assert candidate.features['repeated_failure_risk'] == pytest.approx(3 / 5)
+    finally:
+        store._conn.close()
+    store = JournalStore(path)
+    try:
+        scheduler = GlobalScheduler(view, store, policy=policy(repeated_failure_risk=-1.0),
+            worker_actors={"formal-atp": "atp"})
+        lease = scheduler.lease_best_global_move('p1')
+        assert lease.selected_move_id == 'p1/fr-2'
+        assert view.node('p1/fs-1').fields['status'] == 'open'
+        assert view.node('p1/fr-1').fields['status'] == 'searching'
+        assert store.head('p1')[0] == 0
+    finally:
+        store._conn.close()
 
 
 def test_racing_global_schedulers_reserve_the_one_move_once(tmp_path):

@@ -804,11 +804,10 @@ class GlobalScheduler:
             claims.update(edge.src_id for edge in view.edges_to(record.node_id, "RESOLVES"))
         elif record.label == "FormalRun":
             declarations = {edge.dst_id for edge in view.edges_from(record.node_id, "SEARCHES")}
-            claims.update(
-                nodes[declaration_id].fields["claim_id"]
-                for declaration_id in declarations
-                if declaration_id in nodes and nodes[declaration_id].fields.get("claim_id") in nodes
-            )
+            for declaration_id in sorted(declarations):
+                declaration = nodes.get(declaration_id)
+                if declaration is not None and declaration.label == "FormalDeclaration":
+                    claims.update(GlobalScheduler._candidate_claim_ids(view, nodes, declaration))
         elif record.label == "FormalDeclaration":
             declared = record.fields.get("claim_id")
             if isinstance(declared, str) and declared in nodes and nodes[declared].label == "Claim":
@@ -838,8 +837,36 @@ class GlobalScheduler:
         }
         completed_dispositions = {RunDisposition.PROVED_PENDING_REPLAY.value}
         failed_executor_results = {"lean-rejected", "timeout", "backend-missing", "parse-failure", "crash", "empty-output"}
+        # Formal executors persist trials as HAS_TACTIC/TacticApplication,
+        # rather than the research/critic Attempt representation. Include all
+        # produced child states, with identity sets handling shared frontiers
+        # and duplicate edges. These outcomes affect scheduling only.
+        relevant_states = set(state_ids)
+        pending = list(sorted(state_ids))
+        tactic_ids: set[str] = set()
+        while pending:
+            state_id = pending.pop()
+            state = nodes.get(state_id) or view.node(state_id)
+            if state is None or state.label != "FormalState":
+                continue
+            for edge in view.edges_from(state_id, "HAS_TACTIC"):
+                tactic = nodes.get(edge.dst_id) or view.node(edge.dst_id)
+                if tactic is None or tactic.label != "TacticApplication" or tactic.node_id in tactic_ids:
+                    continue
+                tactic_ids.add(tactic.node_id)
+                for child in view.edges_from(tactic.node_id, "FORMAL_REQUIRES"):
+                    if child.dst_id not in relevant_states:
+                        relevant_states.add(child.dst_id)
+                        pending.append(child.dst_id)
+        for tactic_id in sorted(tactic_ids):
+            tactic = nodes.get(tactic_id) or view.node(tactic_id)
+            result = tactic.fields.get("executor_result")
+            if result in failed_executor_results:
+                outcomes.append(True)
+            elif result == "lean-accepted":
+                outcomes.append(False)
         attempt_ids: set[str] = set()
-        for state_id in state_ids:
+        for state_id in relevant_states:
             attempt_ids.update(edge.src_id for edge in view.edges_to(state_id, "ON_STATE"))
         if record.label == "Claim":
             attempt_ids.update(edge.src_id for edge in view.edges_to(record.node_id, "REVIEWS_CLAIM"))
@@ -874,7 +901,8 @@ class GlobalScheduler:
                     outcomes.append(False)
         if not outcomes:
             return None
-        # Beta(1,1) smoothing gives a neutral 0.5 when only one observation exists.
+        # Beta(1,1) smoothing moderates small samples without treating execution
+        # success as proof closure or mathematical verification.
         return (sum(outcomes) + 1.0) / (len(outcomes) + 2.0)
 
     # -- scoring -------------------------------------------------------------

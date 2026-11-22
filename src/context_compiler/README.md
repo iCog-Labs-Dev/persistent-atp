@@ -451,7 +451,12 @@ and the applicable cost normalization so custom policies can be reproduced.
 
 The scheduler derives transitive `DEPENDS_ON` fan-in, aggregates committed
 heuristic annotations from relevant formal and research states, and reads
-persisted run/attempt failure history. `SchedulerPortfolio` rotation and lease
+persisted run/attempt failure history. Formal runs resolve claim centrality
+through their declaration's claim field or alignment edges. Failure scoring
+also reads unique `TacticApplication` outcomes through `HAS_TACTIC`, following
+all `FORMAL_REQUIRES` child states without counting shared evidence twice.
+Accepted tactic execution remains a scheduling signal and does not establish
+proof closure. `SchedulerPortfolio` rotation and lease
 reservation share one SQLite write transaction over the issued-lease audit
 sequence. The issued audit row stores the selected policy identity, weights,
 and score snapshot outside the proof hash chain.
