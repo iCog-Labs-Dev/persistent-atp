@@ -308,11 +308,34 @@ class HypothesisRevise:
             _identifier(self.previous_claim_id, "previous_claim_id")
 
 
+@dataclass(frozen=True, slots=True)
+class ParentRefine:
+    """A new attempt at the literal parent using one already verified lemma."""
+
+    kind: ClassVar[str] = "parent-refine"
+    proof_id: str
+    previous_declaration_id: str
+    lemma_claim_id: str
+    budget: Budget
+
+    def __post_init__(self):
+        for name in ('proof_id', 'previous_declaration_id', 'lemma_claim_id'):
+            _identifier(getattr(self, name), name)
+        if any(not value.startswith(self.proof_id + '/') for value in
+               (self.previous_declaration_id, self.lemma_claim_id)):
+            raise ValueError('refinement inputs must belong to the parent proof')
+        if self.lemma_claim_id == self.proof_id + '/c-1':
+            raise ValueError('parent cannot be its own lemma')
+        if not isinstance(self.budget, Budget):
+            raise TypeError('budget must be Budget')
+
+
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
 COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise)}
-ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise
+REFINEMENT_ACTION_TYPES = {ParentRefine.kind: ParentRefine}
+ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES, **REFINEMENT_ACTION_TYPES}
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise | ParentRefine
 
 
 def action_types_for_contract(version: str):
@@ -321,6 +344,8 @@ def action_types_for_contract(version: str):
     if version == "2.1":
         return {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES}
     if version == "2.2":
+        return {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
+    if version == "2.3":
         return ACTION_TYPES
     raise ValueError("unsupported contract version")
 
@@ -345,10 +370,12 @@ class ActionRequest:
         if (self.action.kind not in action_types_for_contract(self.contract_version)
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
-        if (self.contract_version == "2.2" and isinstance(self.action,
-                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise))
+        if (self.contract_version in {"2.2", "2.3"} and isinstance(self.action,
+                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise, ParentRefine))
                 and self.preconditions.expected_revision is None):
             raise ValueError("coordinator mutations require expected_revision")
+        if isinstance(self.action, ParentRefine) and self.preconditions.expected_theorem_hash is None:
+            raise ValueError('parent refinement requires expected_theorem_hash')
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):
             raise ValueError("deadline must be an aware UTC datetime")
         if self.deadline is not None and self.deadline.utcoffset().total_seconds() != 0:
@@ -581,7 +608,7 @@ class CapabilitySet:
         supported = action_types_for_contract(self.contract_version)
         if not self.actions <= supported.keys():
             raise ValueError("unknown advertised action")
-        if self.contract_version != "2.2" and self.controls.intersection({"cycle-execution-revision", "atomic-coordinator-escalations"}):
+        if self.contract_version not in {"2.2", "2.3"} and self.controls.intersection({"cycle-execution-revision", "atomic-coordinator-escalations"}):
             raise ValueError("coordinator guarantees require contract 2.2")
         if self.backend_mode not in {"real", "scripted-test", "unavailable"}:
             raise ValueError("unknown backend mode")

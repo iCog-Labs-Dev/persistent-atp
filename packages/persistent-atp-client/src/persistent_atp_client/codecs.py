@@ -67,7 +67,7 @@ def request_from_dict(raw: object) -> ActionRequest:
         for name in ("spec_artifact", "lean_source_artifact", "checkpoint_artifact"):
             if name in data and data[name] is not None:
                 data[name] = _strict(ArtifactRef, data[name])
-    if cls.kind in {"formal-search", "formal-resume"} and "budget" in data:
+    if cls.kind in {"formal-search", "formal-resume", "parent-refine"} and "budget" in data:
         data["budget"] = _strict(Budget, data["budget"])
     if cls is QueueResearchMoves and "moves" in data:
         if not isinstance(data["moves"], list):

@@ -25,7 +25,7 @@ from .models import (
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
     CoordinationPage, ProjectDigest, QueueCoordinatorEscalations, CoordinatorEscalation,
-    HypothesisFormalize, HypothesisRevise,
+    HypothesisFormalize, HypothesisRevise, ParentRefine, REFINEMENT_ACTION_TYPES,
 )
 from .ports import ReceiverPort
 
@@ -72,7 +72,8 @@ class AsyncClient:
                 request_id: str | None = None, deadline: datetime | None = None,
                 contract_version: str | None = None) -> ActionRequest:
         kind = getattr(action, "kind", None)
-        version = contract_version or ("2.2" if kind in COORDINATOR_ACTION_TYPES else
+        version = contract_version or ("2.3" if kind in REFINEMENT_ACTION_TYPES else
+                                       "2.2" if kind in COORDINATOR_ACTION_TYPES else
                                        "2.1" if kind in COORDINATION_ACTION_TYPES else "2.0")
         return ActionRequest(request_id=request_id or uuid.uuid4().hex,
                              workspace_id=workspace_id, action=action,
@@ -105,7 +106,7 @@ class AsyncClient:
         if request.action.kind not in caps.actions:
             raise UnsupportedCapability(f"{request.action.kind} is unavailable", request_id=request.request_id)
         required = ("atomic-coordinator-escalations" if isinstance(request.action, QueueCoordinatorEscalations)
-                    else "cycle-execution-revision" if request.contract_version == "2.2"
+                    else "cycle-execution-revision" if request.contract_version in {"2.2", "2.3"}
                     and isinstance(request.action, SelectedProofCycle) else None)
         if required is not None and required not in caps.controls:
             raise UnsupportedCapability(f"{required} is unavailable", request_id=request.request_id)
@@ -226,6 +227,11 @@ class AsyncClient:
                                 workspace_id: str, preconditions: Preconditions,
                                 previous_claim_id: str | None = None, **request_options):
         return await self.submit_action(HypothesisRevise(proof_id, hypothesis_id, spec_artifact, previous_claim_id),
+            workspace_id=workspace_id, preconditions=preconditions, **request_options)
+
+    async def refine_parent(self, proof_id: str, previous_declaration_id: str, lemma_claim_id: str, budget, *,
+                            workspace_id: str, preconditions: Preconditions, **request_options):
+        return await self.submit_action(ParentRefine(proof_id, previous_declaration_id, lemma_claim_id, budget),
             workspace_id=workspace_id, preconditions=preconditions, **request_options)
 
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:

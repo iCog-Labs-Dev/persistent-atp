@@ -70,6 +70,7 @@ def test_schema_manifest_uses_packaged_bytes_and_stable_ids():
     assert {item["name"] for item in manifest} == {
         "action-request.schema.json", "coordination-request.schema.json",
         "coordinator-request.schema.json",
+        "refinement-request.schema.json",
         "public-models.schema.json",
     }
     assert all(item["schema_id"].startswith("https://persistent-atp.local/schemas/")

@@ -29,7 +29,7 @@ class ScriptedReceiverPort:
         self._budget_versions: dict[OperationRef, int] = {}
 
     async def capabilities(self, *, contract_version="2.0"):
-        if contract_version not in {"2.0", "2.1", "2.2"}:
+        if contract_version not in {"2.0", "2.1", "2.2", "2.3"}:
             raise UnsupportedCapability("scripted-test contract version is unavailable")
         actions = action_types_for_contract(contract_version)
         return CapabilitySet(contract_version, frozenset(actions),
