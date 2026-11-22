@@ -41,6 +41,29 @@ class MemoryArtifacts:
         return digest in self.blobs
 
 
+def test_observation_deadline_bounds_transport_and_prevents_later_requests(monkeypatch):
+    from types import SimpleNamespace
+    import mathproof.maths_ai_http as module
+    clock = [1000.0]
+    timeouts = []
+    def response(*args, deadline):
+        timeouts.append(deadline - clock[0])
+        return 200, b'{}', None
+    monkeypatch.setattr(module, 'time', SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0]))
+    monkeypatch.setattr(module, 'bounded_request', response)
+    adapter = module.MathsAIHTTPFormalATP('http://localhost:8000', artifacts=MemoryArtifacts(), timeout=30)
+    adapter.observation_deadline = 1005
+    assert adapter._transport('GET', '/formal-capabilities') == {}
+    assert timeouts == [5]
+    clock[0] = 1006
+    with pytest.raises(module.MathsAIAPIError, match='deadline elapsed'):
+        adapter._transport('GET', '/formal-capabilities')
+    assert timeouts == [5]
+    adapter.observation_deadline = None
+    adapter._transport('GET', '/formal-capabilities')
+    assert timeouts == [5, 30]
+
+
 def scenario(kind='goal', backend='mcts-actor-critic'):
     name = '03-start-source' if kind == 'source' else '06-start-goal'
     start = example(name)
@@ -366,12 +389,9 @@ def test_poll_preserves_independent_replay_verdict():
 
 
 def test_http_409_is_transport_error_with_typed_category():
-    from io import BytesIO
-    from urllib.error import HTTPError
     atp, request, result, run, _ = proved()
     error = example('20-replay-binding-mismatch')['response']['body']
-    exc = HTTPError('http://localhost/formal-replay',409,'conflict',{},BytesIO(canonical_json(error)))
-    with patch('mathproof.maths_ai_http.urlopen', side_effect=exc), pytest.raises(MathsAIAPIError) as caught:
+    with patch('mathproof.maths_ai_http.bounded_request', return_value=(409, canonical_json(error), None)), pytest.raises(MathsAIAPIError) as caught:
         atp.formal_replay(result['certificate'],request['environment_hash'])
     assert caught.value.code == 'certificate-hash-mismatch'
     assert atp._latest[request['run_id']]['certificate']['status'] == 'replay-pending'

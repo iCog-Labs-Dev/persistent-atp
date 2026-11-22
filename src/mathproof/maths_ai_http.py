@@ -11,16 +11,16 @@ from copy import deepcopy
 import json
 import math
 import re
+import time
 from typing import Any, Mapping
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
 
 from commit_gate.canon import canonical_json, content_hash
 from mathproof.formal_atp import FormalATPAdapter
 from mathproof.formal_v2 import ArtifactRepository, CONTRACT_DIR, _json, address, validate, without_nulls
 from mathproof.schemas import validate as validate_canonical
 from mathproof.soundness import validate_formal_search_result
+from mathproof._bounded_http import request as bounded_request
 
 __all__ = ["MathsAIAPIError", "MathsAIHTTPFormalATP", "maths_ai_http_atp"]
 
@@ -59,6 +59,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             raise ValueError("timeout must be positive")
         self.base_url = base_url.rstrip("/")
         self.token, self.timeout, self.artifacts = token, timeout, artifacts
+        self.observation_deadline = None
         self.replay_budget = dict(replay_budget or {"max_steps": 100, "wall_clock_ms": 30000})
         self._requests: dict[str, dict] = {}
         self._snapshots: dict[str, dict] = {}
@@ -67,6 +68,12 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
 
     def _transport(self, method, path, data=None, *, binary=False,
                    expected_statuses=frozenset({200})):
+        deadline = time.monotonic() + self.timeout
+        if self.observation_deadline is not None:
+            left = self.observation_deadline - time.time()
+            if left <= 0:
+                raise MathsAIAPIError('formal observation deadline elapsed')
+            deadline = min(deadline, time.monotonic() + left)
         headers = {"Accept": "application/octet-stream" if binary else "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/octet-stream" if isinstance(data, bytes) else "application/json"
@@ -74,28 +81,26 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 data = canonical_json(data)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(32 * 1024 * 1024 + 1)
-                if len(raw) > 32 * 1024 * 1024:
-                    raise MathsAIAPIError("provider response exceeds the 32 MiB transport bound")
-                status = response.status
-                if status not in expected_statuses:
-                    raise MathsAIAPIError(f"unexpected HTTP {status}", status_code=status)
-                if binary:
-                    return raw, response.headers.get("X-Content-Hash")
-                body = _json(raw)
-        except HTTPError as exc:
-            detail, code = str(exc), None
+            status, raw, digest = bounded_request(method, self.base_url + path, headers, data, deadline=deadline)
+        except TimeoutError as exc:
+            raise MathsAIAPIError('formal transport deadline elapsed', code='FORMAL_TRANSPORT_TIMEOUT') from exc
+        except (OSError, ValueError) as exc:
+            raise MathsAIAPIError(f'{method} {path}: {exc}') from exc
+        if status not in expected_statuses:
+            detail, code = f'HTTP {status}', None
             try:
-                error = _check("formal-error", json.loads(exc.read()))
+                error = _check("formal-error", _json(raw))
                 detail, code = error["detail"], error["category"]
             except (ValueError, MathsAIAPIError):
                 pass
-            raise MathsAIAPIError(f"{method} {path}: {detail}", status_code=exc.code, code=code) from exc
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise MathsAIAPIError(f"{method} {path}: {exc}") from exc
+            raise MathsAIAPIError(f'{method} {path}: {detail}', status_code=status, code=code)
+        if binary:
+            return raw, digest
+        try:
+            body = _json(raw)
+        except ValueError as exc:
+            raise MathsAIAPIError('provider returned invalid JSON') from exc
         if not isinstance(body, dict):
             raise MathsAIAPIError("provider response must be a JSON object")
         return body
