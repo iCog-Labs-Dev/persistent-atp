@@ -10,8 +10,8 @@ while (($#)); do
 done
 
 case "$tier" in
-  reference|omega|container|persistence|formal-contract|lean|real-atp) ;;
-  *) echo "usage: bash scripts/omegaclaw-test.sh --tier {reference|omega|container|persistence|formal-contract|lean|real-atp}" >&2; exit 2 ;;
+  reference|omega|coordinator|container|persistence|formal-contract|lean|real-atp) ;;
+  *) echo "usage: bash scripts/omegaclaw-test.sh --tier {reference|omega|coordinator|container|persistence|formal-contract|lean|real-atp}" >&2; exit 2 ;;
 esac
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +24,20 @@ mkdir -p "$TMPDIR" "$UV_CACHE_DIR"
 run_dir="$(mktemp -d "$TMPDIR/persistent-atp-${tier}-XXXXXX")"
 echo "test artifacts: $run_dir"
 status=0
+if [[ "$tier" == coordinator ]]; then
+  export OMEGA_RUNTIME_REQUIRED=1
+  uv run persistent-atp-omega doctor --profile omega --require > "$run_dir/doctor.json" 2>&1 || status=$?
+  if ((status == 0)); then
+    uv run pytest src/omegaclaw/tests/test_task_workflow.py src/omegaclaw/tests/test_receiver_v2.py \
+      tests/omegaclaw_runtime/test_omega_process.py \
+      -q > "$run_dir/pytest.log" 2>&1 || status=$?
+    cat "$run_dir/pytest.log"
+  else
+    cat "$run_dir/doctor.json"
+  fi
+  echo "exit_code=$status" > "$run_dir/result.txt"
+  exit "$status"
+fi
 if [[ "$tier" == formal-contract ]]; then
   # Scripted search against the paired provider contract; replay tests launch
   # an installed Lean process. This does not establish trained-model readiness.
