@@ -38,6 +38,7 @@ it. Preserve the claim's quantifiers, domains, assumptions, and strength. Use
 only mathematical names and assumptions present in the supplied context. If the claim is
 ambiguous or the context is insufficient, set lean_type to an empty string and
 explain the issue in notes. Do not invent missing assumptions.
+Choose lean_name distinct from any supplied verified_premises declaration names.
 """
 
 _LEAN_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_'.]*$")

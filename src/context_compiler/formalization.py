@@ -67,6 +67,7 @@ def compile_formalization(
     claim: Mapping[str, Any],
     dependencies: Sequence[Mapping[str, Any]],
     theorem: Mapping[str, Any],
+    verified_premises: Sequence[Mapping[str, Any]] = (),
     token_counter: TokenCounter | None = None,
     compiler_version: str = "formalization/1",
 ) -> FormalizationCompilation:
@@ -158,6 +159,10 @@ def compile_formalization(
         "dependencies": normalized_dependencies,
         "theorem": dict(theorem),
     }
+    if verified_premises:
+        if any(not isinstance(item, Mapping) for item in verified_premises):
+            raise ContextValidationError('verified premises must be explicit mappings')
+        payload['verified_premises'] = [dict(item) for item in verified_premises]
     try:
         serialized = json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

@@ -30,6 +30,7 @@ class IntakeConfig:
     imports: tuple[str, ...] = ('Init',)
     text_tokens: int = 8192
     timeout: float = 60
+    lemma_reuse: str = 'disabled'
 
     def __post_init__(self):
         if self.provider not in {'DeepSeek', 'ASIOne'}:
@@ -43,6 +44,10 @@ class IntakeConfig:
             raise ValueError('intake context budget must be within 256..32768 tokens')
         if not math.isfinite(self.timeout) or not 0 < self.timeout <= 120:
             raise ValueError('intake timeout must be within (0, 120] seconds')
+        if self.lemma_reuse not in {'disabled', 'source-prefix', 'simp-prefix'}:
+            raise ValueError('unknown verified lemma reuse policy')
+        if self.lemma_reuse != 'disabled' and self.imports != ('Init',):
+            raise ValueError('initial verified lemma reuse requires Init-only imports')
 
     @classmethod
     def from_environment(cls):
@@ -52,7 +57,8 @@ class IntakeConfig:
         return cls(provider, os.environ.get('PERSISTENT_ATP_INTAKE_TOOLCHAIN', ''),
             tuple(os.environ.get('PERSISTENT_ATP_INTAKE_IMPORTS', 'Init').split(',')),
             int(os.environ.get('PERSISTENT_ATP_INTAKE_TEXT_TOKENS', '8192')),
-            float(os.environ.get('PERSISTENT_ATP_INTAKE_TIMEOUT', '60')))
+            float(os.environ.get('PERSISTENT_ATP_INTAKE_TIMEOUT', '60')),
+            os.environ.get('PERSISTENT_ATP_INTAKE_LEMMA_REUSE', 'disabled'))
 
     def llm(self):
         if self.provider == 'DeepSeek':
@@ -65,6 +71,12 @@ class IntakeConfig:
             raise ValueError('configured intake provider API key is missing')
         return HTTPLLMClient(endpoint_url=base.rstrip('/') + '/chat/completions', api_key=key,
             model=model, timeout_seconds=self.timeout)
+
+    def checkpoint_hash(self):
+        values = dict(self.__dict__)
+        if self.lemma_reuse == 'disabled':
+            values.pop('lemma_reuse')  # Preserve pre-reuse checkpoint identities.
+        return content_hash(values)
 
 
 class _SavedCandidate:
@@ -206,6 +218,9 @@ class IntakeWorkflow:
             return outcome
 
     def _validate_inputs(self, state):
+        if state.get('verified_lemma'):
+            from .lemma_reuse import validate_binding
+            validate_binding(self.service, state['verified_lemma'])
         for record in [state['claim'], *state['dependencies']]:
             current = self.service.view.node(record['id'])
             if current is None or current.label != record['label'] or dict(current.fields) != record['fields']:
@@ -215,13 +230,19 @@ class IntakeWorkflow:
         if current != state['dependency_edges']:
             raise ValueError('formalization dependencies changed; recompile the complete context')
 
-    def _source(self, result):
+    def _source(self, result, *, lemma=None):
         # Only one proposition is interpolated. Imports and commands are owned
         # by the receiver; the unresolved body cannot masquerade as a proof.
         if (any(x in result.lean_type for x in ('\n', '\r', '--', '/-', '-/', ';', '"', '`'))
                 or result.universe_level):
             raise ValueError('intake requires a single-line proposition with no commands or custom universe declarations')
-        return ('\n'.join('import ' + x for x in self.config.imports)
+        prelude = '\n'.join('import ' + x for x in self.config.imports)
+        if lemma is not None:
+            from .lemma_reuse import prefix_source
+            if result.lean_name == lemma['lean_name']:
+                raise ValueError('parent declaration must not shadow its verified lemma')
+            prelude = prefix_source(lemma, mode=self.config.lemma_reuse)
+        return (prelude
             + f'\n\ntheorem {result.lean_name} : {result.lean_type} := by\n  exact persistent_atp_pending_proof\n').encode()
 
     def _candidate_for_source(self, operation, state):
@@ -256,7 +277,7 @@ class IntakeWorkflow:
             state = service.jobs.intake_state(operation)
         if state and (state.get('contract_manifest') != MANIFEST_HASH or state['proof_id'] != proof
                 or state.get('claim_id') != target_claim_id
-                or state['config_hash'] != content_hash(self.config.__dict__)):
+                or state['config_hash'] != self.config.checkpoint_hash()):
             raise ValueError('intake configuration or contract changed; reconcile the admitted operation')
         if not state:
             # Capability I/O happens before leasing, outside the shared lock.
@@ -284,9 +305,17 @@ class IntakeWorkflow:
                                 raise ValueError('formalization dependency is missing')
                             seen.add(edge.dst_id); pending.append(edge.dst_id)
                             dependencies.append({'id': node.node_id, 'label': node.label, 'fields': dict(node.fields)})
+                lemma = None
+                if self.config.lemma_reuse != 'disabled' and dependencies:
+                    from .lemma_reuse import verified_lemma
+                    if len(dependencies) != 1:
+                        raise ValueError('controlled reuse supports exactly one verified dependency')
+                    lemma = verified_lemma(service, proof, dependencies[0]['id'])
+                    if lemma['environment_hash'] != deployment['environment_hash']:
+                        raise ValueError('reused lemma and parent must share the pinned environment')
                 lease = self._lease(proof, target_claim_id, 'formalizer')
                 number = int(content_hash(['intake', operation])[7:], 16)
-                state = {'contract_manifest': MANIFEST_HASH, 'config_hash': content_hash(self.config.__dict__),
+                state = {'contract_manifest': MANIFEST_HASH, 'config_hash': self.config.checkpoint_hash(),
                     'proof_id': proof, 'claim_id': target_claim_id, 'declaration_id': f'{proof}/fd-{number}',
                     'environment_id': f'{proof}/env-{number}', 'alignment_id': f'{proof}/al-{number}',
                     'provider_url': service.formal.config.url, 'deployment_id': identity,
@@ -296,6 +325,8 @@ class IntakeWorkflow:
                 state['dependency_edges'] = sorted([record['id'], edge.dst_id]
                     for record in [state['claim'], *dependencies]
                     for edge in service.view.edges_from(record['id'], 'DEPENDS_ON'))
+                if lemma is not None:
+                    state['verified_lemma'] = lemma
                 self._save(operation, state)
         try:
             if state['provider_url'] != service.formal.config.url:
@@ -314,7 +345,10 @@ class IntakeWorkflow:
                         self._resume_lease(operation, state, 'draft_lease')
             compilation = compile_formalization(CompileRequest(operation, proof, state['draft_lease']['base_revision'],
                 PacketKind.FORMALIZATION, WorkerClass.FORMALIZER, text_budget=TextBudget(self.config.text_tokens)),
-                claim=state['claim'], dependencies=state['dependencies'], theorem=state['spec'])
+                claim=state['claim'], dependencies=state['dependencies'], theorem=state['spec'],
+                verified_premises=([{key: state['verified_lemma'][key] for key in
+                    ('claim_id', 'lean_name', 'lean_type', 'certificate_id')}]
+                    if state.get('verified_lemma') else ()))
             if 'candidate' not in state:
                 try:
                     candidate = LLMFormalizerBackend(self.config.llm()).formalize(compilation)
@@ -328,7 +362,7 @@ class IntakeWorkflow:
                     compilation, declaration_id=state['declaration_id'], claim_id=state['claim_id'],
                     base_revision=state['draft_lease']['base_revision'], lease_id=state['draft_lease']['lease_id'],
                     fencing_token=state['draft_lease']['fencing_token'])
-                source_bytes = self._source(result)
+                source_bytes = self._source(result, lemma=state.get('verified_lemma'))
             except ValueError as exc:
                 return self._clarification(operation, state, exc)
             if cancelled():
@@ -348,6 +382,10 @@ class IntakeWorkflow:
                         ops = [SetField('FormalDeclaration', state['declaration_id'], key, value, prior=None)
                             for key, value in {'lean_source_artifact': source, 'source_hash': source,
                                 'claim_id': state['claim_id'], 'intake_operation_id': operation}.items()]
+                        if state.get('verified_lemma'):
+                            binding = service.artifacts.put(canonical_json(state['verified_lemma']))
+                            ops.append(SetField('FormalDeclaration', state['declaration_id'],
+                                'lemma_reuse_artifact', binding, prior=None))
                         ops += [UpsertNode('Environment', state['environment_id'], {'toolchain': self.config.toolchain,
                             'environment_hash': state['environment_hash'], 'provider_environment_id': state['provider_environment_id']}),
                             AddEdge('PINNED_ENVIRONMENT', state['declaration_id'], state['environment_id'], state['environment_id'] + '-pin')]

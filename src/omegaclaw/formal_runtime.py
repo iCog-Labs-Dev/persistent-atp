@@ -6,10 +6,12 @@ Omega's cache. Network work never holds the journal connection's service lock.
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import json
 import time
 import os
 from urllib.parse import urlsplit
 from types import SimpleNamespace
+from pathlib import Path
 
 from commit_gate.canon import canonical_json, content_hash
 from commit_gate.ops import AddEdge, UpsertNode
@@ -19,7 +21,7 @@ from context_compiler.formal import CheckpointPolicy, PremiseAccessibility
 from context_compiler.formal_runtime import FormalLeaseCompiler, FormalRuntimeConfig
 from mathproof.formal_v2 import MANIFEST_HASH
 from mathproof.maths_ai_http import MathsAIAPIError as FormalV2Error, MathsAIHTTPFormalATP
-from mathproof.formal_v2_admission import admit_search, admit_replay, admit_promotion
+from mathproof.formal_v2_admission import admit_search, admit_replay, promotion_proposal
 from mathproof.scheduler import GlobalScheduler
 
 
@@ -65,6 +67,7 @@ class FormalProviderConfig:
     replay_wall_clock_ms: int = 60000
     poll_seconds: float = .25
     mode: str = 'real'
+    reuse_lean: str | None = None
 
     def __post_init__(self):
         parsed = urlsplit(self.url)
@@ -93,7 +96,8 @@ class FormalProviderConfig:
             wall_clock_ms=int(os.environ.get('PERSISTENT_ATP_FORMAL_WALL_CLOCK_MS', '30000')),
             replay_steps=int(os.environ.get('PERSISTENT_ATP_FORMAL_REPLAY_STEPS', '128')),
             replay_wall_clock_ms=int(os.environ.get('PERSISTENT_ATP_FORMAL_REPLAY_WALL_CLOCK_MS', '60000')),
-            timeout=float(os.environ.get('PERSISTENT_ATP_FORMAL_HTTP_TIMEOUT', '90')))
+            timeout=float(os.environ.get('PERSISTENT_ATP_FORMAL_HTTP_TIMEOUT', '90')),
+            reuse_lean=os.environ.get('PERSISTENT_ATP_REUSE_LEAN') or None)
 
 
 class _Evidence:
@@ -279,6 +283,19 @@ class FormalWorkflow:
         if (environment is None or environment.fields.get('environment_hash') != selected['environment_hash']
                 or environment.fields.get('provider_environment_id') != selected['environment_id']):
             raise FormalV2Error('committed environment differs from configured provider deployment')
+        reuse = None
+        if declaration.fields.get('lemma_reuse_artifact'):
+            from .lemma_reuse import _artifact, validate_binding
+            binding_ref = declaration.fields['lemma_reuse_artifact']
+            binding = json.loads(_artifact(service, binding_ref))
+            validate_binding(service, binding)
+            if binding['environment_hash'] != selected['environment_hash']:
+                raise FormalV2Error('parent and verified lemma environments differ')
+            binary = Path(self.config.reuse_lean or '')
+            if not binary.is_absolute() or not binary.is_file():
+                raise FormalV2Error('verified lemma reuse requires an installed native Lean auditor')
+            reuse = {'binding_artifact': binding_ref, 'lean': str(binary),
+                'lean_binary_hash': 'sha256:' + hashlib.sha256(binary.read_bytes()).hexdigest()}
         number = int(content_hash(operation)[7:], 16)
         run, root, checkpoint = f'{proof}/fr-{number}', f'{proof}/fs-{number}', f'{proof}/fc-{number}'
         actor = 'omega-formal-atp'
@@ -345,7 +362,8 @@ class FormalWorkflow:
             **({'selected_move_id': selection['selected_move_id'], 'operation_kind': 'proof-cycle'} if selection else {}),
             'replay_steps': min(self.config.replay_steps, selected['verification']['max_steps']),
             'replay_wall_clock_ms': min(self.config.replay_wall_clock_ms, selected['verification']['wall_clock_ms']),
-            'packet_artifact': packet, 'deadline': time.time() + self.config.wall_clock_ms / 1000 + 120}
+            'packet_artifact': packet, 'deadline': time.time() + self.config.wall_clock_ms / 1000 + 120,
+            **({'lemma_reuse': reuse} if reuse is not None else {})}
 
     def run_selected(self, operation, selection, *, cancelled=lambda: False, on_progress=None):
         """Execute a durable scheduler selection through the same provider workflow."""
@@ -489,12 +507,29 @@ class FormalWorkflow:
                 self._save(operation, state)
         if cancelled():
             return self._report(state, lifecycle='cancelled')
+        if state.get('lemma_reuse') and service.view.node(certificate).fields['status'] == 'replay-accepted':
+            self._audit_lemma_reuse(operation, state, certificate)
+        if cancelled():
+            return self._report(state, lifecycle='cancelled')
         with service.lock:
             if service.view.node(certificate).fields['status'] == 'replay-accepted' and service.view.node(claim).fields['status'] != 'lean-verified':
+                if state.get('lemma_reuse'):
+                    from .lemma_reuse import _artifact, validate_binding
+                    validate_binding(service, json.loads(_artifact(service, state['lemma_reuse']['binding_artifact'])))
                 coordinator = service.store.issue_lease(proof, f'{proof}/promote-{operation}', actor='omega-coordinator',
                     worker_class='coordinator', selected_move_id=claim)
                 try:
-                    self._accepted(admit_promotion(coordinator, service.gate, claim_id=claim, certificate_id=certificate))
+                    proposal = promotion_proposal(coordinator, service.view, claim_id=claim, certificate_id=certificate)
+                    if state.get('lemma_use_audit_artifact'):
+                        ref = state['lemma_use_audit_artifact']
+                        extra = (UpsertNode('Artifact', ref, {'artifact_hash': ref, 'media_type': 'application/json',
+                            'format': 'persistent-atp-lemma-use-audit-v1'}),
+                            AddEdge('HAS_ARTIFACT', claim, ref, f'{proof}/lemma-use-{operation}'))
+                        proposal = Proposal(proof, coordinator.actor, coordinator.worker_class,
+                            ops=(*extra, *proposal.ops), base_revision=coordinator.base_revision,
+                            lease_id=coordinator.lease_id, fencing_token=coordinator.fencing_token,
+                            selected_move_id=claim)
+                    self._accepted(service.gate.commit(proposal))
                     service.catch_up(proof)
                 finally:
                     self._release(coordinator)
@@ -502,6 +537,52 @@ class FormalWorkflow:
             state['phase'] = 'completed'
             self._save(operation, state)
         return self._report(state)
+
+    def _audit_lemma_reuse(self, operation, state, certificate_id):
+        from .lemma_reuse import _artifact, audit_parent_usage, validate_binding
+        service = self.service
+        reuse = state['lemma_reuse']
+        with service.lock:
+            binding = json.loads(_artifact(service, reuse['binding_artifact']))
+            validate_binding(service, binding)
+            certificate = service.view.node(certificate_id)
+            declaration = next(e.dst_id for e in service.view.edges_from(certificate_id, 'CERTIFIES'))
+            parent_name = service.view.node(declaration).fields['lean_name']
+            if service.view.node(declaration).fields.get('lemma_reuse_artifact') != reuse['binding_artifact']:
+                raise FormalV2Error('parent verified lemma binding changed')
+            receipt = state.get('receipt') or {}
+            if receipt.get('source_artifact_hash') != certificate.fields['source_artifact_hash']:
+                raise FormalV2Error('parent replay source binding changed before lemma audit')
+        binary = Path(reuse['lean'])
+        if ('sha256:' + hashlib.sha256(binary.read_bytes()).hexdigest() != reuse['lean_binary_hash']
+                or self.config.reuse_lean != reuse['lean']):
+            raise FormalV2Error('native lemma auditor changed after parent admission')
+        cost = receipt.get('verification_cost') or {}
+        native_audit = cost.get('axiom_audit') or {}
+        source = native_audit.get('source')
+        if (cost.get('session') != 'fresh-native-compilation' or cost.get('sorry_detected') is not False
+                or native_audit.get('status') != 'passed' or native_audit.get('exit_code') != 0
+                or native_audit.get('forbidden_axioms') != [] or not isinstance(source, str)
+                or binding['source'].split('\n\n', 1)[1].strip() not in source):
+            raise FormalV2Error('parent replay has no complete native source for usage audit')
+        expected = {'proof_id': state['proof_id'], 'claim_id': state['claim_id'],
+            'certificate_id': certificate_id, 'certificate_hash': certificate.fields['artifact_hash'],
+            'environment_hash': certificate.fields['environment_hash'],
+            'source_artifact_hash': certificate.fields['source_artifact_hash'],
+            'lemma_binding_artifact': reuse['binding_artifact'], 'parent_name': parent_name,
+            'lemma_name': binding['lean_name'], 'lean_binary_hash': reuse['lean_binary_hash'],
+            'source_hash': 'sha256:' + hashlib.sha256(source.encode()).hexdigest()}
+        if 'lemma_use_audit_artifact' not in state:
+            remaining = min(state['replay_wall_clock_ms'] / 1000, state['deadline'] - time.time())
+            if remaining <= 0:
+                raise FormalV2Error('parent lemma usage audit deadline elapsed')
+            audit = audit_parent_usage(source, parent_name, binding['lean_name'], lean=reuse['lean'], timeout=remaining)
+            audit.update({key: value for key, value in expected.items() if key not in audit})
+            state['lemma_use_audit_artifact'] = service.artifacts.put(canonical_json(audit))
+            self._save(operation, state)  # BEFORE promoting the parent claim.
+        audit = json.loads(_artifact(service, state['lemma_use_audit_artifact']))
+        if any(audit.get(key) != value for key, value in expected.items()) or audit.get('used') is not True:
+            raise FormalV2Error('independent parent replay did not use the selected verified lemma')
 
     def _report(self, state, lifecycle='succeeded'):
         snapshot = state.get('binding', {}).get('snapshot', {})
@@ -512,6 +593,8 @@ class FormalWorkflow:
             'claim_id': state['claim_id'],
             'lifecycle': lifecycle, 'mathematical_disposition': disposition,
             'claim_status': state.get('claim_status'),
+            **({'lemma_use_audit_artifact': state['lemma_use_audit_artifact']}
+                if state.get('lemma_use_audit_artifact') else {}),
             **({'selected_move_id': state['selected_move_id']} if 'selected_move_id' in state else {}),
             **({'obstruction_contexts': [{'obstruction_id': key, **{field: value for field, value in entry.items()
                 if field.endswith('_artifact')}} for key, entry in sorted(state['obstruction_dispatches'].items())]}
