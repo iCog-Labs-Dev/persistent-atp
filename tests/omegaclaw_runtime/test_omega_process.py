@@ -106,13 +106,7 @@ class DeepSeekMockHandler(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.mark.parametrize("sdk_enabled", [
-    pytest.param(False, id="legacy-provider"),
-    pytest.param(True, id="sdk-provider", marks=pytest.mark.skipif(
-        not (SDK_PATH / "openai/__init__.py").is_file(),
-        reason="OpenAI SDK unavailable in PeTTa Python; set OMEGACLAW_PROVIDER_SDK_PATH")),
-])
-def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
+def prepare_process_runtime(tmp_path):
     omega_source = Path(os.environ.get("OMEGA_PINNED_ROOT", str(DEFAULT_OMEGA_ROOT)))
     petta_source = Path(os.environ.get("PETTA_PINNED_ROOT", str(ROOT / "tmp" / "repos" / "PeTTa")))
     if not (omega_source / "src/plugin.py").is_file() or not (petta_source / "src/main.pl").is_file():
@@ -129,6 +123,17 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
     omega_root = petta_root / "repos" / "Omega"
     omega_root.parent.mkdir()
     shutil.copytree(omega_source, omega_root)
+    return petta_root, omega_root, process_python, omega_source
+
+
+@pytest.mark.parametrize("sdk_enabled", [
+    pytest.param(False, id="legacy-provider"),
+    pytest.param(True, id="sdk-provider", marks=pytest.mark.skipif(
+        not (SDK_PATH / "openai/__init__.py").is_file(),
+        reason="OpenAI SDK unavailable in PeTTa Python; set OMEGACLAW_PROVIDER_SDK_PATH")),
+])
+def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
+    petta_root, omega_root, process_python, omega_source = prepare_process_runtime(tmp_path)
     plugin_dir = omega_root / "plugins" / "persistent_atp"
     catalogue = omega_root / "config" / "plugins.yaml"
     original_catalogue = catalogue.read_text()
@@ -228,3 +233,55 @@ def test_o01_o02_real_omega_petta_process(tmp_path, sdk_enabled):
         deepseek_server.shutdown()
         deepseek_server.server_close()
         receiver.close()
+
+
+@pytest.mark.parametrize('boundary', ['active', 'delivery', 'done'])
+def test_managed_cache_restarts_in_a_fresh_petta_process_without_model_calls(tmp_path, boundary):
+    petta_root, omega_root, process_python, _ = prepare_process_runtime(tmp_path)
+    installed = subprocess.run([sys.executable, str(ROOT / 'scripts/omegaclaw-install-omega.py'),
+        '--omega-root', str(omega_root)], capture_output=True, text=True)
+    assert installed.returncode == 0, installed.stderr
+    service = OperationService(tmp_path / 'service')
+    receiver = ReferenceReceiver(service)
+    server = serve(service, 'managed-restart-test-token', port=0, receiver=receiver)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = {**os.environ, 'PYTHONPATH': str(petta_root / 'python'), 'PETTA_TEST_ROOT': str(petta_root),
+        'OMEGA_TEST_ROOT': str(omega_root), 'PERSISTENT_ATP_OMEGA_TOKEN': 'managed-restart-test-token',
+        'PERSISTENT_ATP_OMEGA_URL': f'http://127.0.0.1:{server.server_port}',
+        'PERSISTENT_ATP_OMEGA_WORKSPACE': 'reference', 'PERSISTENT_ATP_OMEGA_STATE': str(tmp_path / 'workflow.json'),
+        'OMEGA_persistentAtpEnabled': 'enabled', 'OMEGA_persistentAtpWorkspace': 'reference',
+        'OMEGA_RESTART_BOUNDARY': boundary}
+    def run(phase):
+        completed = subprocess.run([process_python, str(ROOT / 'tests/omegaclaw_runtime/restart_process.py'), phase],
+            cwd=petta_root, env=env, capture_output=True, text=True, timeout=30)
+        (tmp_path / (phase + '.log')).write_text(completed.stdout + completed.stderr)
+        assert completed.returncode == 0, completed.stderr[-5000:] + completed.stdout[-3000:]
+        line = next(row for row in completed.stdout.splitlines() if row.startswith('RESTART_RESULT='))
+        return json.loads(line.split('=', 1)[1])
+    try:
+        before = run('seed')
+        rows_before = receiver._db.execute('SELECT operation_id FROM requests').fetchall()
+        after = run('restore')
+        assert before['pid'] != after['pid']
+        assert before['task']['id'] == after['task']['id']
+        assert before['task']['deadline'] == after['task']['deadline']
+        assert before['task']['steps'].items() <= after['task']['steps'].items()
+        for key, request in before['requests'].items():
+            assert after['requests'][key] == request
+        assert after['task']['phase'] == 'done'
+        assert after['task']['delivery']['state'] == 'acknowledged'
+        assert after['model_calls'] == before['model_calls'] == 0
+        if boundary != 'active':
+            assert before['task']['delivery']['message_id'] == after['task']['delivery']['message_id']
+            assert before['task']['delivery']['text'] == after['task']['delivery']['text']
+            assert [row[0] for row in rows_before] == [row[0] for row in receiver._db.execute('SELECT operation_id FROM requests')]
+        kinds = [json.loads(row[0])['action']['kind'] for row in receiver._db.execute('SELECT body FROM requests')]
+        assert sorted(kinds) == ['proof-audit', 'proof-create', 'proof-cycle', 'proof-export']
+        proof = after['task']['proof_id']
+        assert service.store.verify_chain(proof) == service.store.head(proof)[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+        receiver.close()
+        service.close()

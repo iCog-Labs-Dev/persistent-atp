@@ -9,7 +9,9 @@ import hashlib
 PATCHES = {
     "src/loop.metta": (
         "8b6ceb75823fdf54bf041d4514d6c07d7a0b87b8e333c572b97d1c0e09357989",
-        (("          (let $prompt (getContext)\n               (progn (log INFO \"loop\" (---------iteration $k))\n                      (heartbeat $k)",
+        (("          (change-state! &loops (maxNewInputLoops))\n          (messagesClear)",
+          "          (change-state! &loops (maxNewInputLoops))\n          (change-state! &nextWakeAt (+ (get_time) (wakeupInterval)))\n          (messagesClear)"),
+         ("          (let $prompt (getContext)\n               (progn (log INFO \"loop\" (---------iteration $k))\n                      (heartbeat $k)",
           "          (heartbeat $k)\n          (let $prompt (getContext)\n               (progn (log INFO \"loop\" (---------iteration $k))"),
          ("                            (if (> (get-state &loops) 0)",
           "                            (progn\n                              (if (py-call (persistent_atp_channel.model_suspended))\n                                  (change-state! &loops 0) _)\n                              (if (<= (get-state &loops) 0)\n                                  (change-state! &loops (py-call (persistent_atp_channel.continuation_turns))) _)\n                            (if (> (get-state &loops) 0)"),
@@ -22,19 +24,30 @@ PATCHES = {
          ("    _drain_outbox(ws)\n", "    _drain_outbox(ws)\n    from persistent_atp_channel import flush\n    flush(lambda frame: _send_json(frame, ws=ws), _ws_url)\n"))),
 }
 
+# The first coordinator overlay predates wake-state initialization. Accept
+# that exact derived version during upgrades, while still requiring reversal
+# to the pinned upstream digest. Partial or unrelated edits remain errors.
+_LEGACY_REPLACEMENTS = {"src/loop.metta": PATCHES["src/loop.metta"][1][1:]}
+
 
 def original_bytes(name, raw):
     digest, replacements = PATCHES[name]
     if hashlib.sha256(raw).hexdigest() == digest:
         return raw
-    text = raw.decode()
-    for before, after in reversed(replacements):
-        if text.count(after) != 1:
-            raise ValueError(f"unexpected coordinator overlay: {name}")
-        text = text.replace(after, before, 1)
-    if hashlib.sha256(text.encode()).hexdigest() != digest:
-        raise ValueError(f"pinned runtime differs from coordinator overlay: {name}")
-    return text.encode()
+    variants = [replacements]
+    if name in _LEGACY_REPLACEMENTS:
+        variants.append(_LEGACY_REPLACEMENTS[name])
+    for variant in variants:
+        text = raw.decode()
+        for before, after in reversed(variant):
+            if text.count(after) != 1:
+                break
+            text = text.replace(after, before, 1)
+        else:
+            restored = text.encode()
+            if hashlib.sha256(restored).hexdigest() == digest:
+                return restored
+    raise ValueError(f"pinned runtime differs from coordinator overlay: {name}")
 
 
 def patched_bytes(name, raw):
