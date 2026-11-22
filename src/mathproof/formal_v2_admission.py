@@ -62,6 +62,33 @@ def _environment(view, declaration, expected):
     return node.node_id
 
 
+def _obstruction_context(request, result, artifacts):
+    """Exact admitted root context, not a reconstruction of unexported search states."""
+    manifest = _get(artifacts, result['input_artifact_hash'])
+    if any(manifest.get(key) != value for key, value in {
+            'format': 'maths-ai-formal-input-v1', 'input': request['input'],
+            'environment_hash': request['environment_hash'],
+            'source_artifact_hash': result['source_artifact_hash']}.items()):
+        raise FormalV2Error('obstruction input manifest differs from admitted search')
+    seed = manifest.get('seed') or {}
+    if seed.get('kind') == 'structured':
+        target, locals_ = seed.get('target_sexp'), seed.get('locals')
+        if not isinstance(locals_, list) or any(not isinstance(item, dict) for item in locals_):
+            raise FormalV2Error('obstruction requires complete admitted structured locals')
+        hypotheses = [canonical_json(item).decode('utf-8') for item in locals_]
+        representation = 'Lean s-expression target; canonical JSON structured locals'
+    elif seed.get('kind') == 'text':
+        target, hypotheses = seed.get('goal'), seed.get('hypotheses')
+        representation = 'Lean text target and hypotheses'
+    else:
+        raise FormalV2Error('provider did not retain an admitted root context')
+    if (not isinstance(target, str) or not target.strip() or not isinstance(hypotheses, list)
+            or any(not isinstance(item, str) or not item.strip() for item in hypotheses)):
+        raise FormalV2Error('obstruction admitted root context is incomplete')
+    return {'target': target, 'hypotheses': hypotheses, 'context_representation': representation,
+        'context_scope': 'admitted-root', 'input_artifact_hash': result['input_artifact_hash']}
+
+
 def search_proposal(client, run_id, lease, view, artifacts):
     """Import one settled, validated result under its original formal-atp lease."""
     if lease.worker_class != "formal-atp" or lease.selected_move_id != run_id:
@@ -104,13 +131,28 @@ def search_proposal(client, run_id, lease, view, artifacts):
     ops = [SetField("FormalRun", run_id, key, value, prior=run.fields.get(key))
            for key, value in pinned.items() if key not in {"actor", "environment_hash"} and run.fields.get(key) != value]
     ops += list(formal_run_ops(canonical, run, actor=lease.actor))
-    ops.append(_edge(lease.proof_id, "RAN_UNDER", run_id, env_id))
+    run_environments = view.edges_from(run_id, "RAN_UNDER")
+    if run_environments and {edge.dst_id for edge in run_environments} != {env_id}:
+        raise FormalV2Error("formal run RAN_UNDER environment differs from its declaration pin")
+    if not run_environments:
+        ops.append(_edge(lease.proof_id, "RAN_UNDER", run_id, env_id))
+    else:
+        # Older admission code emitted a second edge to the same environment.
+        # Preserve one committed binding and append removals for exact duplicates.
+        keeper = min(run_environments, key=lambda edge: edge.edge_id)
+        ops.extend(RemoveEdge("RAN_UNDER", edge.edge_id)
+                   for edge in run_environments if edge.edge_id != keeper.edge_id)
     # The adapter has already mapped run/attempt-scoped provider occurrences.
     scope = (snapshot["request_digest"], snapshot["attempts"])
     states = {row["state_id"]: row["state_id"] for row in canonical["states"]}
+    root_context = _obstruction_context(request, result, artifacts) if result['disposition'] == 'stagnated' else None
     for row in canonical["states"]:
         fields = {key: copy.deepcopy(value) for key, value in row.items() if key != "state_id"}
         fields.update(environment_hash=result["environment_hash"], exact_hash_scope="run-occurrence", transposition_eligible=False)
+        if root_context is not None and row['state_id'] == canonical['root_state_id']:
+            if row['status'] not in {'open', 'expanded', 'failed', 'reopened'}:
+                raise FormalV2Error('stagnated search must retain an unresolved root')
+            fields.update(root_context)
         ops.append(UpsertNode("FormalState", states[row["state_id"]], fields))
     for row in canonical["tactic_edges"]:
         identity = row["tactic_id"]
@@ -127,10 +169,23 @@ def search_proposal(client, run_id, lease, view, artifacts):
     ops.append(_edge(lease.proof_id, "HAS_ROOT", run_id, states[canonical["root_state_id"]]))
     if result["disposition"] == "stagnated":
         obstruction = _id(lease.proof_id, "obs", *scope)
-        ops.extend([UpsertNode("Obstruction", obstruction, {"kind": "search-policy", "actor": lease.actor,
-            "description": "Bounded search exhausted alternatives; no refutation is asserted.",
-            "environment_hash": result["environment_hash"], "diagnostic_artifact": result_hash}),
-            _edge(lease.proof_id, "RAISED_OBSTRUCTION", run_id, obstruction)])
+        root = canonical['root_state_id']
+        root_record = next(row for row in canonical['states'] if row['state_id'] == root)
+        minimal = _put(artifacts, canonical_json({'state_id': root, 'run_id': run_id,
+            'environment_hash': result['environment_hash'], 'exact_state_hash': root_record['exact_state_hash'],
+            'provider_result_artifact': result_hash, **root_context}))
+        diagnostic = _put(artifacts, canonical_json({'format': 'persistent-atp-formal-obstruction-v1',
+            'run_id': run_id, 'attempt': snapshot['attempts'], 'disposition': result['disposition'],
+            'termination': result['termination'], 'provider_result_artifact': result_hash,
+            'context_scope': 'admitted-root', 'context_representation': root_context['context_representation'],
+            'limitations': 'Provider exports the admitted root; no internal failed tactic trace or frontier is asserted.'}))
+        ops.extend([UpsertNode('Obstruction', obstruction, {'obstruction_id': obstruction, 'kind': 'search-policy',
+            'formal_run_id': run_id, 'formal_state_ids': [root], 'minimal_state_artifact': minimal,
+            'environment_hash': result['environment_hash'], 'diagnostic_artifacts': [diagnostic],
+            'evidence': [{'kind': 'heuristic-optimizer', 'artifact_hash': result_hash,
+                'note': 'Search stagnated; no counterexample or mathematical refutation is asserted.'}]}),
+            _edge(lease.proof_id, 'RAISED_OBSTRUCTION', run_id, obstruction),
+            _edge(lease.proof_id, 'AT_STATE', obstruction, root)])
     if result.get("certificate"):
         certificate = canonical["certificate"]
         identity = _id(lease.proof_id, "cert", certificate["artifact_hash"])
@@ -211,6 +266,53 @@ def promotion_proposal(lease, view, *, claim_id, certificate_id):
     return _proposal(lease, ops)
 
 
+def obstruction_binding_proposal(lease, view, artifacts):
+    """Associate a recorded failure with its original claim under coordinator authority."""
+    if lease.worker_class != 'coordinator':
+        raise FormalV2Error('obstruction kernel binding requires coordinator authority')
+    obstruction = _node(view, lease.selected_move_id, 'Obstruction')
+    raised = view.edges_to(obstruction.node_id, 'RAISED_OBSTRUCTION')
+    if len(raised) != 1:
+        raise FormalV2Error('obstruction requires exactly one producing run')
+    run = _node(view, raised[0].src_id, 'FormalRun')
+    binding = _get(artifacts, run.fields['provider_binding_artifact'])
+    request, snapshot = binding['request'], binding['snapshot']
+    result = _get(artifacts, run.fields['provider_result_artifact'])
+    if (snapshot.get('result') != result or result['disposition'] != 'stagnated'
+            or run.fields['status'] != 'stagnated' or request['run_id'] != run.node_id
+            or request['proof_id'] != lease.proof_id or obstruction.fields.get('formal_run_id') != run.node_id
+            or result['request_digest'] != run.fields['request_digest']
+            or obstruction.node_id != _id(lease.proof_id, 'obs', snapshot['request_digest'], snapshot['attempts'])):
+        raise FormalV2Error('obstruction differs from the admitted provider result')
+    claim = _node(view, request['claim_id'], 'Claim')
+    declaration = _node(view, request['formal_declaration_id'], 'FormalDeclaration')
+    if ({edge.dst_id for edge in view.edges_from(run.node_id, 'SEARCHES')} != {declaration.node_id}
+            or obstruction.fields.get('environment_hash') != request['environment_hash']):
+        raise FormalV2Error('obstruction declaration or environment binding changed')
+    environment_id = _environment(view, declaration.node_id, request['environment_hash'])
+    run_environments = view.edges_from(run.node_id, 'RAN_UNDER')
+    if run_environments and {edge.dst_id for edge in run_environments} != {environment_id}:
+        raise FormalV2Error('formal run RAN_UNDER environment differs from its declaration pin')
+    previous = {edge.src_id for edge in view.edges_to(obstruction.node_id, 'RESOLVES')}
+    if previous and previous != {claim.node_id}:
+        raise FormalV2Error('obstruction already names another theorem kernel')
+    resolving_edges = view.edges_to(obstruction.node_id, 'RESOLVES')
+    ops = []
+    if not run_environments:
+        ops.append(_edge(lease.proof_id, 'RAN_UNDER', run.node_id, environment_id))
+    else:
+        keeper = min(run_environments, key=lambda edge: edge.edge_id)
+        ops.extend(RemoveEdge('RAN_UNDER', edge.edge_id)
+                   for edge in run_environments if edge.edge_id != keeper.edge_id)
+    if not resolving_edges:
+        ops.append(_edge(lease.proof_id, 'RESOLVES', claim.node_id, obstruction.node_id))
+    else:
+        keeper = min(resolving_edges, key=lambda edge: edge.edge_id)
+        ops.extend(RemoveEdge('RESOLVES', edge.edge_id)
+                   for edge in resolving_edges if edge.edge_id != keeper.edge_id)
+    return _proposal(lease, ops)
+
+
 def _lease_view(gate, lease):
     from context_compiler.snapshot_provider import LeaseSnapshotProvider
     return LeaseSnapshotProvider(gate.view, gate.store).for_lease(lease).view
@@ -229,3 +331,7 @@ def admit_replay(client, lease, gate, artifacts, *, certificate_id, max_steps, w
 def admit_promotion(lease, gate, *, claim_id, certificate_id):
     return gate.commit(promotion_proposal(lease, _lease_view(gate, lease),
         claim_id=claim_id, certificate_id=certificate_id))
+
+
+def admit_obstruction_binding(lease, gate, artifacts):
+    return gate.commit(obstruction_binding_proposal(lease, _lease_view(gate, lease), artifacts))

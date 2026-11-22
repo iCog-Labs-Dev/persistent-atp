@@ -16,14 +16,16 @@ from .errors import (
     TransientUnavailable, UnsupportedCapability, UnsupportedContract,
     ReceiverProtocolError,
     StalePrecondition,
+    ReviewRequired,
 )
 from .models import (
     ACTION_TYPES, COORDINATION_ACTION_TYPES, COORDINATOR_ACTION_TYPES, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
-    CancelRequest, DecisionResponse, Event, FormalResume, FormalSearch,
+    CancelRequest, SearchReconciliationRequest, SearchReconciliationJob, DecisionResponse, Event, FormalResume, FormalSearch,
     LemmaBridge, OperationRef, OperationSnapshot, Preconditions, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, QueueResearchMoves, ResearchGuidance,
     SelectedProofCycle, StatementAlign, TERMINAL_LIFECYCLES, CapabilitySet,
     CoordinationPage, ProjectDigest, QueueCoordinatorEscalations, CoordinatorEscalation,
+    HypothesisFormalize, HypothesisRevise,
 )
 from .ports import ReceiverPort
 
@@ -131,6 +133,30 @@ class AsyncClient:
                                request_id=request_id, deadline=deadline, contract_version=contract_version)
         return await self.submit(request)
 
+    async def reconcile(self, request: ActionRequest, *, timeout: float = 30.0) -> "OperationHandle":
+        """One recovery pass: lookup first, resubmit only on authoritative absence.
+
+        Hosts checkpoint the prepared request and schedule bounded passes. This
+        method owns admission validation and never generates a replacement ID.
+        A failed lookup must not be treated as absence.
+        """
+        if self._closed:
+            raise RuntimeError("client is closed")
+        if not isinstance(request, ActionRequest):
+            raise TypeError("reconcile requires a prepared ActionRequest")
+        _duration(timeout, "timeout")
+        end = time.monotonic() + timeout
+        try:
+            receipt = await _before(self.lookup_request(workspace_id=request.workspace_id, request_id=request.request_id), end)
+            if receipt is None:
+                return await _before(self.submit(request), end)
+        except TimeoutError as exc:
+            raise SubmissionUncertain("reconciliation timed out; retain the original request", request=request) from exc
+        _admission(receipt, request.workspace_id, request.request_id, fingerprint(request))
+        if not receipt.accepted:
+            raise AdmissionRejected(receipt)
+        return OperationHandle(self, receipt.operation_ref, request_id=request.request_id)
+
     async def proof_create(self, spec_artifact: ArtifactRef, *, workspace_id: str, **request_options):
         return await self.submit_action(ProofCreate(spec_artifact), workspace_id=workspace_id, **request_options)
 
@@ -191,6 +217,17 @@ class AsyncClient:
     async def lemma_bridge(self, proof_id: str, obstruction_id: str, *, workspace_id: str, **request_options):
         return await self.submit_action(LemmaBridge(proof_id, obstruction_id), workspace_id=workspace_id, **request_options)
 
+    async def formalize_hypothesis(self, proof_id: str, hypothesis_id: str, *, workspace_id: str,
+                                   preconditions: Preconditions, **request_options):
+        return await self.submit_action(HypothesisFormalize(proof_id, hypothesis_id),
+            workspace_id=workspace_id, preconditions=preconditions, **request_options)
+
+    async def revise_hypothesis(self, proof_id: str, hypothesis_id: str, spec_artifact: ArtifactRef, *,
+                                workspace_id: str, preconditions: Preconditions,
+                                previous_claim_id: str | None = None, **request_options):
+        return await self.submit_action(HypothesisRevise(proof_id, hypothesis_id, spec_artifact, previous_claim_id),
+            workspace_id=workspace_id, preconditions=preconditions, **request_options)
+
     async def lookup_request(self, *, workspace_id: str, request_id: str) -> Admission | None:
         receipt = await self._port.lookup_request(workspace_id, request_id)
         return _admission(receipt, workspace_id, request_id) if receipt is not None else None
@@ -226,6 +263,35 @@ class AsyncClient:
             seen.add(result.ref)
         return results
 
+    async def events_page(self, ref: OperationRef, *, cursor: str | None = None):
+        """Read one bounded page for checkpointed framework observation."""
+        if not isinstance(ref, OperationRef):
+            raise TypeError("events require OperationRef")
+        response = await self._port.read_events(ref, cursor)
+        if not isinstance(response, tuple) or len(response) != 2:
+            raise ReceiverProtocolError("invalid event page")
+        page, next_cursor = response
+        if not isinstance(page, tuple) or (next_cursor is not None and (
+                not isinstance(next_cursor, str) or not 1 <= len(next_cursor) <= 128
+                or any(ord(c) < 32 for c in next_cursor))):
+            raise ReceiverProtocolError("invalid event page shape")
+        previous = -1
+        previous_version = -1
+        seen = {}
+        for event in page:
+            if not isinstance(event, Event) or event.operation_ref != ref:
+                raise ReceiverProtocolError("out-of-scope event")
+            if event.event_id in seen:
+                if seen[event.event_id] != event:
+                    raise ReceiverProtocolError("event identity changed within a page")
+                continue
+            seen[event.event_id] = event
+            if event.sequence <= previous or event.observation_version < previous_version:
+                raise ReceiverProtocolError("event page sequence or observation regressed")
+            previous = event.sequence
+            previous_version = event.observation_version
+        return page, next_cursor
+
     async def put_artifact(self, source: bytes, *, workspace_id: str, media_type: str,
                            expected_hash: str | None = None) -> ArtifactRef:
         if type(source) is not bytes or len(source) > 16 * 1024 * 1024:
@@ -259,6 +325,7 @@ class OperationHandle:
         self.ref = ref
         self._request_id = request_id
         self._last_version = -1
+        self._reconciliation_versions = {}
 
     async def snapshot(self) -> OperationSnapshot:
         result = await self._client._port.get_operation(self.ref)
@@ -338,6 +405,93 @@ class OperationHandle:
             raise ValueError("control operation mismatch")
         return await self._client._port.cancel(request)
 
+    async def reconcile_search(self, request: SearchReconciliationRequest, *, wait: bool = True,
+                               timeout: float = 60, poll_interval: float = 0.1):
+        if not isinstance(request, SearchReconciliationRequest) or request.operation_ref != self.ref:
+            raise ValueError("control operation mismatch")
+        if type(wait) is not bool:
+            raise TypeError("wait must be boolean")
+        _duration(timeout, "timeout")
+        _duration(poll_interval, "poll_interval")
+        end = time.monotonic() + timeout
+        try:
+            caps = await self._reconciliation_capabilities(end)
+            if "reconcile-search" not in caps.controls:
+                raise UnsupportedCapability("receiver cannot reconcile original searches")
+            result = await _before(self._client._port.reconcile_search(request), end)
+            if isinstance(result, SearchReconciliationJob):
+                if 'reconcile-search-jobs' not in caps.controls:
+                    raise ReceiverProtocolError('receiver did not advertise reconciliation jobs')
+                self._check_reconciliation_job(result, request.request_id, -1)
+                if not wait:
+                    return result
+                return await self._wait_search_reconciliation(request.request_id, end, poll_interval, result)
+            return self._check_reconciled_snapshot(_response(result, OperationSnapshot))
+        except TimeoutError as exc:
+            raise ObservationTimeout(request_id=request.request_id, operation_ref=self.ref) from exc
+
+    def _check_reconciled_snapshot(self, snapshot):
+        if snapshot.ref != self.ref or self._request_id is not None and snapshot.request_id != self._request_id:
+            raise ReceiverProtocolError("search reconciliation operation identity mismatch")
+        if snapshot.observation_version < self._last_version:
+            raise ReceiverProtocolError("receiver observation version regressed")
+        self._last_version = snapshot.observation_version
+        return snapshot
+
+    def _check_reconciliation_job(self, job, request_id, version):
+        _response(job, SearchReconciliationJob)
+        version = max(version, self._reconciliation_versions.get(request_id, -1))
+        if job.operation_ref != self.ref or job.request_id != request_id or job.version < version:
+            raise ReceiverProtocolError('reconciliation job identity or version changed')
+        self._reconciliation_versions[request_id] = job.version
+
+    async def _reconciliation_capabilities(self, end):
+        probe = getattr(self._client._port, 'reconciliation_capabilities', None)
+        caps = _response(await _before(probe() if probe else self._client.capabilities(), end), CapabilitySet)
+        if caps.contract_version != '2.0':
+            raise UnsupportedContract('reconciliation requires contract 2.0 capability negotiation')
+        return caps
+
+    async def wait_search_reconciliation(self, request_id: str, *, timeout: float = 60, poll_interval: float = 0.1):
+        # Validates the control identity without admitting or refreshing it.
+        SearchReconciliationRequest(request_id, self.ref, 0)
+        _duration(timeout, 'timeout')
+        _duration(poll_interval, 'poll_interval')
+        try:
+            end = time.monotonic() + timeout
+            caps = await self._reconciliation_capabilities(end)
+            if 'reconcile-search-jobs' not in caps.controls:
+                raise UnsupportedCapability('receiver does not advertise reconciliation jobs')
+            return await self._wait_search_reconciliation(request_id, end, poll_interval)
+        except TimeoutError as exc:
+            raise ObservationTimeout(request_id=request_id, operation_ref=self.ref) from exc
+
+    async def _wait_search_reconciliation(self, request_id, end, interval, job=None):
+        version = -1
+        while True:
+            if time.monotonic() >= end:
+                raise ObservationTimeout(request_id=request_id, operation_ref=self.ref)
+            if job is None:
+                reader = getattr(self._client._port, 'read_search_reconciliation', None)
+                if reader is None:
+                    raise ReceiverProtocolError('receiver advertised reconciliation jobs without a reader')
+                job = await _before(reader(
+                    workspace_id=self.ref.workspace_id, request_id=request_id), end)
+            self._check_reconciliation_job(job, request_id, version)
+            version = job.version
+            if job.state == 'blocked':
+                raise ReviewRequired(job.summary or job.error_code, request_id=request_id, operation_ref=self.ref)
+            if job.state == 'succeeded':
+                snapshot = await _before(self.snapshot(), end)
+                receipt = (snapshot.result or {}).get('execution_reconciliation')
+                if (not isinstance(receipt, dict) or receipt.get('execution_settled') is not True
+                        or receipt.get('operation_ref') != self.ref.to_dict()
+                        or receipt.get('request_id') != snapshot.request_id):
+                    raise ReceiverProtocolError('completed reconciliation lacks its original operation receipt')
+                return snapshot
+            await asyncio.sleep(min(interval, max(0, end - time.monotonic())))
+            job = None
+
     async def amend_budget(self, request: BudgetAmendment):
         if request.operation_ref != self.ref:
             raise ValueError("control operation mismatch")
@@ -369,6 +523,9 @@ class SyncClient:
     def submit(self, request):
         return self._run(self._client.submit(request))
 
+    def reconcile(self, request, **kwargs):
+        return self._run(self._client.reconcile(request, **kwargs))
+
     def status(self, **kwargs):
         return self._run(self._client.status(**kwargs))
 
@@ -392,6 +549,30 @@ class SyncClient:
 
     def coordination_page(self, proof_id: str, **kwargs):
         return self._run(self._client.coordination_page(proof_id, **kwargs))
+
+    def list_operations(self, **kwargs):
+        return self._run(self._client.list_operations(**kwargs))
+
+    def snapshot(self, handle):
+        return self._run(handle.snapshot())
+
+    def events_page(self, ref, **kwargs):
+        return self._run(self._client.events_page(ref, **kwargs))
+
+    def cancel(self, control):
+        return self._run(self.attach(control.operation_ref).cancel(control))
+
+    def reconcile_search(self, control, **kwargs):
+        return self._run(self.attach(control.operation_ref).reconcile_search(control, **kwargs))
+
+    def wait_search_reconciliation(self, ref, request_id, **kwargs):
+        return self._run(self.attach(ref).wait_search_reconciliation(request_id, **kwargs))
+
+    def amend_budget(self, control):
+        return self._run(self.attach(control.operation_ref).amend_budget(control))
+
+    def answer_decision(self, control):
+        return self._run(self.attach(control.operation_ref).answer_decision(control))
 
     def close(self):
         return self._run(self._client.aclose())

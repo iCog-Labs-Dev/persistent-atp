@@ -2,7 +2,7 @@
 
 Connections belong to one request, allowing SyncClient to reuse an adapter
 across separate event loops without retaining loop-bound connection pools.
-Cancellation stops observation, never establishes server cancellation.
+Cancelling observation stops waiting; an explicit control requests server cancellation.
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _json(data):
         parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite receiver JSON")))
 from ..models import (
     Admission, ArtifactRef, CapabilitySet, CoordinationItem, CoordinationPage, Event, OperationRef,
-    OperationSnapshot, ProjectDigest,
+    OperationSnapshot, ProjectDigest, SearchReconciliationJob,
 )
 
 
@@ -97,6 +97,11 @@ def _snapshot(raw):
 def _artifact(raw):
     _exact(raw, ArtifactRef)
     return ArtifactRef(**raw)
+
+
+def _reconciliation_job(raw):
+    _exact(raw, SearchReconciliationJob)
+    return SearchReconciliationJob(**{**raw, "operation_ref": _ref(raw["operation_ref"])})
 
 
 class HTTPReceiverAdapter:
@@ -258,14 +263,46 @@ class HTTPReceiverAdapter:
             raise ReceiverProtocolError("invalid artifact response")
         return base64.b64decode(raw["content_base64"], validate=True)
 
+    @_protocol
     async def cancel(self, control):
-        raise UnsupportedCapability("HTTP reference control is unavailable")
+        result = _snapshot(await self._request("POST", "/v2/controls/cancel", to_dict(control)))
+        if result.ref != control.operation_ref:
+            raise ReceiverProtocolError("cancellation response operation mismatch")
+        return result
 
+    @_protocol
+    async def reconcile_search(self, control):
+        raw = await self._request("POST", "/v2/controls/reconcile-search", to_dict(control))
+        # Older receivers return the completed snapshot synchronously.
+        result = _reconciliation_job(raw) if "state" in raw else _snapshot(raw)
+        ref = result.operation_ref if isinstance(result, SearchReconciliationJob) else result.ref
+        if ref != control.operation_ref:
+            raise ReceiverProtocolError("search reconciliation response operation mismatch")
+        return result
+
+    @_protocol
+    async def reconciliation_capabilities(self):
+        raw = await self._request("GET", "/v2/capabilities?control=reconcile-search")
+        _exact(raw, CapabilitySet)
+        return CapabilitySet(**{**raw, "actions": _string_set(raw["actions"]), "controls": _string_set(raw["controls"])})
+
+    @_protocol
+    async def read_search_reconciliation(self, *, workspace_id, request_id):
+        return _reconciliation_job(await self._request("GET", "/v2/reconciliations/" + self._path(workspace_id, request_id)))
+
+    @_protocol
     async def amend_budget(self, control):
-        raise UnsupportedCapability("HTTP reference budget amendment is unavailable")
+        result = await self._request("POST", "/v2/controls/amend-budget", to_dict(control))
+        if not isinstance(result, dict):
+            raise ReceiverProtocolError("invalid budget amendment response")
+        return result
 
+    @_protocol
     async def answer_decision(self, control):
-        raise UnsupportedCapability("HTTP reference decision workflow is unavailable")
+        result = await self._request("POST", "/v2/controls/answer-decision", to_dict(control))
+        if not isinstance(result, dict):
+            raise ReceiverProtocolError("invalid decision response receipt")
+        return result
 
     async def aclose(self):
         self._closed = True

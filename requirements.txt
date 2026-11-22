@@ -1,9 +1,11 @@
 # Local runtime dependencies for pip/uv compatibility
 # This file mirrors the primary project dependencies for simple installs.
 python-dotenv>=1.0
+httpx>=0.27,<1
 neo4j>=5.14
 psycopg[binary]>=3.0
 jsonschema>=4.0
+websockets>=12.0
 
 # Dev dependencies
 pytest>=8.0

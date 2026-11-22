@@ -50,6 +50,13 @@ Operation completion remains distinct from formal verification. The reference
 receiver uses the existing proof-wide escalation lease, which may supersede
 active dispatch leases; this action does not introduce a non-preempting queue.
 
+Checkpointed coordinators can call `reconcile(prepared_request)` for one recovery
+pass. It validates an existing admission, or submits the unchanged prepared
+request only after an authoritative lookup reports absence. An unavailable
+lookup does not authorize resubmission. Both clients expose reconciliation;
+the synchronous client also exposes operation listing, snapshot reads, bounded
+event pages, and control forwarding. Hosts schedule bounded recovery passes.
+
 The receiver and Omega commands below require `feat/omegaclaw-integration`; this branch supplies the standalone library and its contract tests.
 
 ## Install and start the reference receiver
@@ -240,7 +247,34 @@ Read responses are validated for DTO type, requested workspace/proof identity, a
 
 Event streams deduplicate notifications, verify sequence/scope, wait between empty or duplicate-only pages, and finish after observing a terminal operation with no new events. Retaining a cursor on an empty page no longer causes a busy loop. Cancelling a consumer leaves receiver execution untouched.
 
-Artifact transfer remains whole-byte and is limited to 16 MiB before base64 encoding. HTTP responses have a 24 MiB decoded-envelope limit, accommodating a maximum-size artifact's JSON/base64 representation. The receiver can impose a smaller request limit; negotiated limits, byte streaming and server retention guarantees are not implemented here. HTTP controls remain explicitly unsupported. This release changes client behavior and installation requirements, not the mathematical authority of the receiver.
+Artifact transfer remains whole-byte and is limited to 16 MiB before base64 encoding. HTTP responses have a 24 MiB decoded-envelope limit, accommodating a maximum-size artifact's JSON/base64 representation. The receiver can impose a smaller request limit; negotiated limits, byte streaming and server retention guarantees are not implemented here. HTTP forwards cancellation, budget amendment, and decision responses to compatible receiver control endpoints. Receivers must advertise and enforce those capabilities; the companion reference receiver continues to reject unsupported controls. This release changes client behavior and installation requirements, not the mathematical authority of the receiver.
+
+The optional `reconcile-search` control is available through
+`OperationHandle.reconcile_search(SearchReconciliationRequest(control_id, ref, version))`
+and `SyncClient.reconcile_search(control)`. It inspects a terminal original search
+whose execution remains unresolved, including legacy succeeded/cancelled
+records without settlement evidence, without starting, retrying or replaying
+provider work. Receivers must advertise the capability. The companion receiver
+requires a terminal original service job and preserves the original snapshot's
+result and lifecycle, adds an `execution_reconciliation` receipt reference and
+advances its observation version when validated search evidence is reconciled.
+Retain the same control ID/body across transport retries. A search completion
+receipt cannot recover a lost independent replay receipt or certify a theorem.
+Already confirmed settled successes are ineligible. Missing evidence, expired
+authority and replay activity remain blocked, independently of lifecycle.
+
+Receivers advertising `reconcile-search-jobs` return a typed
+`SearchReconciliationJob` on control admission. The SDK polls that durable job
+and returns the reconciled operation snapshot on completion. Set `wait=False`
+to return the job immediately, or set `timeout` and `poll_interval` to bound
+client observation. Timeout and cancellation leave receiver execution intact.
+`handle.wait_search_reconciliation(control_id, timeout=60)` observes the same
+job without another control POST. `SyncClient.wait_search_reconciliation(ref,
+control_id, timeout=60)` is the synchronous equivalent. Jobs preserve control
+identity, operation scope and monotonically increasing versions. Terminal
+blocked jobs raise `ReviewRequired`; a new observation requires a new control.
+The HTTP adapter uses control-scoped capability negotiation to avoid readiness
+probes during recovery, and supports older synchronous receivers as well.
 
 ## SDK-only verification
 

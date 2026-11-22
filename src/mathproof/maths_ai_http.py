@@ -11,16 +11,16 @@ from copy import deepcopy
 import json
 import math
 import re
+import time
 from typing import Any, Mapping
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
 
 from commit_gate.canon import canonical_json, content_hash
 from mathproof.formal_atp import FormalATPAdapter
 from mathproof.formal_v2 import ArtifactRepository, CONTRACT_DIR, _json, address, validate, without_nulls
 from mathproof.schemas import validate as validate_canonical
 from mathproof.soundness import validate_formal_search_result
+from mathproof._bounded_http import request as bounded_request
 
 __all__ = ["MathsAIAPIError", "MathsAIHTTPFormalATP", "maths_ai_http_atp"]
 
@@ -59,6 +59,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             raise ValueError("timeout must be positive")
         self.base_url = base_url.rstrip("/")
         self.token, self.timeout, self.artifacts = token, timeout, artifacts
+        self.observation_deadline = None
         self.replay_budget = dict(replay_budget or {"max_steps": 100, "wall_clock_ms": 30000})
         self._requests: dict[str, dict] = {}
         self._snapshots: dict[str, dict] = {}
@@ -67,6 +68,12 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
 
     def _transport(self, method, path, data=None, *, binary=False,
                    expected_statuses=frozenset({200})):
+        deadline = time.monotonic() + self.timeout
+        if self.observation_deadline is not None:
+            left = self.observation_deadline - time.time()
+            if left <= 0:
+                raise MathsAIAPIError('formal observation deadline elapsed')
+            deadline = min(deadline, time.monotonic() + left)
         headers = {"Accept": "application/octet-stream" if binary else "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/octet-stream" if isinstance(data, bytes) else "application/json"
@@ -74,28 +81,26 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
                 data = canonical_json(data)
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(32 * 1024 * 1024 + 1)
-                if len(raw) > 32 * 1024 * 1024:
-                    raise MathsAIAPIError("provider response exceeds the 32 MiB transport bound")
-                status = response.status
-                if status not in expected_statuses:
-                    raise MathsAIAPIError(f"unexpected HTTP {status}", status_code=status)
-                if binary:
-                    return raw, response.headers.get("X-Content-Hash")
-                body = _json(raw)
-        except HTTPError as exc:
-            detail, code = str(exc), None
+            status, raw, digest = bounded_request(method, self.base_url + path, headers, data, deadline=deadline)
+        except TimeoutError as exc:
+            raise MathsAIAPIError('formal transport deadline elapsed', code='FORMAL_TRANSPORT_TIMEOUT') from exc
+        except (OSError, ValueError) as exc:
+            raise MathsAIAPIError(f'{method} {path}: {exc}') from exc
+        if status not in expected_statuses:
+            detail, code = f'HTTP {status}', None
             try:
-                error = _check("formal-error", json.loads(exc.read()))
+                error = _check("formal-error", _json(raw))
                 detail, code = error["detail"], error["category"]
             except (ValueError, MathsAIAPIError):
                 pass
-            raise MathsAIAPIError(f"{method} {path}: {detail}", status_code=exc.code, code=code) from exc
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise MathsAIAPIError(f"{method} {path}: {exc}") from exc
+            raise MathsAIAPIError(f'{method} {path}: {detail}', status_code=status, code=code)
+        if binary:
+            return raw, digest
+        try:
+            body = _json(raw)
+        except ValueError as exc:
+            raise MathsAIAPIError('provider returned invalid JSON') from exc
         if not isinstance(body, dict):
             raise MathsAIAPIError("provider response must be a JSON object")
         return body
@@ -157,12 +162,25 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
     def get_artifact(self, digest):
         return self._fetch_artifact(digest)
 
-    def _prepare(self, request):
+    def prepare(self, request):
+        """Validate an original request without contacting the provider."""
         request = deepcopy(dict(request))
         _check("formal-search-request", request)
         if any(not request[k].startswith(request["proof_id"] + "/")
                for k in ("claim_id", "formal_declaration_id", "run_id")):
             raise MathsAIAPIError("request identities belong to different proofs")
+        return request
+
+    def restore_prepared(self, request):
+        """Register durable request identity before reconciling uncertain delivery."""
+        request = self.prepare(request)
+        previous = self._requests.get(request["run_id"])
+        if previous is not None and without_nulls(previous) != without_nulls(request):
+            raise MathsAIAPIError("run_id already belongs to a different request")
+        self._requests[request["run_id"]] = request
+
+    def _prepare(self, request):
+        request = self.prepare(request)
         cap = self.formal_capabilities()
         if 2 not in cap["protocol_versions"] or cap.get("frontier_resume") is not False:
             raise MathsAIAPIError("unsupported provider lifecycle contract")
@@ -265,13 +283,14 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         except (ValueError, UnicodeDecodeError) as exc:
             raise MathsAIAPIError(f"invalid canonical JSON artifact: {exc}") from exc
 
-    def _evidence(self, result, request):
-        fetched = {a["sha256"]: self._fetch_artifact(a["sha256"]) for a in result["artifacts"]}
+    def _evidence(self, result, request, *, local_only=False):
+        fetch = self._local_bytes if local_only else self._fetch_artifact
+        fetched = {a["sha256"]: fetch(a["sha256"]) for a in result["artifacts"]}
         def load(digest):
             if not digest:
                 raise MathsAIAPIError("proof is missing its evidence address")
             if digest not in fetched:
-                fetched[digest] = self._fetch_artifact(digest)
+                fetched[digest] = fetch(digest)
             return fetched[digest]
         if result.get("input_artifact_hash"):
             manifest = self._json_artifact(load(result["input_artifact_hash"]))
@@ -327,7 +346,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         except KeyError as exc:
             raise MathsAIAPIError(f"provider graph references an absent state: {exc}") from exc
 
-    def _translate(self, snapshot, request, *, admission=False, deployment=None):
+    def _translate(self, snapshot, request, *, admission=False, deployment=None, local_only=False):
         self._check_snapshot(snapshot, request, admission=admission, deployment=deployment)
         provider_result = snapshot.get("result")
         result = {"run_id": request["run_id"], "proof_id": request["proof_id"],
@@ -377,7 +396,7 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
             findings = validate_formal_search_result(result, pinned_environment_hash=request["environment_hash"])
             if errors or findings:
                 raise MathsAIAPIError(f"invalid or unsound result: {errors or findings}")
-            self._evidence(provider_result, request)
+            self._evidence(provider_result, request, local_only=local_only)
             cert = result.get("certificate")
             if cert:
                 replay = self._replays.get((request["run_id"], cert["artifact_hash"]))
@@ -514,6 +533,10 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         canonical = self.formal_search_status(run_id)
         return deepcopy(self._snapshots[run_id]), canonical
 
+    def cached_evidence(self, run_id):
+        """Return already validated evidence without network I/O."""
+        return deepcopy(self._snapshots[run_id]), deepcopy(self._latest[run_id])
+
     def request_for(self, run_id):
         return deepcopy(self._known(run_id))
 
@@ -524,10 +547,15 @@ class MathsAIHTTPFormalATP(FormalATPAdapter):
         return {"format": "persistent-atp-formal-v2-binding-v1",
                 "request": self.request_for(run_id), "snapshot": snapshot}
 
-    def restore(self, binding):
+    def restore(self, binding, *, refresh=True):
         if binding.get("format") != "persistent-atp-formal-v2-binding-v1":
             raise MathsAIAPIError("unsupported durable run binding")
-        self._check_snapshot(binding["snapshot"], binding["request"])
+        request = self.prepare(binding["request"])
+        admission = "result" not in binding["snapshot"]
+        self._check_snapshot(binding["snapshot"], request, admission=admission)
+        self.restore_prepared(request)
+        if not refresh:
+            return self._translate(binding["snapshot"], request, admission=admission, local_only=True)
         return self.restore_run(binding["request"])
 
     def result(self, run_id):

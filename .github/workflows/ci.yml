@@ -6,6 +6,17 @@ on:
   pull_request:
 
 jobs:
+  coordinator-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test pinned coordinator runtime without model inference
+        run: |
+          docker run --rm --entrypoint /bin/bash \
+            --volume "$PWD:/workspace" --workdir /workspace \
+            singularitynet/omega@sha256:a258d30a92b58b8b4bc104605ee57f20b2c2527b2a9ac3532186057098619f3b \
+            scripts/coordinator-ci.sh
   test:
     runs-on: ubuntu-latest
     services:
@@ -42,14 +53,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system pytest jsonschema
+        run: uv sync --locked --extra dev
 
       - name: Apply artifact store schema
-        run: uv run python -c "from artifacts.schema import apply_schema; apply_schema()"
+        run: uv run --locked --extra dev python -c "from artifacts.schema import apply_schema; apply_schema()"
         env:
           ARTIFACT_DB_URL: postgresql://postgres:postgres@localhost:5432/test_db
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run --locked --extra dev python -m pytest -q

@@ -13,6 +13,7 @@ __all__ = [
     "SchemaNotAppliedError",
     "ArtifactNotFoundError",
     "ArtifactQueryError",
+    "ArtifactIntegrityError",
     "ArtifactCorruptError",
 ]
 
@@ -47,5 +48,9 @@ class ArtifactQueryError(ArtifactStoreError):
     server-side error that outlived the driver's own retries)."""
 
 
-class ArtifactCorruptError(ArtifactStoreError):
+class ArtifactIntegrityError(ArtifactStoreError):
     """Stored bytes no longer match their content address."""
+
+
+class ArtifactCorruptError(ArtifactIntegrityError):
+    """Corruption detected by the artifact store; retains the receiver error API."""

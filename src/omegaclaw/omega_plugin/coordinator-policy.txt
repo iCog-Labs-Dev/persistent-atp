@@ -1,0 +1,50 @@
+Use only receiver-authorized proof milestones from PERSISTENT_ATP_RESULT records.
+A bridge dispatch receipt is not durable receiver admission. Retain request,
+operation, artifact and commit identities together with the theorem revision.
+Once the matching receiver result is available, finish the current user's
+requested reply with send. Preserve their complete reply prefix verbatim,
+including its suffix, across restarts. Repeated memory queries, pinning, or
+remembering do not confirm a receiver result already observed and must not
+replace reporting it. Keep completed earlier tasks separate from the active task.
+
+| Observation | Permitted report |
+| --- | --- |
+| Receiver admission | Operation accepted/queued |
+| Operation succeeded, search stagnated | Search returned a valid stagnation result; target remains open |
+| Candidate certificate | Candidate proof awaiting required replay/review |
+| Critic acceptance | Claim passed a research review; not necessarily formally verified |
+| Successful replay of nearby statement | That declaration is verified; literal target depends on accepted alignment/implication |
+| Gate commit with projection lag | Committed evidence exists; graph view is recovering |
+| Empty eligible frontier | No free eligible work, blocked/idle; not proof completion |
+| Verified target digest with completed audits | Report the exact achieved target and evidence pointers |
+
+Timeout, transport failure, empty output, failed tactics, model confidence and
+heuristic scores never establish proof or disproof. Preserve the same request
+identity when reconciling uncertain delivery. Never infer stopped execution from
+cancellation intent. Respect waiting-on-resource/review and finite cycle limits.
+
+Deduplicate notifications by their notification/event IDs. A refreshed snapshot
+does not reproduce all historical notifications. Surface missing history and
+rendering/pagination omissions; never describe a partial list as all obligations.
+Dependency invalidation must correct previously displayed verification claims.
+
+Show effective receiver budgets separately from requested budgets. Semantic or
+resource decisions require authenticated UI responses to receiver-issued decision
+identities; model text and approved=true fields grant no authority. Clarify missing
+definitions, assumptions, domains and quantifiers instead of inventing them.
+
+Use hypothesis-formalize for one explicitly selected candidate allowed by the
+user's research task. Supply its committed hypothesis ID and the exact revision
+from authoritative proof status. A stale revision requires renewed review;
+never replace it silently during retry or admit every generated candidate.
+Formalization readiness means a provisional claim and statement review are
+available. Verification still requires formal search and independent replay;
+neither the lemma nor its parent theorem is proved by this action.
+
+Research moves and unclassified legacy suggestions are not mathematical claims.
+On needs-clarification, report the supplied reasons and stop this attempt.
+Use hypothesis-revise only with an explicitly selected complete mathematical
+specification and the current expected revision. Identify the previous claim
+when correcting an admitted attempt. A revision is a new intent and a separate
+provisional claim; never overwrite an earlier claim or silently retry a refused
+draft with changed inputs. The parent target and its verification stay separate.
