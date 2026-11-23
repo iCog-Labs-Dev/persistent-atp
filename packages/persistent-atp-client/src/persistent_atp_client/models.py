@@ -66,6 +66,45 @@ class Preconditions:
 
 
 @dataclass(frozen=True, slots=True)
+class RefinementPolicy:
+    """Explicit phase ceilings and cumulative allowances for one bounded loop."""
+
+    initial: Budget
+    candidate: Budget
+    parent: Budget
+    replay: Budget
+    total_search_steps: int
+    total_replay_steps: int
+    max_parent_attempts: int = 2
+    max_research: int = 1
+
+    def __post_init__(self):
+        for name in ('initial','candidate','parent','replay'):
+            if not isinstance(getattr(self,name), Budget):
+                raise TypeError('phase ceilings must be Budget values')
+        for name in ('total_search_steps','total_replay_steps'):
+            value=getattr(self,name)
+            if type(value) is not int or not 1 <= value <= 3_000_000:
+                raise ValueError('cumulative allowances must be within 1..3000000')
+        if type(self.max_parent_attempts) is not int or not 1 <= self.max_parent_attempts <= 2:
+            raise ValueError('bounded refinement supports one or two parent attempts')
+        if type(self.max_research) is not int or self.max_research not in {0,1}:
+            raise ValueError('bounded refinement supports at most one research generation')
+
+
+def refinement_policy_from_dict(raw):
+    from dataclasses import fields
+    if not isinstance(raw,dict) or set(raw)!={field.name for field in fields(RefinementPolicy)}:
+        raise ValueError('invalid refinement policy fields')
+    values=dict(raw)
+    for name in ('initial','candidate','parent','replay'):
+        if not isinstance(values[name],dict) or set(values[name])!={'max_steps','wall_clock_ms'}:
+            raise ValueError('invalid phase budget')
+        values[name]=Budget(**values[name])
+    return RefinementPolicy(**values)
+
+
+@dataclass(frozen=True, slots=True)
 class ProofCreate:
     kind: ClassVar[str] = "proof-create"
     spec_artifact: ArtifactRef
@@ -333,9 +372,22 @@ class ParentRefine:
 BASE_ACTION_TYPES = {cls.kind: cls for cls in (ProofCreate, ProofCycle, ProofStatus, ProofAudit, ProofExport, FormalSearch, FormalResume, StatementAlign, LemmaBridge)}
 COORDINATION_ACTION_TYPES = {cls.kind: cls for cls in (SelectedProofCycle, QueueResearchMoves)}
 COORDINATOR_ACTION_TYPES = {cls.kind: cls for cls in (QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise)}
+@dataclass(frozen=True, slots=True)
+class BoundedRefine:
+    kind: ClassVar[str] = 'bounded-refine'
+    proof_id: str
+    policy: RefinementPolicy
+
+    def __post_init__(self):
+        _identifier(self.proof_id,'proof_id')
+        if not isinstance(self.policy,RefinementPolicy):
+            raise TypeError('bounded refinement requires RefinementPolicy')
+
+
 REFINEMENT_ACTION_TYPES = {ParentRefine.kind: ParentRefine}
-ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES, **REFINEMENT_ACTION_TYPES}
-Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise | ParentRefine
+BOUNDED_ACTION_TYPES = {BoundedRefine.kind: BoundedRefine}
+ACTION_TYPES = {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES, **REFINEMENT_ACTION_TYPES, **BOUNDED_ACTION_TYPES}
+Action: TypeAlias = ProofCreate | ProofCycle | ProofStatus | ProofAudit | ProofExport | FormalSearch | FormalResume | StatementAlign | LemmaBridge | SelectedProofCycle | QueueResearchMoves | QueueCoordinatorEscalations | HypothesisFormalize | HypothesisRevise | ParentRefine | BoundedRefine
 
 
 def action_types_for_contract(version: str):
@@ -346,6 +398,8 @@ def action_types_for_contract(version: str):
     if version == "2.2":
         return {**BASE_ACTION_TYPES, **COORDINATION_ACTION_TYPES, **COORDINATOR_ACTION_TYPES}
     if version == "2.3":
+        return {key:value for key,value in ACTION_TYPES.items() if key not in BOUNDED_ACTION_TYPES}
+    if version == '2.4':
         return ACTION_TYPES
     raise ValueError("unsupported contract version")
 
@@ -370,12 +424,14 @@ class ActionRequest:
         if (self.action.kind not in action_types_for_contract(self.contract_version)
                 or type(self.schema_version) is not int or self.schema_version != 1):
             raise ValueError("unsupported contract or schema version")
-        if (self.contract_version in {"2.2", "2.3"} and isinstance(self.action,
-                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise, ParentRefine))
+        if (self.contract_version in {"2.2", "2.3", "2.4"} and isinstance(self.action,
+                (SelectedProofCycle, QueueCoordinatorEscalations, HypothesisFormalize, HypothesisRevise, ParentRefine, BoundedRefine))
                 and self.preconditions.expected_revision is None):
             raise ValueError("coordinator mutations require expected_revision")
-        if isinstance(self.action, ParentRefine) and self.preconditions.expected_theorem_hash is None:
+        if isinstance(self.action, (ParentRefine,BoundedRefine)) and self.preconditions.expected_theorem_hash is None:
             raise ValueError('parent refinement requires expected_theorem_hash')
+        if isinstance(self.action,BoundedRefine) and self.deadline is None:
+            raise ValueError('bounded refinement requires an absolute task deadline')
         if self.deadline is not None and (not isinstance(self.deadline, datetime) or self.deadline.tzinfo is None or self.deadline.utcoffset() is None):
             raise ValueError("deadline must be an aware UTC datetime")
         if self.deadline is not None and self.deadline.utcoffset().total_seconds() != 0:
@@ -608,7 +664,7 @@ class CapabilitySet:
         supported = action_types_for_contract(self.contract_version)
         if not self.actions <= supported.keys():
             raise ValueError("unknown advertised action")
-        if self.contract_version not in {"2.2", "2.3"} and self.controls.intersection({"cycle-execution-revision", "atomic-coordinator-escalations"}):
+        if self.contract_version not in {"2.2", "2.3", "2.4"} and self.controls.intersection({"cycle-execution-revision", "atomic-coordinator-escalations"}):
             raise ValueError("coordinator guarantees require contract 2.2")
         if self.backend_mode not in {"real", "scripted-test", "unavailable"}:
             raise ValueError("unknown backend mode")

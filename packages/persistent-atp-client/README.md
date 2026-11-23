@@ -10,6 +10,15 @@ Omega/PeTTa skill → Omega bridge → persistent_atp_client → ReceiverPort
 
 The core client has no runtime, database, Omega, or LangGraph dependency. Python 3.11 or later is required. HTTP transport uses the optional `[http]` extra (`httpx`). The package version is `0.3.0`; the original nine actions retain contract `2.0`, existing coordination actions retain `2.1`, and atomic coordinator batches opt into contract `2.2`.
 
+Contract `2.3` adds an explicit `ParentRefine` attempt. Contract `2.4` adds
+`BoundedRefine(proof_id, RefinementPolicy(...))`: one receiver-owned refinement
+loop with phase budgets, cumulative search/replay allowances, at most two parent
+attempts and one research response. It requires expected revision, target hash
+and an absolute UTC deadline. Use `client.bounded_refine(..., workspace_id=...,
+preconditions=..., deadline=...)` or persist a prepared request before submission.
+Receivers advertise this action only when real verification and verified lemma
+reuse are configured. Earlier contracts do not implicitly enable this loop.
+
 Contract `2.2` adds `CoordinatorEscalation` and `QueueCoordinatorEscalations`:
 one to 100 items in one receiver-owned gate proposal. Each item retains its
 rule, target, optional claim link and detail. The request also carries a stable

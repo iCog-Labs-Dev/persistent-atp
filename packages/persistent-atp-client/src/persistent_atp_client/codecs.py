@@ -7,7 +7,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions, QueueResearchMoves, ResearchGuidance, CoordinatorEscalation, QueueCoordinatorEscalations
+from .models import ACTION_TYPES, ActionRequest, ArtifactRef, Budget, Preconditions, QueueResearchMoves, ResearchGuidance, CoordinatorEscalation, QueueCoordinatorEscalations, refinement_policy_from_dict
 
 
 def _dump(value: Any) -> Any:
@@ -69,6 +69,8 @@ def request_from_dict(raw: object) -> ActionRequest:
                 data[name] = _strict(ArtifactRef, data[name])
     if cls.kind in {"formal-search", "formal-resume", "parent-refine"} and "budget" in data:
         data["budget"] = _strict(Budget, data["budget"])
+    if cls.kind=='bounded-refine' and 'policy' in data:
+        data['policy']=refinement_policy_from_dict(data['policy'])
     if cls is QueueResearchMoves and "moves" in data:
         if not isinstance(data["moves"], list):
             raise ValueError("moves must be a list")
