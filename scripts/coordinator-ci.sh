@@ -18,6 +18,8 @@ git -C "$OMEGA_PINNED_ROOT" fetch --depth=1 https://github.com/singnet/Omega.git
   ba185cd359d9fe231b904110b988af39fafa5014
 git -C "$OMEGA_PINNED_ROOT" checkout --detach FETCH_HEAD
 python3 -m pytest -q src/omegaclaw/tests/test_task_workflow.py \
+  src/omegaclaw/tests/test_bounded_tasks.py \
+  src/omegaclaw/tests/test_bounded_ledger.py \
   src/omegaclaw/tests/test_runtime_overlay.py \
   src/omegaclaw/tests/test_intake_metadata.py \
   src/omegaclaw/tests/test_receiver_v2.py \

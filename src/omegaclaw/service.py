@@ -76,6 +76,8 @@ class OperationService:
         self.artifacts = artifacts or ReferenceArtifactStore(self.root / "artifacts")
         self.gate = CommitGate(self.view, self.store, artifacts=self.artifacts)
         self.jobs = JobLedger(self.root / "operations.sqlite3")
+        from .bounded_gate import BoundedGate
+        self.gate = BoundedGate(self.gate,self)
         if critic_timeout_s <= 0 or critic_timeout_s > 10:
             raise ValueError("reference critic timeout must be within (0, 10] seconds")
         # The child gets a minimal environment, without pytest's source path.
@@ -85,7 +87,7 @@ class OperationService:
         self.critic_timeout_s = critic_timeout_s
         for proof_id in self.store.proof_ids():
             self.catch_up(proof_id)
-        self.formal = self.cycles = self.intake = self.research = self.refinement = None
+        self.formal = self.cycles = self.intake = self.research = self.refinement = self.bounded = None
         if formal_config is not None:
             self.formal = FormalWorkflow(self, formal_config)
             from .cycle_runtime import CycleWorkflow
@@ -97,6 +99,8 @@ class OperationService:
             self.research = ResearchWorkflow(self, intake_config)
             from .refinement_runtime import ParentRefinementWorkflow
             self.refinement = ParentRefinementWorkflow(self)
+            from .bounded_runtime import BoundedRefinementWorkflow
+            self.bounded = BoundedRefinementWorkflow(self)
 
     def catch_up(self, proof_id: str) -> None:
         if self.gate.projects:
@@ -111,7 +115,7 @@ class OperationService:
                 "proof-create", "proof-status", "proof-audit", "proof-export",
                 *({"proof-cycle"} if self.cycles is not None else set()),
                 *({"lemma-bridge"} if self.research is not None else set()),
-                *({"hypothesis-formalize", "hypothesis-revise", "parent-refine"} if self.intake is not None else set())}:
+                *({"hypothesis-formalize", "hypothesis-revise", "parent-refine",'bounded-refine'} if self.intake is not None else set())}:
             raise ContractError("production executor is unavailable for this action")
         if request["workspace"] != self.workspace:
             raise ContractError("workspace is not registered")
@@ -146,7 +150,7 @@ class OperationService:
     def _run_admitted(self, request, operation_id):
         # These workflows own short locks around their durable stages. Their
         # provider calls must run without an enclosing service lock.
-        staged_workflow = (request["operation"] in {"hypothesis-formalize", "hypothesis-revise", "parent-refine"}
+        staged_workflow = (request["operation"] in {"hypothesis-formalize", "hypothesis-revise", "parent-refine",'bounded-refine'}
             or request["operation"] == "lemma-bridge" and self.research is not None
             or request["operation"] == "proof-cycle" and self.cycles is not None)
         try:
@@ -192,6 +196,11 @@ class OperationService:
             return self.refinement.run(operation_id, proof_id, args['previous_declaration'], args['lemma'],
                 self._parse_budget(args['budget']), expected_revision=int(args['expected_revision']),
                 expected_theorem_hash=args['expected_theorem_hash'])
+        if operation=='bounded-refine':
+            from datetime import datetime
+            return self.bounded.run(operation_id,proof_id,json.loads(args['policy']),
+                expected_revision=int(args['expected_revision']),theorem_hash=args['expected_theorem_hash'],
+                deadline=datetime.fromisoformat(args['deadline']).timestamp())
         if operation == "proof-export":
             return self._export(proof_id, args["destination"])
         if operation in ("formal-search", "formal-resume"):
@@ -393,8 +402,11 @@ class OperationService:
             self.store.release_lease(proof_id, row.lease_id, fencing_token=row.fencing_token)
 
     def _formalize_hypothesis(self, proof_id: str, hypothesis_id: str, operation_id: str,
-                              *, expected_revision: str, spec_artifact=None, previous_claim_id=None) -> dict:
+                              *, expected_revision: str, spec_artifact=None, previous_claim_id=None,
+                              cancelled=lambda: False) -> dict:
         """Explicitly admit one speculative candidate, then reuse guarded intake."""
+        if cancelled():
+            return {'proof_id':proof_id,'lifecycle':'cancelled','formalization_ready':False}
         if self.intake is None:
             raise ContractError("hypothesis formalization requires configured formalization and review workers")
         if not expected_revision.isascii() or not expected_revision.isdecimal():
@@ -540,7 +552,7 @@ class OperationService:
                 finally:
                     self.store.release_lease(proof_id, lease.lease_id, fencing_token=lease.fencing_token)
 
-        intake = self.intake.run(operation_id, proof_id, claim_id=claim_id)
+        intake = self.intake.run(operation_id, proof_id, claim_id=claim_id,cancelled=cancelled)
         with self.lock:
             return {**self._status(proof_id), "claim_id": claim_id,
                 "parent_claim_id": parent_claim_id, "hypothesis_id": hypothesis_id,

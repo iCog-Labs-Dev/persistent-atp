@@ -34,6 +34,7 @@ class ObstructionRuntimeConfig:
         {
             RunDisposition.STAGNATED.value,
             RunDisposition.COUNTEREXAMPLE.value,
+            RunDisposition.BUDGET_EXHAUSTED.value,
         }
     )
     max_tokens: int = 2_000

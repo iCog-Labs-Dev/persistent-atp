@@ -16,6 +16,7 @@ ARGUMENTS = {
     "hypothesis-formalize": ("proof", "hypothesis", "expected_revision", "workspace"),
     "hypothesis-revise": ("proof", "hypothesis", "spec_artifact", "previous_claim", "expected_revision", "workspace"),
     "parent-refine": ("proof", "previous_declaration", "lemma", "budget", "expected_revision", "expected_theorem_hash", "workspace"),
+    'bounded-refine':('proof','policy','expected_revision','expected_theorem_hash','deadline','workspace'),
 }
 
 MAX_ARGUMENT_BYTES = 16_384

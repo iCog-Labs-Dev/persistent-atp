@@ -18,6 +18,7 @@ class Reason(StrEnum):
     """Why the gate refused a proposal."""
 
     UNKNOWN_STATUS_VALUE = "unknown-status-value"
+    BOUNDED_TASK_OWNERSHIP = 'bounded-task-ownership'
     NAMESPACE_MISMATCH = "namespace-mismatch"
     MISSING_REQUIRED_FIELD = "missing-required-field"
     MISSING_PRIOR_VALUE = "missing-prior-value"

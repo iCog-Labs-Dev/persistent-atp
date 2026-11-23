@@ -102,7 +102,7 @@ CATEGORY_WORKER_CLASS = {
 ROUTABLE_WORKER_CLASSES = frozenset(CATEGORY_WORKER_CLASS.values())
 
 OBSTRUCTION_DISPOSITIONS = frozenset(
-    {RunDisposition.STAGNATED.value, RunDisposition.COUNTEREXAMPLE.value}
+    {RunDisposition.STAGNATED.value, RunDisposition.COUNTEREXAMPLE.value, RunDisposition.BUDGET_EXHAUSTED.value}
 )
 
 

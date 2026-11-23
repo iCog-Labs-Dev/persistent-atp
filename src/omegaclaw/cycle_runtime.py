@@ -24,7 +24,7 @@ class CycleWorkflow:
             'cycle_disposition': disposition, 'component_mode': 'formal-cycle', **fields}
 
     def run(self, operation, proof, *, category=None, cancelled=lambda: False,
-            expected_revision=None, on_progress=None, declaration_id=None, budget=None):
+            expected_revision=None, on_progress=None, declaration_id=None, budget=None, replay_budget=None):
         service = self.service
         if category not in {None, 'formal-run'}:
             raise ValueError('only formal-run has a configured production cycle executor')
@@ -61,6 +61,7 @@ class CycleWorkflow:
                 if state.get('contract_manifest') != MANIFEST_HASH:
                     raise ContractMigrationRequired()
                 if (state['proof_id'] != proof or state.get('category') != category
+                        or state.get('replay_budget') != replay_budget
                         or state.get('requested_declaration_id') != declaration_id
                         or declaration_id is not None and state['budget'] != budget):
                     raise ValueError('cycle identity differs from its saved selection')
@@ -82,6 +83,7 @@ class CycleWorkflow:
                     actor='omega-formal-atp', ttl_seconds=ttl) if declaration_id is not None else
                     scheduler.lease_best_global_move(proof, category=category, ttl_seconds=ttl))
                 state = {'contract_manifest': MANIFEST_HASH, 'proof_id': proof, 'category': category,
+                    **({'replay_budget': replay_budget} if replay_budget else {}),
                     **({'requested_declaration_id': declaration_id} if declaration_id is not None else {})}
                 if lease is None:
                     frontier = scheduler.build_frontier(proof)

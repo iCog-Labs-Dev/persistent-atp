@@ -14,9 +14,9 @@ from urllib.parse import urlsplit
 from persistent_atp_client import (
     AsyncClient, ArtifactRef, Budget, FormalResume, FormalSearch, LemmaBridge,
     Preconditions, ProofAudit, ProofCreate, ProofCycle, ProofExport, StatementAlign,
-    SyncClient, HypothesisFormalize, HypothesisRevise, ParentRefine,
+    SyncClient, HypothesisFormalize, HypothesisRevise, ParentRefine, BoundedRefine,
 )
-from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES
+from persistent_atp_client.models import OperationRef, TERMINAL_LIFECYCLES, refinement_policy_from_dict
 from persistent_atp_client.adapters.http import HTTPReceiverAdapter
 from persistent_atp_client.codecs import fingerprint, request_from_dict, to_dict
 from persistent_atp_client.errors import (
@@ -36,6 +36,7 @@ SKILLS = {
     "hypothesis-revise": ("proof", "hypothesis", "spec", "previous_claim", "expected_revision"),
     "parent-refine": ("proof", "previous_declaration", "lemma", "budget", "expected_revision", "expected_theorem_hash"),
 }
+COORDINATOR_SKILLS={'bounded-refine':('proof','policy','expected_revision','expected_theorem_hash')}
 
 
 class OmegaAdapter:
@@ -81,7 +82,8 @@ class OmegaAdapter:
         """Checkpoint workflow intent without doing network I/O on Omega's loop."""
         if workspace != self.workspace:
             raise ValueError("UNREGISTERED_WORKSPACE")
-        if kind not in SKILLS or set(arguments) != set(SKILLS[kind]):
+        catalogue={**SKILLS,**COORDINATOR_SKILLS}
+        if kind not in catalogue or set(arguments) != set(catalogue[kind]):
             raise ValueError("INVALID_REQUEST")
         if not all(isinstance(value, str) for value in arguments.values()):
             raise ValueError("tool arguments must be strings")
@@ -95,12 +97,14 @@ class OmegaAdapter:
             parsed["budget"] = to_dict(Budget(**value))
         if kind == "statement-align":
             ArtifactRef(arguments["lean_source"])
-        if kind == 'parent-refine':
+        if kind in {'parent-refine','bounded-refine'}:
             revision = arguments['expected_revision']
             if not revision.isascii() or not revision.isdecimal():
                 raise ValueError('expected_revision must be a nonnegative decimal revision')
             parsed['expected_revision'] = str(int(revision))
-            ParentRefine(arguments['proof'], arguments['previous_declaration'], arguments['lemma'], Budget(**parsed['budget']))
+            if kind=='parent-refine':
+                ParentRefine(arguments['proof'], arguments['previous_declaration'], arguments['lemma'], Budget(**parsed['budget']))
+            else:parsed['policy']=to_dict(refinement_policy_from_dict(parse_json(arguments['policy'])))
             Preconditions(expected_revision=int(revision), expected_theorem_hash=arguments['expected_theorem_hash'])
         if kind in {"hypothesis-formalize", "hypothesis-revise"}:
             HypothesisFormalize(arguments['proof'], arguments['hypothesis'])
@@ -147,10 +151,12 @@ class OmegaAdapter:
                     if row["state"] not in {"completed", "rejected"} and row["kind"] == kind:
                         if row["arguments"] == parsed or (kind == "proof-create" and row["arguments"] is None):
                             return row["id"]
-            if kind in {"proof-cycle", "parent-refine"}:
-                count = sum(row["kind"] in {"proof-cycle", "parent-refine"} and row.get("arguments", {}).get("proof") == parsed["proof"]
-                            for row in data["intents"].values() if row.get("arguments") is not None)
-                if count >= self.max_cycles_per_proof:
+            if kind in {"proof-cycle", "parent-refine",'bounded-refine'}:
+                count=sum((row['arguments']['policy']['max_parent_attempts'] if row['kind']=='bounded-refine' else 1)
+                    for row in data['intents'].values() if row.get('arguments') is not None and
+                    row['kind'] in {'proof-cycle','parent-refine','bounded-refine'} and row['arguments'].get('proof')==parsed['proof'])
+                required=parsed['policy']['max_parent_attempts'] if kind=='bounded-refine' else 1
+                if count+required > self.max_cycles_per_proof:
                     raise ValueError("CYCLE_LIMIT_REACHED")
             data["intents"][identity] = {"id": identity, "kind": kind, "arguments": parsed,
                 "state": "reserved", "request": None, "ref": None, "cursor": None,
@@ -294,13 +300,16 @@ class OmegaAdapter:
         digest = self.client.status(workspace_id=self.workspace, proof_id=args["proof"])
         pre = Preconditions(expected_revision=digest.revision, expected_theorem_hash=digest.target_artifact.hash)
         proof = args["proof"]
-        if kind == 'parent-refine':
+        if kind in {'parent-refine','bounded-refine'}:
             if (digest.revision != int(args['expected_revision'])
                     or digest.target_artifact.hash != args['expected_theorem_hash']):
                 raise StalePrecondition('parent refinement pins changed; prepare a new explicit intent')
-            caps = self.client.capabilities(contract_version='2.3')
+            caps = self.client.capabilities(contract_version='2.4' if kind=='bounded-refine' else '2.3')
             if kind not in caps.actions:
                 raise UnsupportedCapability('parent refinement is unavailable')
+            if kind=='bounded-refine':
+                return BoundedRefine(proof,refinement_policy_from_dict(args['policy'])), Preconditions(
+                    expected_revision=int(args['expected_revision']),expected_theorem_hash=args['expected_theorem_hash'])
             self._check_identity(proof, args['previous_declaration'], 'FormalDeclaration')
             self._check_identity(proof, args['lemma'], 'Claim')
             return ParentRefine(proof, args['previous_declaration'], args['lemma'], Budget(**args['budget'])), \

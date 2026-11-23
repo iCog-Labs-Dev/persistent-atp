@@ -124,11 +124,15 @@ class IntakeWorkflow:
         return state['claim']['fields'].get('hypothesis_operation_id') == operation
 
     def _owned_attempt(self, operation, state):
-        return self._owned_hypothesis(operation, state) or bool(state.get('refinement_artifact'))
+        from .bounded_ledger import BoundedLedger
+        return (self._owned_hypothesis(operation, state) or bool(state.get('refinement_artifact'))
+            or bool(BoundedLedger(self.service.jobs).child_owner(operation)))
 
     def _validate_history(self, operation, state):
         if state.get('refinement_artifact'):
             return self.service.refinement.validate_history(operation)
+        if not self._owned_hypothesis(operation,state):
+            return self.service.bounded.validate_child_history(operation)
         return self.validate_hypothesis_history(operation, state['proof_id'],
             self.service.view.node(state['claim_id']))
 
@@ -364,6 +368,11 @@ class IntakeWorkflow:
                     ('claim_id', 'lean_name', 'lean_type', 'certificate_id')}]
                     if state.get('verified_lemma') else ()))
             if 'candidate' not in state:
+                from .bounded_ledger import BoundedLedger,BoundedBlocked
+                if BoundedLedger(service.jobs).child_owner(operation):
+                    if state.get('bounded_draft_started'):
+                        raise BoundedBlocked('formalization response delivery is uncertain; retain the original bounded step')
+                    state['bounded_draft_started']=True;self._save(operation,state)
                 try:
                     candidate = LLMFormalizerBackend(self.config.llm()).formalize(compilation)
                 except ValueError as exc:
@@ -428,6 +437,11 @@ class IntakeWorkflow:
                 source_bytes.decode() + '\nThe unresolved body is only a search placeholder. Review the proposition, not proof completion.',
                 imports=self.config.imports, statement_hash=state['claim']['fields']['literal_target_hash'], source_hash=source)
             if 'review' not in state:
+                from .bounded_ledger import BoundedLedger,BoundedBlocked
+                if BoundedLedger(service.jobs).child_owner(operation):
+                    if state.get('bounded_review_started'):
+                        raise BoundedBlocked('alignment response delivery is uncertain; retain the original bounded step')
+                    state['bounded_review_started']=True;self._save(operation,state)
                 review = LLMAlignmentReviewer(self.config.llm(), reviewer_id=state['review_lease']['actor'], strict=True).review(request)
                 state['review'] = {'verdict': review.verdict.value, 'lifecycle': review.lifecycle.value,
                     'criteria': review.criteria.to_dict(), 'reviewer': review.reviewer, 'reasoning': review.reasoning}

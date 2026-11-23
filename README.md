@@ -291,6 +291,47 @@ Text-only clients can send `PERSISTENT_ATP_TASK ` followed by the task object's
 JSON. Ordinary free-form messages retain Omega's existing tool workflow; their
 prose is not silently interpreted as permission to increase execution limits.
 
+To enable one automatic refinement after a stalled or exhausted parent search,
+add `"refinement_policy": "bounded-v1"` to the task. This requires a real formal
+provider, configured intake, verified lemma reuse (`PERSISTENT_ATP_INTAKE_LEMMA_REUSE`
+set to `source-prefix` or `simp-prefix`), and an installed absolute Lean executable
+in `PERSISTENT_ATP_REUSE_LEAN`. The receiver must advertise `bounded-refine` under
+SDK contract `2.4`. Existing task envelopes and cached tasks keep their original
+behavior unless the policy is explicitly requested.
+
+The receiver persists one initial parent attempt, at most one research response,
+the first complete mathematical candidate in committed result order, independent
+candidate verification, and at most one new parent attempt. Procedural research
+moves cannot become claims. Alignment failure or a parent proof that does not use
+the selected lemma stops the loop without claiming verification. Phase ceilings
+and cumulative step allowances can be set explicitly with these task fields:
+
+```json
+{
+  "refinement_policy": "bounded-v1",
+  "max_cycles": 2,
+  "max_research": 1,
+  "refinement_budget": {
+    "initial": {"max_steps": 48, "wall_clock_ms": 30000},
+    "candidate": {"max_steps": 48, "wall_clock_ms": 30000},
+    "parent": {"max_steps": 48, "wall_clock_ms": 30000},
+    "replay": {"max_steps": 64, "wall_clock_ms": 15000},
+    "total_search_steps": 144,
+    "total_replay_steps": 128,
+    "max_parent_attempts": 2,
+    "max_research": 1
+  }
+}
+```
+
+These are also the default ceilings when `refinement_budget` is omitted. The
+task's absolute deadline and cumulative reservations survive restart. Unknown
+search, replay, or model delivery retains its reservation and proof ownership;
+another task cannot reset the allowance or repeat uncertain work. A missing
+replay receipt requires reconciliation before further mathematical execution.
+The final report includes usage and a committed `bounded_audit_artifact` with
+child identities, selection evidence and budget accounting.
+
 Task intake is persisted before the channel consumes the message. The server
 must preserve its URL/session namespace and monotonically increasing `seq`
 values across reconnects and restarts. The channel credential fingerprint also

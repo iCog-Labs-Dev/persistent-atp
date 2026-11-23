@@ -145,13 +145,14 @@ def search_proposal(client, run_id, lease, view, artifacts):
     # The adapter has already mapped run/attempt-scoped provider occurrences.
     scope = (snapshot["request_digest"], snapshot["attempts"])
     states = {row["state_id"]: row["state_id"] for row in canonical["states"]}
-    root_context = _obstruction_context(request, result, artifacts) if result['disposition'] == 'stagnated' else None
+    researchable = result['disposition'] in {'stagnated', 'budget-exhausted'}
+    root_context = _obstruction_context(request, result, artifacts) if researchable else None
     for row in canonical["states"]:
         fields = {key: copy.deepcopy(value) for key, value in row.items() if key != "state_id"}
         fields.update(environment_hash=result["environment_hash"], exact_hash_scope="run-occurrence", transposition_eligible=False)
         if root_context is not None and row['state_id'] == canonical['root_state_id']:
             if row['status'] not in {'open', 'expanded', 'failed', 'reopened'}:
-                raise FormalV2Error('stagnated search must retain an unresolved root')
+                raise FormalV2Error('unsuccessful search must retain an unresolved root')
             fields.update(root_context)
         ops.append(UpsertNode("FormalState", states[row["state_id"]], fields))
     for row in canonical["tactic_edges"]:
@@ -167,7 +168,7 @@ def search_proposal(client, run_id, lease, view, artifacts):
     for root in view.edges_from(run_id, "HAS_ROOT"):
         ops.append(RemoveEdge("HAS_ROOT", root.edge_id))
     ops.append(_edge(lease.proof_id, "HAS_ROOT", run_id, states[canonical["root_state_id"]]))
-    if result["disposition"] == "stagnated":
+    if researchable:
         obstruction = _id(lease.proof_id, "obs", *scope)
         root = canonical['root_state_id']
         root_record = next(row for row in canonical['states'] if row['state_id'] == root)
@@ -179,11 +180,12 @@ def search_proposal(client, run_id, lease, view, artifacts):
             'termination': result['termination'], 'provider_result_artifact': result_hash,
             'context_scope': 'admitted-root', 'context_representation': root_context['context_representation'],
             'limitations': 'Provider exports the admitted root; no internal failed tactic trace or frontier is asserted.'}))
-        ops.extend([UpsertNode('Obstruction', obstruction, {'obstruction_id': obstruction, 'kind': 'search-policy',
+        ops.extend([UpsertNode('Obstruction', obstruction, {'obstruction_id': obstruction,
+            'kind': 'resource' if result['disposition'] == 'budget-exhausted' else 'search-policy',
             'formal_run_id': run_id, 'formal_state_ids': [root], 'minimal_state_artifact': minimal,
             'environment_hash': result['environment_hash'], 'diagnostic_artifacts': [diagnostic],
             'evidence': [{'kind': 'heuristic-optimizer', 'artifact_hash': result_hash,
-                'note': 'Search stagnated; no counterexample or mathematical refutation is asserted.'}]}),
+                'note': 'Search stopped without closure; resource exhaustion or stagnation is not a mathematical refutation.'}]}),
             _edge(lease.proof_id, 'RAISED_OBSTRUCTION', run_id, obstruction),
             _edge(lease.proof_id, 'AT_STATE', obstruction, root)])
     if result.get("certificate"):
@@ -278,12 +280,15 @@ def obstruction_binding_proposal(lease, view, artifacts):
     binding = _get(artifacts, run.fields['provider_binding_artifact'])
     request, snapshot = binding['request'], binding['snapshot']
     result = _get(artifacts, run.fields['provider_result_artifact'])
-    if (snapshot.get('result') != result or result['disposition'] != 'stagnated'
-            or run.fields['status'] != 'stagnated' or request['run_id'] != run.node_id
+    if (snapshot.get('result') != result or result['disposition'] not in {'stagnated', 'budget-exhausted'}
+            or run.fields['status'] != result['disposition'] or request['run_id'] != run.node_id
             or request['proof_id'] != lease.proof_id or obstruction.fields.get('formal_run_id') != run.node_id
             or result['request_digest'] != run.fields['request_digest']
             or obstruction.node_id != _id(lease.proof_id, 'obs', snapshot['request_digest'], snapshot['attempts'])):
         raise FormalV2Error('obstruction differs from the admitted provider result')
+    expected_kind = 'resource' if result['disposition'] == 'budget-exhausted' else 'search-policy'
+    if obstruction.fields.get('kind') != expected_kind:
+        raise FormalV2Error('obstruction classification differs from the admitted termination')
     claim = _node(view, request['claim_id'], 'Claim')
     declaration = _node(view, request['formal_declaration_id'], 'FormalDeclaration')
     if ({edge.dst_id for edge in view.edges_from(run.node_id, 'SEARCHES')} != {declaration.node_id}

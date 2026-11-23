@@ -24,9 +24,11 @@ class JobLedger:
             operation TEXT NOT NULL, phase TEXT NOT NULL, response TEXT NOT NULL
         )""")
         columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(operations)')}
-        for column in ('formal_json', 'cycle_json', 'intake_json', 'research_json', 'refinement_json'):
+        for column in ('formal_json', 'cycle_json', 'intake_json', 'research_json', 'refinement_json', 'bounded_json'):
             if column not in columns:
                 self.conn.execute(f'ALTER TABLE operations ADD COLUMN {column} TEXT')
+        from .bounded_ledger import create_tables
+        create_tables(self.conn)
 
     def submit(self, request: dict) -> tuple[dict, bool]:
         body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
@@ -42,7 +44,7 @@ class JobLedger:
             else:
                 operation_id = str(uuid.uuid4())
                 result = {"operation_id": operation_id, "phase": "submitted", "transport_status": "accepted"}
-                if request["operation"] in {"proof-cycle", "proof-cycle-selected", "parent-refine"}:
+                if request["operation"] in {"proof-cycle", "proof-cycle-selected", "parent-refine",'bounded-refine'}:
                     result["proof_id"] = request["arguments"]["proof"]
                 self.conn.execute("INSERT INTO operations (operation_id, request_id, body_hash, workspace, operation, phase, response) VALUES (?,?,?,?,?,?,?)", (
                     operation_id, request["request_id"], digest, request["workspace"],

@@ -114,6 +114,10 @@ class ParentRefinementWorkflow:
         for row in service.jobs.conn.execute('SELECT * FROM operations'):
             if row['operation_id'] == operation:
                 continue
+            from .bounded_ledger import BoundedLedger
+            scoped=BoundedLedger(service.jobs)
+            if row['operation_id']==scoped.owner(proof) and scoped.child_owner(operation)==row['operation_id']:
+                continue
             formal = json.loads(row['formal_json']) if row['formal_json'] else {}
             if formal.get('proof_id') == proof and formal.get('phase') != 'completed':
                 if formal.get('phase') == 'replay-started' and 'receipt' not in formal:
@@ -148,11 +152,11 @@ class ParentRefinementWorkflow:
         return state, ops
 
     def run(self, operation, proof, previous, lemma, budget, *, expected_revision, expected_theorem_hash,
-            deadline=None, cancelled=lambda: False, on_progress=None):
+            deadline=None, cancelled=lambda: False, on_progress=None, replay_budget=None):
         try:
             return self._run(operation, proof, previous, lemma, budget, expected_revision=expected_revision,
                 expected_theorem_hash=expected_theorem_hash, deadline=deadline, cancelled=cancelled,
-                on_progress=on_progress)
+                on_progress=on_progress,replay_budget=replay_budget)
         except ValueError as error:
             raise ParentRefinementError(str(error)) from error
         finally:
@@ -164,10 +168,11 @@ class ParentRefinementWorkflow:
                         self.service.intake._release(state['initial_lease'])
 
     def _run(self, operation, proof, previous, lemma, budget, *, expected_revision, expected_theorem_hash,
-             deadline, cancelled, on_progress):
+             deadline, cancelled, on_progress, replay_budget):
         service = self.service
         request = {'proof_id': proof, 'previous_declaration_id': previous, 'lemma_claim_id': lemma,
             'budget': budget, 'expected_revision': expected_revision, 'expected_theorem_hash': expected_theorem_hash}
+        if replay_budget:request['replay_budget']=replay_budget
         with service.lock:
             service.catch_up(proof)
             state = service.jobs.refinement_state(operation)
@@ -229,7 +234,7 @@ class ParentRefinementWorkflow:
                 state.update(phase='search-ready', declaration_id=prepared['declaration_id'], revision=prepared['revision'])
                 self._save(operation, state)
         result = service.cycles.run(operation, proof, declaration_id=state['declaration_id'], budget=budget,
-            expected_revision=state['revision'], cancelled=stopped, on_progress=on_progress)
+            expected_revision=state['revision'], cancelled=stopped, on_progress=on_progress,replay_budget=replay_budget)
         result = {**result, 'refinement_artifact': state['lineage_artifact'],
             'previous_declaration_id': previous, 'declaration_id': state['declaration_id']}
         with service.lock:

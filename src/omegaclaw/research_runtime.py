@@ -64,8 +64,10 @@ class ResearchWorkflow:
 
         run_id = obstruction.fields.get("formal_run_id")
         run = service.view.node(run_id) if isinstance(run_id, str) else None
-        if run is None or run.label != "FormalRun" or run.fields.get("status") != "stagnated":
-            raise ContractError("research requires an obstruction from a stagnated formal run")
+        if run is None or run.label != "FormalRun" or run.fields.get("status") not in {'stagnated','budget-exhausted'}:
+            raise ContractError("research requires a committed unsuccessful formal run")
+        if run.fields.get('status') == 'budget-exhausted' and obstruction.fields.get('kind') != 'resource':
+            raise ContractError('budget exhaustion must retain its resource classification')
         raised_by = service.view.edges_to(obstruction_id, "RAISED_OBSTRUCTION")
         if len(raised_by) != 1 or raised_by[0].src_id != run_id:
             raise ContractError("obstruction does not uniquely match its formal run")
@@ -263,7 +265,7 @@ class ResearchWorkflow:
             raise ContractError("completed research operation has no committed hypotheses")
         return None
 
-    def run(self, proof_id: str, obstruction_id: str, operation_id: str) -> dict[str, Any]:
+    def run(self, proof_id: str, obstruction_id: str, operation_id: str, *, cancelled=lambda: False) -> dict[str, Any]:
         service = self.service
         with service.lock:
             # A journal append may have succeeded before projection or the
@@ -326,10 +328,17 @@ class ResearchWorkflow:
                 service.jobs.save_research(operation_id, state)
 
         try:
+            if cancelled():
+                return {'proof_id':proof_id,'lifecycle':'cancelled'}
             if "response" not in state:
                 if state.get("provider", self.config.provider) != self.config.provider:
                     raise ContractError("research provider changed before generation; reconcile the saved operation")
                 try:
+                    from .bounded_ledger import BoundedLedger,BoundedBlocked
+                    if BoundedLedger(service.jobs).child_owner(operation_id):
+                        if state.get('bounded_generation_started'):
+                            raise BoundedBlocked('research response delivery is uncertain; retain the original bounded step')
+                        state['bounded_generation_started']=True;self._save(operation_id,state)
                     llm = self._llm_factory()
                     response = llm.generate_json(
                         _SYSTEM_PROMPT,
@@ -343,6 +352,9 @@ class ResearchWorkflow:
                 self._save(operation_id, state)
             else:
                 candidates = self._validate_response({"candidates": state["response"]}, allow_legacy=True)
+
+            if cancelled():
+                return {'proof_id':proof_id,'lifecycle':'cancelled'}
 
             with service.lock:
                 if "result_artifact" not in state:

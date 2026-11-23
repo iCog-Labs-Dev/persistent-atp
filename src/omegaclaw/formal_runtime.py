@@ -31,6 +31,13 @@ class ReplayReconciliationRequired(FormalV2Error):
     public_summary = 'Independent replay delivery is uncertain; reconcile its receipt before authorizing another replay.'
 
 
+class LemmaUsageRejected(FormalV2Error):
+    public_summary = 'Independent parent replay did not use the selected verified lemma; the parent remains unpromoted.'
+
+    def __init__(self):
+        super().__init__(self.public_summary, code='VERIFIED_LEMMA_NOT_USED')
+
+
 class ContractMigrationRequired(FormalV2Error):
     public_summary = 'This operation uses an earlier formal contract; reconcile it before starting a new operation.'
 
@@ -252,7 +259,7 @@ class FormalWorkflow:
             self._save(operation, state)
         return receipt
 
-    def _prepare(self, operation, proof, claim, budget, client, deployment, *, selection=None):
+    def _prepare(self, operation, proof, claim, budget, client, deployment, *, selection=None, replay_budget=None):
         identity, profile, selected = deployment
         service = self.service
         declarations = [edge.dst_id for edge in service.view.edges_from(claim, 'FORMALIZES')]
@@ -360,33 +367,40 @@ class FormalWorkflow:
         return {'contract_manifest': MANIFEST_HASH, 'phase': 'prepared', 'run_id': run, 'proof_id': proof, 'claim_id': claim,
             'provider_url': self.config.url, 'request': request, 'search_lease': lease.to_dict(),
             **({'selected_move_id': selection['selected_move_id'], 'operation_kind': 'proof-cycle'} if selection else {}),
-            'replay_steps': min(self.config.replay_steps, selected['verification']['max_steps']),
-            'replay_wall_clock_ms': min(self.config.replay_wall_clock_ms, selected['verification']['wall_clock_ms']),
+            'replay_steps': min(self.config.replay_steps, selected['verification']['max_steps'],
+                replay_budget['max_steps'] if replay_budget else self.config.replay_steps),
+            'replay_wall_clock_ms': min(self.config.replay_wall_clock_ms, selected['verification']['wall_clock_ms'],
+                replay_budget['wall_clock_ms'] if replay_budget else self.config.replay_wall_clock_ms),
+            **({'replay_request_budget': replay_budget} if replay_budget else {}),
             'packet_artifact': packet, 'deadline': time.time() + self.config.wall_clock_ms / 1000 + 120,
             **({'lemma_reuse': reuse} if reuse is not None else {})}
 
     def run_selected(self, operation, selection, *, cancelled=lambda: False, on_progress=None):
         """Execute a durable scheduler selection through the same provider workflow."""
         return self.run(operation, selection['proof_id'], selection['claim_id'], selection['budget'],
-            cancelled=cancelled, on_progress=on_progress, selection=selection)
+            cancelled=cancelled, on_progress=on_progress, selection=selection,
+            replay_budget=selection.get('replay_budget'))
 
     def run(self, operation, proof, claim, budget, cancelled=lambda: False, expected_revision=None, on_progress=None,
-            *, selection=None):
+            *, selection=None, replay_budget=None):
         with self.service.lock:
             self._callbacks[operation] = on_progress
         try:
-            return self._run(operation, proof, claim, budget, cancelled, expected_revision, selection=selection)
+            return self._run(operation, proof, claim, budget, cancelled, expected_revision,
+                selection=selection, replay_budget=replay_budget)
         finally:
             with self.service.lock:
                 self._callbacks.pop(operation, None)
 
-    def _run(self, operation, proof, claim, budget, cancelled, expected_revision, *, selection=None):
+    def _run(self, operation, proof, claim, budget, cancelled, expected_revision, *, selection=None, replay_budget=None):
         service, client = self.service, self.client()
         state = self._load(operation)
         if state and state.get('contract_manifest') != MANIFEST_HASH:
             raise ContractMigrationRequired()
         if state and state['provider_url'] != self.config.url:
             raise FormalV2Error('configured provider changed during an admitted operation')
+        if state and state.get('replay_request_budget') != replay_budget:
+            raise FormalV2Error('saved replay allowance changed')
         if cancelled() and not state:
             return {'proof_id': proof, 'lifecycle': 'cancelled', 'component_mode': 'formal-v2-' + self.config.mode}
         if not state:
@@ -395,7 +409,7 @@ class FormalWorkflow:
                 if expected_revision is not None and service.store.head(proof)[0] != expected_revision:
                     raise FormalV2Error('proof changed before formal dispatch; reconsider the original intent')
                 state = self._prepare(operation, proof, claim, budget, client, deployment,
-                    **({'selection': selection} if selection is not None else {}))
+                    **({'selection': selection} if selection is not None else {}), replay_budget=replay_budget)
                 self._save(operation, state)  # BEFORE any provider mutation.
         run = state['run_id']
         client.restore_prepared(state['request'])
@@ -461,7 +475,7 @@ class FormalWorkflow:
                 raise FormalV2Error('formal observation deadline exceeded; retain original request for reconciliation')
             time.sleep(self.config.poll_seconds)
         result = state['binding']['snapshot']['result']
-        if not cancelled() and result['disposition'] == 'stagnated':
+        if not cancelled() and result['disposition'] in {'stagnated', 'budget-exhausted'}:
             from .obstruction_runtime import prepare_obstruction_context
             prepare_obstruction_context(self, operation, state)
         if cancelled() or result['disposition'] != 'proved-pending-replay':
@@ -581,7 +595,12 @@ class FormalWorkflow:
             state['lemma_use_audit_artifact'] = service.artifacts.put(canonical_json(audit))
             self._save(operation, state)  # BEFORE promoting the parent claim.
         audit = json.loads(_artifact(service, state['lemma_use_audit_artifact']))
-        if any(audit.get(key) != value for key, value in expected.items()) or audit.get('used') is not True:
+        if any(audit.get(key) != value for key, value in expected.items()):
+            raise FormalV2Error('parent lemma usage audit binding changed')
+        if (audit.get('used') is False and audit.get('exit_code') != 0
+                and 'VERIFIED_LEMMA_NOT_USED' in audit.get('diagnostics','')):
+            raise LemmaUsageRejected()
+        if audit.get('used') is not True:
             raise FormalV2Error('independent parent replay did not use the selected verified lemma')
 
     def _report(self, state, lifecycle='succeeded'):

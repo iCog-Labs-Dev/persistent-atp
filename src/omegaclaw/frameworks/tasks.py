@@ -13,7 +13,8 @@ import json
 import math
 import threading
 
-from persistent_atp_client.models import TERMINAL_LIFECYCLES, ArtifactRef, OperationRef, Preconditions, ProofCycle
+from persistent_atp_client.models import TERMINAL_LIFECYCLES, ArtifactRef, OperationRef, Preconditions, ProofCycle, RefinementPolicy, Budget, refinement_policy_from_dict
+from persistent_atp_client.codecs import to_dict
 from persistent_atp_client.errors import ClientError, ReceiverProtocolError, StalePrecondition
 
 from ..specification import parse_json, validate_spec
@@ -21,7 +22,7 @@ from ..specification import parse_json, validate_spec
 
 READ_ONLY_KINDS = frozenset({'proof-status', 'proof-audit', 'proof-export'})
 MATHEMATICAL_KINDS = frozenset({'proof-cycle', 'formal-search', 'formal-resume', 'lemma-bridge',
-    'statement-align', 'hypothesis-formalize', 'hypothesis-revise', 'parent-refine'})
+    'statement-align', 'hypothesis-formalize', 'hypothesis-revise', 'parent-refine','bounded-refine'})
 
 
 def _identity(*parts):
@@ -49,7 +50,8 @@ class TaskWorkflow:
             raise ValueError("task message ID must be a bounded string")
         if not isinstance(request, dict) or set(request) - {
             "spec", "workspace", "max_cycles", "max_research", "timeout_seconds", "reply_prefix",
-            "proof_id", "expected_revision", "expected_theorem_hash"
+            "proof_id", "expected_revision", "expected_theorem_hash",
+            'refinement_policy','refinement_budget'
         }:
             raise ValueError("invalid persistent_atp task fields")
         spec = validate_spec(request.get("spec"))
@@ -69,6 +71,18 @@ class TaskWorkflow:
             raise ValueError("reply prefix must be a bounded single line")
         normalized = {"spec": spec, "workspace": workspace, "max_cycles": cycles,
                       "max_research": research, "timeout_seconds": timeout, "reply_prefix": prefix}
+        if request.get('refinement_policy') is not None:
+            if request['refinement_policy']!='bounded-v1' or not 1<=cycles<=2:
+                raise ValueError('bounded-v1 requires one or two parent attempts')
+            raw=request.get('refinement_budget')
+            policy=(refinement_policy_from_dict(raw) if raw is not None else
+                RefinementPolicy(Budget(48,30000),Budget(48,30000),Budget(48,30000),Budget(64,15000),
+                    144,128,cycles,research))
+            if policy.max_parent_attempts!=cycles or policy.max_research!=research:
+                raise ValueError('bounded policy allowances differ from task limits')
+            normalized.update(refinement_policy='bounded-v1',refinement_budget=to_dict(policy))
+        elif 'refinement_budget' in request:
+            raise ValueError('refinement_budget requires explicit bounded-v1 policy')
         proof = request.get("proof_id")
         pins = {"proof_id", "expected_revision", "expected_theorem_hash"}
         if pins & set(request):
@@ -150,6 +164,10 @@ class TaskWorkflow:
         if row["state"] in {"rejected", "needs-input"} or row.get("retry_exhausted"):
             return {"error": row.get("last_error", {"error_code": "STEP_REQUIRES_RECONCILIATION"})}
         snapshot = row.get("snapshot")
+        if kind=='bounded-refine' and snapshot:
+            result=snapshot.get('result') or {}
+            self._patch(task['id'],cycles=result.get('cycles_used',task['cycles']),
+                research=result.get('research_used',task['research']))
         if snapshot and snapshot["lifecycle"] in TERMINAL_LIFECYCLES:
             unsettled = kind not in READ_ONLY_KINDS and self._settlement(snapshot, row) is not True
             if snapshot["lifecycle"] != "succeeded" or unsettled:
@@ -313,6 +331,28 @@ class TaskWorkflow:
         elif phase == "cycle":
             if not task["request"]["max_cycles"]:
                 self._finish_step(task, "status", None, reason="TASK_CYCLE_LIMIT_REACHED")
+                return
+            if task['request'].get('refinement_policy')=='bounded-v1':
+                if not task.get('bounded_input'):
+                    status=self.adapter.status(proof)
+                    created=self.state.snapshot()['intents'].get(task['steps'].get('create'),{})
+                    expected=task['request'].get('expected_revision',
+                        ((created.get('snapshot') or {}).get('result') or {}).get('revision'))
+                    target=task['request'].get('expected_theorem_hash',status['target_artifact']['hash'])
+                    raw=self.adapter.client.get_artifact(ArtifactRef(**status['target_artifact']),workspace_id=self.adapter.workspace)
+                    if validate_spec(parse_json(raw.decode('utf-8')))!=task['request']['spec']:
+                        raise StalePrecondition('bounded task committed specification differs from original intent')
+                    if status['revision']!=expected or status['target_artifact']['hash']!=target:
+                        raise StalePrecondition('bounded task initial proof identity changed')
+                    self._patch(identity,bounded_input={'proof':proof,'policy':json.dumps(task['request']['refinement_budget']),
+                        'expected_revision':str(expected),'expected_theorem_hash':target})
+                    task=self.state.snapshot()['tasks'][identity]
+                outcome=self._step(task,'bounded-refinement','bounded-refine',task['bounded_input'])
+                if outcome is not None:
+                    result=outcome.get('result') or {}
+                    self._finish_step(task,'status',outcome,cycle_result=result,
+                        reason=(outcome.get('error') or {}).get('error_code') or result.get('reason','BOUNDED_REFINEMENT_FINISHED'),
+                        cycles=result.get('cycles_used',task['cycles']),research=result.get('research_used',task['research']))
                 return
             # An automatic cycle includes intake, alignment, search and replay.
             # No second identical search is justified solely by exhaustion.
@@ -570,7 +610,9 @@ class TaskWorkflow:
                 "result_artifact", "packet_artifact", "error_code", "clarification_reasons", "required_work",
                 "cycle_disposition", "mathematical_disposition", "formalization_disposition", "replay_status",
                 "budget", 'summary', 'run_id', 'claim_id', 'execution_settled', 'execution_reconciliation',
-                'lemma_use_audit_artifact', 'refinement_artifact', 'previous_declaration_id', 'declaration_id') if key in value}
+                'lemma_use_audit_artifact', 'refinement_artifact', 'previous_declaration_id', 'declaration_id',
+                'bounded_audit_artifact','bounded_usage','cycles_used','research_used','candidate_attempts',
+                'selected_hypothesis_id','reason') if key in value}
             fields["rendering_incomplete"] = set(value) - set(fields) != set()
             for key, item in list(fields.items()):
                 if len(json.dumps(item, ensure_ascii=False).encode()) > 2048:

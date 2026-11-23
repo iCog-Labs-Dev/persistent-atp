@@ -25,7 +25,7 @@ from persistent_atp_client.errors import (
 from persistent_atp_client.models import (
     action_types_for_contract, ActionRequest, Admission, ArtifactRef, BudgetAmendment,
     CancelRequest, SearchReconciliationRequest, SearchReconciliationJob, CapabilitySet, DecisionResponse, Event, FormalResume,
-    FormalSearch, HypothesisFormalize, HypothesisRevise, ParentRefine, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
+    FormalSearch, HypothesisFormalize, HypothesisRevise, ParentRefine, BoundedRefine, LemmaBridge, OperationRef, OperationSnapshot, ProofAudit,
     ProofCreate, ProofCycle, ProofExport, ProofStatus, ProjectDigest,
     StatementAlign, TERMINAL_LIFECYCLES, SelectedProofCycle, QueueResearchMoves,
     CoordinationPage, CoordinationItem,
@@ -190,7 +190,7 @@ class ReferenceReceiver:
                 self._formal_readiness()
 
     async def capabilities(self, contract_version: str = "2.0") -> CapabilitySet:
-        if contract_version not in {"2.0", "2.1", "2.2", "2.3"}:
+        if contract_version not in {"2.0", "2.1", "2.2", "2.3", "2.4"}:
             raise UnsupportedCapability("unsupported contract version")
         actions = action_types_for_contract(contract_version)
         readiness = self._formal_readiness()
@@ -204,7 +204,7 @@ class ReferenceReceiver:
                 *({'formal-search', 'proof-cycle', 'proof-cycle-selected'} if supports_formal else set()),
                 *({'lemma-bridge'} if self.service.research is not None else set()),
                 *({'hypothesis-formalize', 'hypothesis-revise'} if self.service.intake is not None else set()),
-                *({'parent-refine'} if self.service.refinement is not None else set())}}
+                *({'parent-refine','bounded-refine'} if self.service.refinement is not None else set())}}
         elif self.service.formal is not None:
             actions = {kind: value for kind, value in actions.items() if kind != 'formal-resume'
                        and (kind != 'formal-search' or supports_formal)}
@@ -214,6 +214,9 @@ class ReferenceReceiver:
         if (self.service.refinement is None or self.service.intake.config.lemma_reuse == 'disabled'
                 or not self.service.formal.config.reuse_lean or not supports_formal):
             actions.pop('parent-refine', None)
+            actions.pop('bounded-refine',None)
+        if self.service.bounded is None or self.service.formal is None or self.service.formal.config.mode!='real':
+            actions.pop('bounded-refine',None)
         controls = {'coordination-read'} if contract_version == '2.1' else set()
         if self.service.formal is not None:
             controls.add('cancel')
@@ -250,7 +253,7 @@ class ReferenceReceiver:
         capabilities = await self.capabilities(request.contract_version)
         if request.action.kind not in capabilities.actions:
             raise UnsupportedCapability("action is unavailable under this contract version")
-        formal_action = isinstance(request.action, (FormalSearch, ParentRefine)) or (
+        formal_action = isinstance(request.action, (FormalSearch, ParentRefine,BoundedRefine)) or (
             self.service.cycles is not None and isinstance(request.action, (ProofCycle, SelectedProofCycle)))
         if formal_action and self.service.formal is not None and self._formal_readiness() is not True:
             raise TransientUnavailable('formal provider readiness is pending; retry the original request')
@@ -270,6 +273,10 @@ class ReferenceReceiver:
                 proof_id = None
         if proof_id is not None:
             with self._service_lock:
+                from .bounded_ledger import BoundedLedger
+                if (BoundedLedger(self.service.jobs).owner(proof_id) and
+                        not isinstance(request.action,(ProofStatus,ProofAudit,ProofExport))):
+                    raise ReviewRequired('a bounded refinement task owns this proof')
                 revision = self.service.store.head(proof_id)[0]
                 if pre.expected_revision is not None and revision != pre.expected_revision:
                     raise StalePrecondition("proof revision differs from precondition", request_id=request.request_id)
@@ -363,6 +370,11 @@ class ReferenceReceiver:
                 'lemma': action.lemma_claim_id, 'budget': json.dumps(to_dict(action.budget)),
                 'expected_revision': str(request.preconditions.expected_revision),
                 'expected_theorem_hash': request.preconditions.expected_theorem_hash}
+        elif isinstance(action,BoundedRefine):
+            args={'proof':action.proof_id,'policy':json.dumps(to_dict(action.policy)),
+                'expected_revision':str(request.preconditions.expected_revision),
+                'expected_theorem_hash':request.preconditions.expected_theorem_hash,
+                'deadline':request.deadline.isoformat()}
         else: raise TypeError("unknown action")
         return {"schema_version": 1, "request_id": request.request_id,
                 "workspace": self.workspace_id, "operation": action.kind, "arguments": args}
@@ -387,7 +399,8 @@ class ReferenceReceiver:
             request = request_from_json(row["body"])
             native_cycle = isinstance(request.action, (ProofCycle, SelectedProofCycle)) and self.service.cycles is not None
             native_refinement = isinstance(request.action, ParentRefine) and self.service.refinement is not None
-            if (isinstance(request.action, FormalSearch) and self.service.formal is not None) or native_cycle or native_refinement:
+            native_bounded=isinstance(request.action,BoundedRefine) and self.service.bounded is not None
+            if (isinstance(request.action, FormalSearch) and self.service.formal is not None) or native_cycle or native_refinement or native_bounded:
                 raw = self._legacy_request(request)
                 with self._service_lock:
                     job, _ = self.service.jobs.submit(raw)
@@ -398,7 +411,13 @@ class ReferenceReceiver:
                         with self._lock:
                             return self._db.execute('SELECT lifecycle FROM requests WHERE operation_id=?',
                                 (operation_id,)).fetchone()['lifecycle'] == 'cancelling'
-                    if native_refinement:
+                    if native_bounded:
+                        action=request.action
+                        outcome=self.service.bounded.run(job['operation_id'],action.proof_id,to_dict(action.policy),
+                            expected_revision=request.preconditions.expected_revision,
+                            theorem_hash=request.preconditions.expected_theorem_hash,deadline=request.deadline.timestamp(),
+                            cancelled=cancelled,on_progress=lambda report:self._progress(operation_id,report))
+                    elif native_refinement:
                         action = request.action
                         outcome = self.service.refinement.run(job['operation_id'], action.proof_id,
                             action.previous_declaration_id, action.lemma_claim_id, to_dict(action.budget),
@@ -429,6 +448,14 @@ class ReferenceReceiver:
             outcome = {'error_code': getattr(exc, 'code', None) or type(exc).__name__,
                 'summary': getattr(exc, 'public_summary',
                     'Operation requires reconciliation; no mathematical outcome is inferred.')}
+            if isinstance(request.action,BoundedRefine) and job is not None:
+                with self._service_lock:
+                    from .bounded_ledger import BoundedLedger
+                    ledger=BoundedLedger(self.service.jobs);task=job['operation_id']
+                    outcome.update(bounded_usage=ledger.usage(task),
+                        cycles_used=sum(ledger.step(task,name) is not None for name in ('initial','refine')),
+                        research_used=int(ledger.step(task,'research') is not None),
+                        candidate_attempts=int(ledger.step(task,'verify') is not None))
             if job is not None:
                 with self._service_lock:
                     self.service.jobs.update(job['operation_id'], {**outcome, 'phase': 'failed',
@@ -543,10 +570,11 @@ class ReferenceReceiver:
                             break
                     else:
                         pointers.extend(outcome[key] for key in ('packet_artifact', 'result_artifact'))
-            if isinstance(action, (FormalSearch, ProofCycle, SelectedProofCycle, ParentRefine)):
+            if isinstance(action, (FormalSearch, ProofCycle, SelectedProofCycle, ParentRefine,BoundedRefine)):
                 claim = outcome.get('claim_id')
                 if isinstance(claim, str) and claim.startswith(proof + '/'):
-                    for key, format_ in (('lemma_use_audit_artifact', 'persistent-atp-lemma-use-audit-v1'),
+                    for key, format_ in (('bounded_audit_artifact','persistent-atp-bounded-refinement-v1'),
+                                         ('lemma_use_audit_artifact', 'persistent-atp-lemma-use-audit-v1'),
                                          ('refinement_artifact', 'persistent-atp-parent-refinement-v1')):
                         ref = outcome.get(key)
                         node = self.service.view.node(ref) if isinstance(ref, str) else None
@@ -744,7 +772,7 @@ class ReferenceReceiver:
             row = self._db.execute('SELECT * FROM requests WHERE operation_id=?', (ref.operation_id,)).fetchone()
             action = request_from_json(row['body']).action
             if not (isinstance(action, FormalSearch) or self.service.cycles is not None
-                    and isinstance(action, (ProofCycle, SelectedProofCycle, ParentRefine))):
+                    and isinstance(action, (ProofCycle, SelectedProofCycle, ParentRefine,BoundedRefine))):
                 raise UnsupportedCapability('operation has no configured cancellation handler')
             previous = self._db.execute('SELECT body FROM controls WHERE principal=? AND workspace_id=? AND request_id=?',
                 (self.principal, self.workspace_id, control.request_id)).fetchone()
